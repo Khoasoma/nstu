@@ -69,6 +69,72 @@ std::optional<CommandEnvelope> decode_command_header(
     return envelope;
 }
 
+std::vector<std::byte> encode_connection_preamble(
+    const ConnectionPreamble& preamble) {
+    if (preamble.preamble_bytes != kConnectionPreambleBytes ||
+        preamble.reserved != 0 ||
+        (preamble.role != ConnectionRole::client &&
+         preamble.role != ConnectionRole::server)) {
+        return {};
+    }
+    std::vector<std::byte> wire(kConnectionPreambleBytes);
+    std::size_t offset = 0;
+    write_le<std::uint32_t>(wire, offset, kMagic);
+    write_le<std::uint16_t>(wire, offset, preamble.version);
+    wire[offset++] = static_cast<std::byte>(preamble.role);
+    wire[offset++] = static_cast<std::byte>(preamble.flags);
+    write_le<std::uint16_t>(wire, offset, preamble.preamble_bytes);
+    write_le<std::uint16_t>(wire, offset, preamble.reserved);
+    write_le<std::uint32_t>(wire, offset, preamble.key_id);
+    std::copy(preamble.identity.begin(), preamble.identity.end(),
+              wire.begin() + static_cast<std::ptrdiff_t>(offset));
+    return wire;
+}
+
+std::optional<ConnectionPreamble> decode_connection_preamble(
+    std::span<const std::byte> wire) {
+    if (wire.size() != kConnectionPreambleBytes) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    std::uint32_t magic = 0;
+    ConnectionPreamble preamble;
+    std::uint8_t role = 0;
+    if (!read_le(wire, offset, magic) || magic != kMagic ||
+        !read_le(wire, offset, preamble.version) ||
+        offset + 2 > wire.size()) {
+        return std::nullopt;
+    }
+    role = std::to_integer<std::uint8_t>(wire[offset++]);
+    preamble.role = static_cast<ConnectionRole>(role);
+    preamble.flags = std::to_integer<std::uint8_t>(wire[offset++]);
+    if (!read_le(wire, offset, preamble.preamble_bytes) ||
+        !read_le(wire, offset, preamble.reserved) ||
+        !read_le(wire, offset, preamble.key_id) ||
+        offset + preamble.identity.size() != wire.size() ||
+        preamble.version != kCommandVersion ||
+        preamble.preamble_bytes != kConnectionPreambleBytes ||
+        preamble.reserved != 0 ||
+        (preamble.role != ConnectionRole::client &&
+         preamble.role != ConnectionRole::server)) {
+        return std::nullopt;
+    }
+    std::copy_n(wire.begin() + static_cast<std::ptrdiff_t>(offset),
+                preamble.identity.size(), preamble.identity.begin());
+    const bool identity_present = std::any_of(
+        preamble.identity.begin(), preamble.identity.end(),
+        [](std::byte value) { return value != std::byte{0}; });
+    if (preamble.role == ConnectionRole::client &&
+        (!identity_present || preamble.key_id == 0)) {
+        return std::nullopt;
+    }
+    if (preamble.role == ConnectionRole::server &&
+        (identity_present || preamble.key_id != 0)) {
+        return std::nullopt;
+    }
+    return preamble;
+}
+
 std::vector<std::byte> encode_video_header(const VideoPacketHeader& header) {
     std::vector<std::byte> wire(kVideoHeaderBytes);
     std::size_t offset = 0;

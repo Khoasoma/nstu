@@ -36,6 +36,15 @@ handshake returns a move-only `AuthenticatedSession`; moving it into
 `AuthenticatedControlChannel` transfers the session key and clears the source.
 Handshake message types are rejected after channel establishment.
 
+Before the first length-prefixed command frame, both peers exchange a fixed
+32-byte connection preamble. It contains the protocol magic/version, role,
+`client_id`, and `key_id`. The server can reject malformed, wrong-role, or
+identity-mismatched connections before allocating a command payload or running
+the HMAC proof. Preamble identity is an admission hint only: it is checked
+against `AuthHello` and is never trusted without the subsequent HMAC proof.
+Preamble parsing is fixed-size and allocation-free; deployments should apply a
+short read timeout and per-source rate limit at this boundary.
+
 For local key material, `protect_machine_secret` and
 `unprotect_machine_secret` use Windows DPAPI with `CRYPTPROTECT_LOCAL_MACHINE`.
 `save_machine_secret` writes an ACL-restricted temporary file, flushes it, and

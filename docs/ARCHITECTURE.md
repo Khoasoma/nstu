@@ -37,6 +37,10 @@ Control authentication uses a nonce-based mutual HMAC handshake, derived
 session keys, strict per-direction command sequences, and replay protection.
 See `docs/SECURITY.md`.
 
+Each TCP connection begins with a fixed-size role/version preamble carrying the
+client identity hint and key ID. It is a cheap admission filter and does not
+replace cryptographic authentication.
+
 ## Packet loss
 
 Video protocol v2 includes a monotonic packet sequence independent of frame and

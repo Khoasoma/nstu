@@ -23,6 +23,23 @@ int main() {
     assert(decoded_command->payload_bytes == command.payload_bytes);
     assert(decoded_command->request_id == command.request_id);
 
+    ConnectionPreamble preamble;
+    preamble.role = ConnectionRole::client;
+    preamble.key_id = 42;
+    for (std::size_t index = 0; index < preamble.identity.size(); ++index) {
+        preamble.identity[index] = static_cast<std::byte>(index + 1);
+    }
+    const auto preamble_wire = encode_connection_preamble(preamble);
+    assert(preamble_wire.size() == kConnectionPreambleBytes);
+    const auto decoded_preamble = decode_connection_preamble(preamble_wire);
+    assert(decoded_preamble.has_value());
+    assert(decoded_preamble->role == ConnectionRole::client);
+    assert(decoded_preamble->key_id == preamble.key_id);
+    assert(decoded_preamble->identity == preamble.identity);
+    auto invalid_preamble = preamble_wire;
+    invalid_preamble[6] = std::byte{0xff};
+    assert(!decode_connection_preamble(invalid_preamble).has_value());
+
     const VideoPacketHeader video{
         .version = kVideoVersion,
         .flags = VideoFlags::keyframe,

@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <optional>
 #include <span>
 #include <string>
@@ -14,6 +15,7 @@ inline constexpr std::uint16_t kCommandVersion = 1;
 inline constexpr std::uint16_t kVideoVersion = 2;
 inline constexpr std::uint16_t kVersion = kCommandVersion;
 inline constexpr std::size_t kCommandHeaderBytes = 20;
+inline constexpr std::size_t kConnectionPreambleBytes = 32;
 inline constexpr std::size_t kVideoHeaderBytes = 44;
 inline constexpr std::uint32_t kMaxCommandPayload = 64u * 1024u;
 inline constexpr std::size_t kMaxTcpBufferedBytes =
@@ -31,6 +33,21 @@ enum class CommandType : std::uint16_t {
     auth_challenge = 9,
     auth_proof = 10,
     auth_accept = 11,
+};
+
+enum class ConnectionRole : std::uint8_t {
+    client = 1,
+    server = 2,
+};
+
+struct ConnectionPreamble {
+    std::uint16_t version = kCommandVersion;
+    ConnectionRole role = ConnectionRole::client;
+    std::uint8_t flags = 0;
+    std::uint16_t preamble_bytes = kConnectionPreambleBytes;
+    std::uint16_t reserved = 0;
+    std::uint32_t key_id = 0;
+    std::array<std::byte, 16> identity{};
 };
 
 enum class VideoFlags : std::uint16_t {
@@ -62,6 +79,12 @@ struct VideoPacketHeader {
     const CommandEnvelope& envelope);
 
 [[nodiscard]] std::optional<CommandEnvelope> decode_command_header(
+    std::span<const std::byte> wire);
+
+[[nodiscard]] std::vector<std::byte> encode_connection_preamble(
+    const ConnectionPreamble& preamble);
+
+[[nodiscard]] std::optional<ConnectionPreamble> decode_connection_preamble(
     std::span<const std::byte> wire);
 
 [[nodiscard]] std::vector<std::byte> encode_video_header(

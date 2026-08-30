@@ -10,6 +10,7 @@
 - [x] Reorder-aware packet-loss estimator and server health hysteresis.
 - [x] Mutual HMAC handshake, replay cache, control/video MAC primitives.
 - [x] Live blocking TCP handshake and authenticated control channel.
+- [x] Fixed connection preamble for early role/version/identity filtering.
 - [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.

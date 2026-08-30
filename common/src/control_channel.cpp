@@ -51,6 +51,35 @@ bool receive_exact(net::TcpSocket& socket, std::span<std::byte> output,
     return true;
 }
 
+bool send_preamble(net::TcpSocket& socket, protocol::ConnectionRole role,
+                   const security::ClientId& identity, std::uint32_t key_id,
+                   std::string* error) {
+    protocol::ConnectionPreamble preamble;
+    preamble.role = role;
+    preamble.key_id = key_id;
+    preamble.identity = identity;
+    if (role == protocol::ConnectionRole::server) {
+        preamble.key_id = 0;
+        preamble.identity.fill(std::byte{0});
+    }
+    const auto wire = protocol::encode_connection_preamble(preamble);
+    return !wire.empty() &&
+           socket.send_all(wire, error) == static_cast<int>(wire.size());
+}
+
+std::optional<protocol::ConnectionPreamble> receive_preamble(
+    net::TcpSocket& socket, std::string* error) {
+    std::array<std::byte, protocol::kConnectionPreambleBytes> wire{};
+    if (!receive_exact(socket, wire, error)) {
+        return std::nullopt;
+    }
+    auto preamble = protocol::decode_connection_preamble(wire);
+    if (!preamble) {
+        set_error(error, "invalid connection preamble");
+    }
+    return preamble;
+}
+
 std::optional<protocol::TcpFrame> receive_plain_frame(net::TcpSocket& socket,
                                                       std::string* error) {
     std::array<std::byte, sizeof(std::uint32_t)> prefix{};
@@ -176,8 +205,16 @@ std::optional<AuthenticatedSession> client_handshake(
     }
     const auto request_id = random_request_id();
     if (request_id == 0 ||
+        !send_preamble(socket, protocol::ConnectionRole::client, client_id,
+                       key_id, error) ||
         !send_plain_frame(socket, protocol::CommandType::auth_hello, request_id,
                           security::encode_auth_hello(hello), error)) {
+        return std::nullopt;
+    }
+    const auto server_preamble = receive_preamble(socket, error);
+    if (!server_preamble ||
+        server_preamble->role != protocol::ConnectionRole::server) {
+        set_error(error, "invalid server connection preamble");
         return std::nullopt;
     }
     const auto challenge_frame = receive_plain_frame(socket, error);
@@ -235,6 +272,11 @@ std::optional<AuthenticatedSession> server_handshake(
     net::TcpSocket& socket, const KeyResolver& key_resolver,
     security::ReplayProtector& replay_protector,
     std::uint64_t now_unix_seconds, std::string* error) {
+    const auto preamble = receive_preamble(socket, error);
+    if (!preamble || preamble->role != protocol::ConnectionRole::client) {
+        set_error(error, "expected client connection preamble");
+        return std::nullopt;
+    }
     const auto hello_frame = receive_plain_frame(socket, error);
     if (!hello_frame ||
         hello_frame->envelope.type != protocol::CommandType::auth_hello) {
@@ -244,6 +286,11 @@ std::optional<AuthenticatedSession> server_handshake(
     const auto hello = security::decode_auth_hello(hello_frame->payload);
     if (!hello || !security::validate_auth_hello(*hello)) {
         set_error(error, "invalid authentication hello");
+        return std::nullopt;
+    }
+    if (hello->client_id != preamble->identity ||
+        hello->key_id != preamble->key_id) {
+        set_error(error, "connection preamble identity mismatch");
         return std::nullopt;
     }
     auto pre_shared_key = key_resolver(hello->client_id, hello->key_id);
@@ -260,6 +307,8 @@ std::optional<AuthenticatedSession> server_handshake(
     security::AuthChallenge challenge;
     challenge.unix_time_seconds = now_unix_seconds;
     if (!security::generate_random(challenge.server_nonce) ||
+        !send_preamble(socket, protocol::ConnectionRole::server, {}, 0,
+                       error) ||
         !send_plain_frame(socket, protocol::CommandType::auth_challenge,
                           hello_frame->envelope.request_id,
                           security::encode_auth_challenge(challenge), error)) {
