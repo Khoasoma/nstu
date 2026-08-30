@@ -41,8 +41,8 @@ model và các hạng mục production chưa hoàn thành tại
 - Broadcast màn hình giáo viên bằng H.264 và UDP multicast để băng thông LAN
   không tăng tuyến tính theo số client.
 - Fallback sang unicast khi chất lượng multicast liên tục không đạt yêu cầu.
-- Hiển thị trạng thái client, độ trễ, packet loss, preview 15 FPS và chat trên
-  server.
+- Hiển thị screen wall responsive của toàn bộ client với target refresh điều
+  chỉnh từ 5-15 FPS, cùng telemetry, điều khiển và chat tập trung cho một máy.
 - Chạy Windows Service nhỏ và Win32 tray/chat agent native trên client.
 - Xác thực lệnh điều khiển và video mà không cần JSON, XML, Electron hay driver
   kernel tùy biến.
@@ -118,9 +118,12 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
    ```
 
 Dashboard không tự chèn dữ liệu demo. Registry client khởi động ở trạng thái
-trống và chỉ hiển thị record do runtime registry cung cấp. `Start stream`,
-`Lock`, `Request keyframe` và chat chỉ khả dụng khi có record client thật;
-routing qua control plane vẫn đang được tích hợp.
+trống và chỉ hiển thị record do runtime registry cung cấp. Giáo viên có thể
+chuyển giữa `Room screens`, hiển thị toàn bộ client phù hợp trong screen wall
+responsive, và `Selected client`, tập trung telemetry, điều khiển stream và chat
+cho một máy. Target refresh của screen wall điều chỉnh được từ 5-15 FPS; nên bắt
+đầu ở 5 FPS cho phòng 50 client cho đến khi hoàn tất soak test decoder và mạng.
+Routing control plane và decoded frame thật vẫn đang được tích hợp.
 
 ### Client
 

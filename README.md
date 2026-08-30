@@ -41,8 +41,8 @@ its threat model and unfinished production work public in
 - Broadcast a teacher screen using H.264 and UDP multicast so LAN bandwidth
   does not grow linearly with the client count.
 - Fall back to unicast when multicast health is persistently poor.
-- Show client status, latency, packet loss, a 15 FPS preview, and chat in the
-  server application.
+- Show a responsive wall of all client screens with an adjustable 5-15 FPS
+  refresh target, plus focused telemetry, controls, and chat for one client.
 - Run a small Windows service and native Win32 tray/chat agent on each client.
 - Authenticate control and video traffic without JSON, XML, Electron, or a
   custom kernel driver.
@@ -120,8 +120,12 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
 
 The dashboard does not inject demonstration records. It starts with an empty
 client registry and displays only records supplied by the runtime registry.
-`Start stream`, `Lock`, `Request keyframe`, and chat remain unavailable until a
-real client record is present; live control-plane routing is still being
+Teachers can switch between `Room screens`, which presents every visible client
+in a responsive screen wall, and `Selected client`, which concentrates
+telemetry, stream controls, and chat for one workstation. The room-screen
+refresh target is adjustable from 5 to 15 FPS; 5 FPS is the prudent starting
+point for a 50-client room until full decoder and network soak testing is
+complete. Live control-plane and decoded-frame routing are still being
 integrated.
 
 ### Client

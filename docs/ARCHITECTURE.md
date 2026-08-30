@@ -13,13 +13,14 @@ directly with the logged-in user's desktop. IPC uses a local named pipe whose
 DACL permits SYSTEM, Administrators, and the interactive user and rejects
 remote clients.
 
-The server shell presents a split operational view: a scannable client registry,
-selected-client telemetry, a 16:9 preview surface with a 15 FPS target, control
-actions, and a compact chat panel. The preview is deliberately stateful and
-shows no-frame status until authenticated video packets are connected. The
-registry starts empty and does not inject demonstration client records. The
-client agent uses standard Win32 LISTBOX/EDIT/BUTTON controls for a small chat
-window; no UI framework is added to the client.
+The server shell presents two operational modes. `Room screens` uses a
+responsive grid for all visible clients, health summaries, search/filter, and a
+5-15 FPS screen-refresh target. `Selected client` provides focused telemetry, a
+16:9 preview, control actions, and chat. Preview surfaces are deliberately
+stateful and show no-frame status until authenticated video packets are
+connected. The registry starts empty and does not inject demonstration client
+records. The client agent uses standard Win32 LISTBOX/EDIT/BUTTON controls for
+a small chat window; no UI framework is added to the client.
 
 ## Video path
 

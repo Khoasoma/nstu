@@ -17,8 +17,9 @@
 - [x] CPack/NSIS server and client installers with automatic service
       registration, recovery policy, reboot activation, and package-owned
       uninstall handling.
-- [x] Server UI layout for client telemetry, 15 FPS preview state, chat and
-      control actions; lightweight Native Win32 client chat shell.
+- [x] Teacher-focused server UI with room screen wall, responsive 5-15 FPS
+      target, health summary, filtering, focused telemetry, chat and controls;
+      lightweight Native Win32 client chat shell.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.

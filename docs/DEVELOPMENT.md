@@ -30,8 +30,8 @@ phải bản triển khai production hoàn chỉnh cho trường học. Các gi�
 - Windows Service, active-session agent, secure named pipe, tray icon và
   fullscreen overlay.
 - Server UI dùng Dear ImGui + D3D11 và client registry thread-safe.
-- Server UI có client list, preview stream 16:9 theo target 15 FPS, telemetry,
-  chat và control actions.
+- Server UI có room screen wall responsive với target 5-15 FPS, health summary,
+  search/filter, selected-client telemetry, chat và control actions.
 - Client agent có chat window Native Win32 dùng các control hệ thống nhẹ.
 - CMake modular, build được bằng MSVC hoặc MinGW-w64, có Windows CI.
 
@@ -137,9 +137,11 @@ ctest --test-dir build-core --output-on-failure
 ## Chạy thử giao diện
 
 Sau khi build trên Windows, chạy `nstu-server.exe` để mở server shell. Màn hình
-server gồm danh sách client bên trái, panel chi tiết và preview bên phải, cùng
-chat ở phía dưới. Preview hiển thị trạng thái chờ frame khi control/video path
-chưa được nối với thiết bị thật; target mặc định là 15 FPS.
+server mặc định mở `Room screens`: health summary ở đầu trang, target refresh
+5-15 FPS, search/filter và screen wall tự đổi số cột theo kích thước cửa sổ.
+`Selected client` cung cấp danh sách gọn, telemetry, preview 16:9, control và
+chat. Preview hiển thị trạng thái chờ frame khi control/video path chưa được nối
+với thiết bị thật; target mặc định là 10 FPS.
 
 Chạy `nstu-agent.exe` để mở chat client Native Win32 và tray icon. Double-click
 tray icon để ẩn/hiện chat. Fullscreen overlay vẫn là lớp hiển thị riêng cho
