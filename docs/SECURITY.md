@@ -2,9 +2,10 @@
 
 ## Scope
 
-The current security layer provides protocol primitives for authenticated
-control sessions and authenticated UDP video packets. It is not yet a complete
-key-provisioning system and it does not encrypt screen content.
+The current security layer provides live authenticated TCP control sessions,
+authenticated UDP video packet primitives, and machine-scoped secret storage.
+It is not yet a complete key-enrollment/rotation system and it does not encrypt
+screen content.
 
 ## Control handshake
 
@@ -28,6 +29,20 @@ The server must verify the client MAC before inserting the hello into
 `ReplayProtector`. Replay insertion is atomic and bounded. Capacity must be
 sized for the maximum accepted handshake rate over the clock-skew interval, and
 the TCP listener must separately rate-limit unauthenticated connections.
+
+The blocking `client_handshake` and `server_handshake` implementations now use
+the real `TcpSocket` framing path, including receive/send timeouts. A successful
+handshake returns a move-only `AuthenticatedSession`; moving it into
+`AuthenticatedControlChannel` transfers the session key and clears the source.
+Handshake message types are rejected after channel establishment.
+
+For local key material, `protect_machine_secret` and
+`unprotect_machine_secret` use Windows DPAPI with `CRYPTPROTECT_LOCAL_MACHINE`.
+`save_machine_secret` writes an ACL-restricted temporary file, flushes it, and
+atomically replaces the destination with `MoveFileExW`. The file ACL grants
+full access only to LocalSystem, built-in Administrators, and the file owner.
+The PSK and DPAPI entropy remain deployment inputs and must be provisioned by an
+installer or enrollment workflow; they are never generated into the repository.
 
 ## Authenticated control frames
 
@@ -84,8 +99,8 @@ metadata before UDP reception begins.
 
 ## Remaining blockers
 
-- Protected PSK enrollment and storage using DPAPI or machine certificates.
-- Automated key rotation and revocation.
+- Protected PSK enrollment, key rotation, and revocation workflow (the DPAPI
+  storage primitive is available, but lifecycle management is not wired).
 - Secure group-key distribution messages wired into the control connection.
 - Connection-level rate limiting and audit events.
 - Confidentiality: HMAC authenticates but does not encrypt screen content.

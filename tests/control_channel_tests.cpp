@@ -1,0 +1,151 @@
+#include "nstu/control_channel.hpp"
+#include "nstu/multicast.hpp"
+#include "nstu/secret_store.hpp"
+
+#include <windows.h>
+
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <filesystem>
+#include <span>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace {
+
+nstu::security::ClientId client_id() {
+    nstu::security::ClientId id{};
+    for (std::size_t index = 0; index < id.size(); ++index) {
+        id[index] = static_cast<std::byte>(index + 1);
+    }
+    return id;
+}
+
+std::vector<std::byte> pre_shared_key() {
+    std::vector<std::byte> key(nstu::security::kMinimumProtocolKeyBytes);
+    for (std::size_t index = 0; index < key.size(); ++index) {
+        key[index] = static_cast<std::byte>(0x40 + index);
+    }
+    return key;
+}
+
+} // namespace
+
+int main() {
+    nstu::net::WinsockRuntime winsock;
+    assert(winsock.ready());
+    const auto id = client_id();
+    auto key = pre_shared_key();
+    constexpr std::uint32_t key_id = 42;
+    constexpr std::uint64_t now = 20'000;
+
+    nstu::net::TcpSocket listener;
+    std::string error;
+    assert(listener.listen(0, 8, &error));
+    const auto port = listener.local_port(&error);
+    assert(port != 0);
+    std::atomic_bool server_succeeded = false;
+    std::thread server([&] {
+        std::string server_error;
+        auto socket = listener.accept(&server_error);
+        assert(socket.is_open());
+        assert(socket.set_io_timeouts(5000, 5000, &server_error));
+        nstu::security::ReplayProtector replay;
+        const nstu::control::KeyResolver resolver =
+            [&](const nstu::security::ClientId& requested_id,
+                std::uint32_t requested_key_id)
+            -> std::optional<std::vector<std::byte>> {
+            if (requested_id != id || requested_key_id != key_id) {
+                return std::nullopt;
+            }
+            return key;
+        };
+        auto session = nstu::control::server_handshake(
+            socket, resolver, replay, now, &server_error);
+        assert(session.has_value());
+        nstu::control::AuthenticatedControlChannel channel(
+            std::move(socket), std::move(*session));
+        const auto command = channel.receive(&server_error);
+        assert(command.has_value());
+        assert(command->envelope.type == nstu::protocol::CommandType::lock);
+        assert(command->envelope.request_id == 99);
+        assert(command->payload ==
+               std::vector<std::byte>({std::byte{0x10}, std::byte{0x20}}));
+        const std::array<std::byte, 1> response{std::byte{0x01}};
+        assert(channel.send(nstu::protocol::CommandType::hello_ack, 99,
+                            response, &server_error));
+        server_succeeded = true;
+    });
+
+    nstu::net::TcpSocket client_socket;
+    assert(client_socket.connect("127.0.0.1", port, &error));
+    assert(client_socket.set_io_timeouts(5000, 5000, &error));
+    auto client_session = nstu::control::client_handshake(
+        client_socket, id, key_id, key, now, std::chrono::seconds(120), &error);
+    assert(client_session.has_value());
+    nstu::control::AuthenticatedControlChannel client_channel(
+        std::move(client_socket), std::move(*client_session));
+    const std::array<std::byte, 2> command_payload{
+        std::byte{0x10}, std::byte{0x20}};
+    assert(client_channel.send(nstu::protocol::CommandType::lock, 99,
+                               command_payload, &error));
+    const auto response = client_channel.receive(&error);
+    assert(response.has_value());
+    assert(response->envelope.type == nstu::protocol::CommandType::hello_ack);
+    assert(response->sequence == 0);
+    server.join();
+    assert(server_succeeded);
+
+    nstu::protocol::CommandEnvelope envelope{
+        .version = nstu::protocol::kCommandVersion,
+        .type = nstu::protocol::CommandType::chat,
+        .payload_bytes = 2,
+        .request_id = 123,
+    };
+    auto wire = nstu::control::encode_authenticated_command(
+        key, envelope, 7, command_payload);
+    assert(!wire.empty());
+    nstu::protocol::TcpFrameParser parser;
+    std::vector<nstu::protocol::TcpFrame> frames;
+    assert(parser.feed(wire, frames));
+    assert(frames.size() == 1);
+    const auto decoded =
+        nstu::control::decode_authenticated_command(key, frames[0], &error);
+    assert(decoded.has_value());
+    assert(decoded->sequence == 7);
+    frames[0].payload.back() ^= std::byte{1};
+    assert(!nstu::control::decode_authenticated_command(key, frames[0], &error)
+                .has_value());
+    envelope.type = nstu::protocol::CommandType::auth_hello;
+    assert(nstu::control::encode_authenticated_command(
+               key, envelope, 8, command_payload)
+               .empty());
+
+    const std::array<std::byte, 8> entropy{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4},
+        std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8}};
+    const auto protected_blob =
+        nstu::security::protect_machine_secret(key, entropy, &error);
+    assert(!protected_blob.empty());
+    auto unprotected =
+        nstu::security::unprotect_machine_secret(protected_blob, entropy, &error);
+    assert(unprotected == key);
+    nstu::security::secure_zero(unprotected);
+
+    wchar_t temporary_directory[MAX_PATH]{};
+    assert(GetTempPathW(MAX_PATH, temporary_directory) != 0);
+    const auto secret_path = std::filesystem::path(temporary_directory) /
+        (L"nstu-secret-test-" + std::to_wstring(GetCurrentProcessId()) +
+         L".bin");
+    assert(nstu::security::save_machine_secret(secret_path.wstring(), key,
+                                                entropy, &error));
+    auto loaded = nstu::security::load_machine_secret(
+        secret_path.wstring(), entropy, &error);
+    assert(loaded == key);
+    nstu::security::secure_zero(loaded);
+    assert(DeleteFileW(secret_path.c_str()));
+    nstu::security::secure_zero(key);
+    return 0;
+}

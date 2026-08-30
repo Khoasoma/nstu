@@ -28,12 +28,17 @@ public:
     [[nodiscard]] bool enable_keepalive(std::uint32_t idle_ms,
                                         std::uint32_t interval_ms,
                                         std::string* error = nullptr) const;
+    [[nodiscard]] bool set_io_timeouts(std::uint32_t receive_timeout_ms,
+                                       std::uint32_t send_timeout_ms,
+                                       std::string* error = nullptr) const;
     [[nodiscard]] int send_all(std::span<const std::byte> bytes,
                                std::string* error = nullptr) const;
     [[nodiscard]] int receive(std::span<std::byte> bytes,
                               std::string* error = nullptr) const;
     [[nodiscard]] bool is_open() const noexcept;
     [[nodiscard]] std::uintptr_t native_handle() const noexcept;
+    [[nodiscard]] std::uint16_t local_port(
+        std::string* error = nullptr) const;
     void close() noexcept;
 
 private:

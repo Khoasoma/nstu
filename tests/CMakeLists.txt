@@ -30,6 +30,12 @@ nstu_enable_warnings(nstu_frame_reassembler_tests)
 nstu_enable_test_assertions(nstu_frame_reassembler_tests)
 add_test(NAME nstu.frame_reassembler COMMAND nstu_frame_reassembler_tests)
 
+add_executable(nstu_control_channel_tests control_channel_tests.cpp)
+target_link_libraries(nstu_control_channel_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_control_channel_tests)
+nstu_enable_test_assertions(nstu_control_channel_tests)
+add_test(NAME nstu.control_channel COMMAND nstu_control_channel_tests)
+
 if(TARGET nstu_server_state)
     add_executable(nstu_server_state_tests server_state_tests.cpp)
     target_link_libraries(nstu_server_state_tests PRIVATE nstu_server_state)

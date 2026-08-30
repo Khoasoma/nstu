@@ -9,6 +9,8 @@
 - [x] Multicast-to-unicast fallback state machine.
 - [x] Reorder-aware packet-loss estimator and server health hysteresis.
 - [x] Mutual HMAC handshake, replay cache, control/video MAC primitives.
+- [x] Live blocking TCP handshake and authenticated control channel.
+- [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
@@ -19,8 +21,8 @@
 
 ## Next engineering milestones
 
-- [ ] Wire authenticated handshake into live TCP connections and add protected
-      key enrollment, rotation, and revocation.
+- [ ] Add key enrollment, rotation, and revocation workflow around the DPAPI
+      storage primitive.
 - [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
 - [ ] Packetizer, jitter buffer, NACK policy, and keyframe scheduling.
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.

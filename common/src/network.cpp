@@ -153,6 +153,34 @@ bool TcpSocket::enable_keepalive(std::uint32_t idle_ms,
 #endif
 }
 
+bool TcpSocket::set_io_timeouts(std::uint32_t receive_timeout_ms,
+                                std::uint32_t send_timeout_ms,
+                                std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "socket is not open");
+        return false;
+    }
+    const DWORD receive_timeout = receive_timeout_ms;
+    const DWORD send_timeout = send_timeout_ms;
+    if (setsockopt(static_cast<SOCKET>(handle_), SOL_SOCKET, SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&receive_timeout),
+                   sizeof(receive_timeout)) == SOCKET_ERROR ||
+        setsockopt(static_cast<SOCKET>(handle_), SOL_SOCKET, SO_SNDTIMEO,
+                   reinterpret_cast<const char*>(&send_timeout),
+                   sizeof(send_timeout)) == SOCKET_ERROR) {
+        set_error(error, "socket timeout configuration failed");
+        return false;
+    }
+    return true;
+#else
+    (void)receive_timeout_ms;
+    (void)send_timeout_ms;
+    set_error(error, "TCP transport requires Windows");
+    return false;
+#endif
+}
+
 int TcpSocket::send_all(std::span<const std::byte> bytes,
                         std::string* error) const {
 #if defined(_WIN32)
@@ -210,6 +238,27 @@ bool TcpSocket::is_open() const noexcept {
 
 std::uintptr_t TcpSocket::native_handle() const noexcept {
     return handle_;
+}
+
+std::uint16_t TcpSocket::local_port(std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "socket is not open");
+        return 0;
+    }
+    sockaddr_in address{};
+    int address_bytes = sizeof(address);
+    if (getsockname(static_cast<SOCKET>(handle_),
+                    reinterpret_cast<sockaddr*>(&address),
+                    &address_bytes) == SOCKET_ERROR) {
+        set_error(error, "getsockname failed");
+        return 0;
+    }
+    return ntohs(address.sin_port);
+#else
+    set_error(error, "TCP transport requires Windows");
+    return 0;
+#endif
 }
 
 void TcpSocket::close() noexcept {
