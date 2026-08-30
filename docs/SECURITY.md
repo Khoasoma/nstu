@@ -3,9 +3,9 @@
 ## Scope
 
 The current security layer provides live authenticated TCP control sessions,
-authenticated UDP video packet primitives, and machine-scoped secret storage.
-It is not yet a complete key-enrollment/rotation system and it does not encrypt
-screen content.
+authenticated UDP video packet primitives, replay-resistant bootstrap
+enrollment, a persisted machine-scoped keyring, and protected client runtime
+configuration. It does not encrypt screen content.
 
 ## Control handshake
 
@@ -45,8 +45,10 @@ against `AuthHello` and is never trusted without the subsequent HMAC proof.
 Preamble parsing is fixed-size and allocation-free; deployments should apply a
 short read timeout and per-source rate limit at this boundary.
 
-`security::HandshakeRateLimiter` provides that bounded admission primitive. It
-tracks a source by stable address or enrollment identity, limits failures in a
+`security::HandshakeRateLimiter` provides that bounded admission primitive. The
+live IOCP listener calls it before admitting a source, records failed handshakes
+and invalid framing, clears state after success, and emits structured audit
+events. It tracks a source by stable address or enrollment identity, limits failures in a
 fixed window, applies a temporary block after the threshold, evicts oldest
 entries when the source table is full, and clears state after a successful
 handshake. It must be called before `client_handshake`/`server_handshake`; it
@@ -57,16 +59,25 @@ For local key material, `protect_machine_secret` and
 `save_machine_secret` writes an ACL-restricted temporary file, flushes it, and
 atomically replaces the destination with `MoveFileExW`. The file ACL grants
 full access only to LocalSystem, built-in Administrators, and the file owner.
-The PSK and DPAPI entropy remain deployment inputs and must be provisioned by an
-installer or enrollment workflow; they are never generated into the repository.
+The PSK and DPAPI entropy remain deployment inputs and are never generated into
+the repository.
 
-`security::KeyStore` now provides the in-process lifecycle boundary used by a
+`security::KeyStore` provides the in-process lifecycle boundary used by a
 server key resolver: enrollment rejects weak or reused IDs, rotation allocates a
 new monotonic ID before revoking older active keys, and revocation zeroizes key
 material while retaining an ID tombstone. `resolve()` returns only active key
-copies. The store is intentionally memory-only; a deployment must load and save
-its entries through DPAPI-protected files or a certificate-backed enrollment
-service before accepting clients.
+copies. `save_keyring` and `load_keyring` serialize active entries and revoked-ID
+tombstones into a versioned binary format protected with machine-scope DPAPI,
+restrictive ACLs, flush, and atomic replacement.
+
+Initial enrollment uses a one-time 256-bit bootstrap secret. The client sends a
+fresh nonce, timestamp, identity, requested key ID, and HMAC. Both peers derive
+the installed PSK from the bootstrap secret and transcript, so the PSK itself is
+not transmitted. The server applies clock and replay checks before enrollment,
+persists the keyring before acknowledging, and rolls back the in-memory change
+if persistence fails. `nstu-provision.exe` stores the resulting client runtime
+configuration under machine-scope DPAPI. The bootstrap export must be distributed
+out of band and deleted after enrollment.
 
 ## Authenticated control frames
 
@@ -123,10 +134,8 @@ metadata before UDP reception begins.
 
 ## Remaining blockers
 
-- Persisted keyring loading/saving and authenticated enrollment transport around
-  the in-process `KeyStore` lifecycle manager.
-- Secure group-key distribution messages wired into the control connection.
-- Connection-level rate limiting and audit events.
+- Membership-driven video group-key generation, rotation, and distribution wired
+  into live stream startup and UDP reception.
 - Confidentiality: HMAC authenticates but does not encrypt screen content.
   AES-GCM group encryption or an equivalent design is required where LAN users
   must not be able to view captured traffic.

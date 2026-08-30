@@ -23,8 +23,9 @@ fragment must carry it.
 
 Expired incomplete frames are frame-loss events. They are distinct from packet
 loss: one missing packet may drop one frame, while several missing packets may
-belong to the same frame. `missing_fragments(frame_id)` provides bounded input
-for a future NACK policy.
+belong to the same frame. `missing_fragments(frame_id)` feeds the bounded
+`NackPolicy`, which waits for an initial reorder interval, caps fragments per
+request, limits retry count, and never requests data after the frame deadline.
 
 The implementation remembers recently completed frame IDs so late duplicates
 cannot allocate a new partial frame. Reassembly limits are allocation guards,

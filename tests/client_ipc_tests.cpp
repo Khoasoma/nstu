@@ -1,4 +1,5 @@
-#include "nstu/named_pipe.hpp"
+#include "nstu/agent_protocol.hpp"
+#include "nstu/client_config.hpp"
 
 #include <windows.h>
 
@@ -6,6 +7,8 @@
 #include <cassert>
 #include <string>
 #include <thread>
+#include <filesystem>
+#include <vector>
 
 int main() {
     const std::wstring pipe_name = L"\\\\.\\pipe\\nstu-test-" +
@@ -32,5 +35,56 @@ int main() {
     assert(client.read(response, &error) == 1);
     assert(response[0] == std::byte{0x02});
     server_thread.join();
+
+    const nstu::client::AgentStatus status{
+        .locked = true,
+        .streaming = true,
+        .frames_per_second = 10,
+        .session_id = 7,
+    };
+    const nstu::client::AgentMessage status_message{
+        nstu::client::AgentMessageType::status_report,
+        nstu::client::encode_agent_status(status)};
+    const auto status_wire =
+        nstu::client::encode_agent_message(status_message);
+    const auto decoded_message =
+        nstu::client::decode_agent_message(status_wire);
+    assert(decoded_message.has_value());
+    const auto decoded_status =
+        nstu::client::decode_agent_status(decoded_message->payload);
+    assert(decoded_status.has_value());
+    assert(decoded_status->locked);
+    assert(decoded_status->streaming);
+    assert(decoded_status->frames_per_second == 10);
+    assert(decoded_status->session_id == 7);
+    auto corrupt = status_wire;
+    corrupt[0] ^= std::byte{1};
+    assert(!nstu::client::decode_agent_message(corrupt).has_value());
+
+    nstu::client::ClientRuntimeConfig runtime;
+    runtime.server_address = "127.0.0.1";
+    runtime.server_port = 47001;
+    runtime.client_id.fill(std::byte{0x22});
+    runtime.key_id = 9;
+    runtime.pre_shared_key.resize(nstu::security::kMinimumProtocolKeyBytes,
+                                  std::byte{0x44});
+    wchar_t temporary_directory[MAX_PATH]{};
+    assert(GetTempPathW(MAX_PATH, temporary_directory) != 0);
+    const auto config_path = std::filesystem::path(temporary_directory) /
+        (L"nstu-client-config-test-" +
+         std::to_wstring(GetCurrentProcessId()) + L".bin");
+    const std::array<std::byte, 4> entropy{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    assert(nstu::client::save_client_runtime_config(
+        runtime, config_path.wstring(), entropy, &error));
+    nstu::client::ClientRuntimeConfig loaded;
+    assert(nstu::client::load_client_runtime_config(
+        loaded, config_path.wstring(), entropy, &error));
+    assert(loaded.server_address == runtime.server_address);
+    assert(loaded.client_id == runtime.client_id);
+    assert(loaded.pre_shared_key == runtime.pre_shared_key);
+    nstu::client::clear_client_runtime_config(runtime);
+    nstu::client::clear_client_runtime_config(loaded);
+    assert(DeleteFileW(config_path.c_str()));
     return 0;
 }

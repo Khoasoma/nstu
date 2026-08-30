@@ -1,0 +1,34 @@
+#pragma once
+
+#include "nstu/auth.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace nstu::client {
+
+struct ClientRuntimeConfig {
+    std::string server_address;
+    std::uint16_t server_port = 47001;
+    security::ClientId client_id{};
+    std::uint32_t key_id = 0;
+    std::vector<std::byte> pre_shared_key;
+};
+
+[[nodiscard]] bool save_client_runtime_config(
+    const ClientRuntimeConfig& config, std::wstring_view path,
+    std::span<const std::byte> optional_entropy = {},
+    std::string* error = nullptr);
+
+[[nodiscard]] bool load_client_runtime_config(
+    ClientRuntimeConfig& config, std::wstring_view path,
+    std::span<const std::byte> optional_entropy = {},
+    std::string* error = nullptr);
+
+void clear_client_runtime_config(ClientRuntimeConfig& config) noexcept;
+
+} // namespace nstu::client

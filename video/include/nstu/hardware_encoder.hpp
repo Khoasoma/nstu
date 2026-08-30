@@ -47,6 +47,7 @@ public:
     [[nodiscard]] bool encode_nv12_texture(
         ID3D11Texture2D* texture, std::int64_t timestamp_100ns,
         std::vector<std::byte>& access_unit, std::string* error = nullptr);
+    [[nodiscard]] bool request_keyframe(std::string* error = nullptr);
     void reset() noexcept;
     [[nodiscard]] bool initialized() const noexcept;
 

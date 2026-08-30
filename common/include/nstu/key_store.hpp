@@ -13,8 +13,13 @@
 
 namespace nstu::security {
 
-// In-memory key lifecycle manager. Persist the key material separately with
-// the DPAPI secret-store helpers; this class deliberately never serializes it.
+struct KeyRecord {
+    ClientId client_id{};
+    std::uint32_t key_id = 0;
+    std::vector<std::byte> key;
+    bool revoked = false;
+};
+
 class KeyStore {
 public:
     KeyStore() = default;
@@ -36,6 +41,9 @@ public:
         const ClientId& client_id, std::uint32_t key_id) const;
     [[nodiscard]] std::size_t active_key_count() const noexcept;
     [[nodiscard]] std::size_t key_count() const noexcept;
+    [[nodiscard]] std::vector<KeyRecord> snapshot() const;
+    [[nodiscard]] bool replace(std::span<const KeyRecord> records,
+                               std::string* error = nullptr);
 
 private:
     struct Entry {

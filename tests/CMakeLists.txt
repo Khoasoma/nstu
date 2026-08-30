@@ -30,6 +30,12 @@ nstu_enable_warnings(nstu_key_store_tests)
 nstu_enable_test_assertions(nstu_key_store_tests)
 add_test(NAME nstu.key_store COMMAND nstu_key_store_tests)
 
+add_executable(nstu_security_state_tests security_state_tests.cpp)
+target_link_libraries(nstu_security_state_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_security_state_tests)
+nstu_enable_test_assertions(nstu_security_state_tests)
+add_test(NAME nstu.security_state COMMAND nstu_security_state_tests)
+
 add_executable(nstu_rate_limiter_tests rate_limiter_tests.cpp)
 target_link_libraries(nstu_rate_limiter_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_rate_limiter_tests)
@@ -42,11 +48,23 @@ nstu_enable_warnings(nstu_frame_reassembler_tests)
 nstu_enable_test_assertions(nstu_frame_reassembler_tests)
 add_test(NAME nstu.frame_reassembler COMMAND nstu_frame_reassembler_tests)
 
+add_executable(nstu_video_transport_tests video_transport_tests.cpp)
+target_link_libraries(nstu_video_transport_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_video_transport_tests)
+nstu_enable_test_assertions(nstu_video_transport_tests)
+add_test(NAME nstu.video_transport COMMAND nstu_video_transport_tests)
+
 add_executable(nstu_control_channel_tests control_channel_tests.cpp)
 target_link_libraries(nstu_control_channel_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_control_channel_tests)
 nstu_enable_test_assertions(nstu_control_channel_tests)
 add_test(NAME nstu.control_channel COMMAND nstu_control_channel_tests)
+
+add_executable(nstu_iocp_dispatcher_tests iocp_dispatcher_tests.cpp)
+target_link_libraries(nstu_iocp_dispatcher_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_iocp_dispatcher_tests)
+nstu_enable_test_assertions(nstu_iocp_dispatcher_tests)
+add_test(NAME nstu.iocp_dispatcher COMMAND nstu_iocp_dispatcher_tests)
 
 if(TARGET nstu_server_state)
     add_executable(nstu_server_state_tests server_state_tests.cpp)
@@ -54,6 +72,21 @@ if(TARGET nstu_server_state)
     nstu_enable_warnings(nstu_server_state_tests)
     nstu_enable_test_assertions(nstu_server_state_tests)
     add_test(NAME nstu.server_state COMMAND nstu_server_state_tests)
+
+    add_executable(nstu_control_plane_tests control_plane_tests.cpp)
+    target_link_libraries(nstu_control_plane_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_control_plane_tests)
+    nstu_enable_test_assertions(nstu_control_plane_tests)
+    add_test(NAME nstu.control_plane COMMAND nstu_control_plane_tests)
+
+    add_executable(nstu_enrollment_transport_tests
+        enrollment_transport_tests.cpp)
+    target_link_libraries(nstu_enrollment_transport_tests PRIVATE
+        nstu_server_state)
+    nstu_enable_warnings(nstu_enrollment_transport_tests)
+    nstu_enable_test_assertions(nstu_enrollment_transport_tests)
+    add_test(NAME nstu.enrollment_transport
+        COMMAND nstu_enrollment_transport_tests)
 endif()
 
 if(TARGET nstu_client_platform)
@@ -62,8 +95,23 @@ if(TARGET nstu_client_platform)
     nstu_enable_warnings(nstu_client_ipc_tests)
     nstu_enable_test_assertions(nstu_client_ipc_tests)
     add_test(NAME nstu.client_ipc COMMAND nstu_client_ipc_tests)
+
+    if(TARGET nstu_server_state)
+        add_executable(nstu_client_control_tests client_control_tests.cpp)
+        target_link_libraries(nstu_client_control_tests PRIVATE
+            nstu_client_platform nstu_server_state)
+        nstu_enable_warnings(nstu_client_control_tests)
+        nstu_enable_test_assertions(nstu_client_control_tests)
+        add_test(NAME nstu.client_control COMMAND nstu_client_control_tests)
+    endif()
 endif()
 
 if(TARGET nstu_video_probe)
     add_test(NAME nstu.video_capabilities COMMAND nstu_video_probe)
+
+    add_executable(nstu_video_recovery_tests video_recovery_tests.cpp)
+    target_link_libraries(nstu_video_recovery_tests PRIVATE nstu_video)
+    nstu_enable_warnings(nstu_video_recovery_tests)
+    nstu_enable_test_assertions(nstu_video_recovery_tests)
+    add_test(NAME nstu.video_recovery COMMAND nstu_video_recovery_tests)
 endif()

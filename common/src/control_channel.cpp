@@ -501,6 +501,11 @@ std::optional<AuthenticatedCommand> AuthenticatedControlChannel::receive(
     return command;
 }
 
+bool AuthenticatedControlChannel::wait_readable(std::uint32_t timeout_ms,
+                                                std::string* error) const {
+    return socket_.wait_readable(timeout_ms, error);
+}
+
 bool AuthenticatedControlChannel::is_open() const noexcept {
     return socket_.is_open();
 }

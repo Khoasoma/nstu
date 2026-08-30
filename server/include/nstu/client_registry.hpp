@@ -37,6 +37,7 @@ class ClientRegistry {
 public:
     void upsert(ClientRecord record);
     [[nodiscard]] bool set_status(std::uint64_t id, ClientStatus status);
+    [[nodiscard]] bool touch(std::uint64_t id);
     [[nodiscard]] bool update_health(std::uint64_t id, std::uint32_t latency_ms,
                                      std::uint32_t loss_per_mille,
                                      std::uint64_t finalized_sample_size,

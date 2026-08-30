@@ -33,6 +33,16 @@ enum class CommandType : std::uint16_t {
     auth_challenge = 9,
     auth_proof = 10,
     auth_accept = 11,
+    enrollment_request = 12,
+    enrollment_accept = 13,
+    key_rotation = 14,
+    key_revocation = 15,
+    video_group_key = 16,
+    status_request = 17,
+    status_report = 18,
+    start_stream = 19,
+    stop_stream = 20,
+    video_nack = 21,
 };
 
 enum class ConnectionRole : std::uint8_t {

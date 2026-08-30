@@ -1,5 +1,6 @@
 param(
-    [string]$InstallRoot = "$PSScriptRoot"
+    [string]$InstallRoot = "$PSScriptRoot",
+    [string]$DataRoot = (Join-Path $env:ProgramData "NSTU")
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +16,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 if (-not (Test-Path -LiteralPath $serviceBinary)) {
     throw "NSTU service binary was not found: $serviceBinary"
 }
+
+& (Join-Path $PSScriptRoot "configure-data-root.ps1") -DataRoot $DataRoot
 
 $escapedBinary = '"' + $serviceBinary.Replace('"', '\"') + '"'
 $existing = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
@@ -40,6 +43,13 @@ try {
     & sc.exe failureflag $serviceName 1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "sc.exe failureflag configuration failed with exit code $LASTEXITCODE"
+    }
+    $serviceSddl = "D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)" +
+        "(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)" +
+        "(A;;LCLORC;;;AU)"
+    & sc.exe sdset $serviceName $serviceSddl | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "sc.exe sdset failed with exit code $LASTEXITCODE"
     }
 } catch {
     & sc.exe delete $serviceName | Out-Null

@@ -11,10 +11,11 @@ student clients, authenticated control commands, chat, and low-latency screen
 broadcasting over a local network.
 
 > **Development status:** NSTU is currently an engineering MVP, not a
-> production release. The installers can be built and the user interfaces can
-> be tested, but live enrollment, multi-client dispatch, control routing, and
-> end-to-end video delivery are not complete. Do not deploy the current nightly
-> build as a security control in a real school.
+> production release. Persisted enrollment, multi-client dispatch, authenticated
+> control routing, packetization, and device recovery are implemented and tested.
+> Decoded end-to-end live-screen delivery and the physical production validation
+> matrix are not complete. Do not deploy the current nightly build as a security
+> control in a real school.
 
 ## Why NSTU exists
 
@@ -89,9 +90,10 @@ Before a production deployment:
 5. Avoid unmanaged switches for a large room. Without IGMP snooping, multicast
    may be flooded to every port. If multicast is blocked, the planned unicast
    fallback increases server and switch bandwidth with every client.
-6. Keep Windows Firewall enabled. The current MVP does not yet define stable,
-   user-configurable production ports, so do not create broad permanent allow
-   rules based on guessed port numbers.
+6. Keep Windows Firewall enabled. TCP `47001` is the default authenticated
+   control port and UDP `47000` is reserved for the video transport. Limit rules
+   to the classroom VLAN and the required executable; do not create broad
+   internet-facing rules.
 
 Cross-VLAN multicast requires intentionally configured multicast routing. It
 should not be enabled merely to make discovery work.
@@ -124,9 +126,9 @@ Teachers can switch between `Room screens`, which presents every visible client
 in a responsive screen wall, and `Selected client`, which concentrates
 telemetry, stream controls, and chat for one workstation. The room-screen
 refresh target is adjustable from 5 to 15 FPS; 5 FPS is the prudent starting
-point for a 50-client room until full decoder and network soak testing is
-complete. Live control-plane and decoded-frame routing are still being
-integrated.
+   point for a 50-client room until full decoder and network soak testing is
+   complete. The live control plane is connected; decoded-frame routing is still
+   being integrated.
 
 ### Client
 
@@ -150,10 +152,30 @@ deployment workflow.
 
 ## Connecting a computer room
 
-There is no honest end-user connection procedure for the current nightly:
-persisted enrollment and the live multi-client dispatcher are still roadmap
-items. A finished production flow will require all of the following before a
-client is shown as trusted:
+The current engineering enrollment flow is command-line based. Run the server
+installer, configure a protected data root, and create a one-time enrollment
+secret from an elevated PowerShell prompt:
+
+```powershell
+& "$env:ProgramFiles\NSTU\docs\deployment\configure-data-root.ps1" `
+  -DataRoot "$env:ProgramData\NSTU"
+& "$env:ProgramFiles\NSTU\docs\deployment\new-enrollment-secret.ps1" `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+Restart `nstu-server.exe` so it loads the protected enrollment secret. On each
+client, while the server is running, use a unique 128-bit identity and key ID:
+
+```powershell
+$clientId = [guid]::NewGuid().ToString("N")
+& "$env:ProgramFiles\NSTU\client\nstu-provision.exe" `
+  192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+The tool authenticates the enrollment transcript, derives the installed PSK
+without sending it, and stores the client configuration with machine-scope
+DPAPI. Delete every copy of the one-time export after enrollment, then restart
+the service or Windows. A trusted client follows this path:
 
 ```text
 Install client
@@ -165,15 +187,20 @@ Install client
 ```
 
 Connection preambles only reject obviously invalid peers quickly. Device
-identity is accepted only after the cryptographic handshake succeeds. The
-project will publish exact ports, multicast group policy, firewall rules, and
-the enrollment UI when those interfaces become stable.
+identity is accepted only after the cryptographic handshake succeeds. A teacher
+enrollment UI and the final multicast/group-key workflow remain release work.
 
 ## Deep Freeze deployments
 
 - Install binaries in the normal protected Windows location.
 - Reserve a thawed, ACL-restricted location for enrolled identity, protected
   key material, configuration, audit logs, and update state.
+- Configure that location before enrollment, for example:
+
+  ```powershell
+  & "$env:ProgramFiles\NSTU\docs\deployment\configure-data-root.ps1" `
+    -DataRoot "D:\NSTUData"
+  ```
 - Never store PSKs, certificates, dumps, screen captures, or runtime secrets in
   the repository.
 - Do not freeze a production image before enrollment persistence, service
@@ -194,8 +221,10 @@ after a reboot.
   protection.
 - Video datagrams can be authenticated, but screen content is not yet
   encrypted. Do not test real sensitive screens on an untrusted LAN.
-- Code signing, authenticated enrollment transport, persisted keyrings,
-  device-loss recovery, independent review, and fuzzing remain production
+- Authenticode automation is available, but nightly artifacts remain unsigned;
+  a production release requires the real certificate-backed workflow.
+- Independent review, fuzzing, decoded live-screen integration, Deep Freeze
+  edition validation, and the hardware/network evidence matrix remain production
   blockers.
 - A green CI build proves compilation and automated tests, not security or
   reliability on real school hardware.

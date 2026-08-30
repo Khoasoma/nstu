@@ -24,6 +24,7 @@ endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(NstuWarnings)
+include(NstuSigning)
 
 add_subdirectory(common)
 
@@ -44,6 +45,11 @@ if(NSTU_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt
     add_subdirectory(tests)
 endif()
 
+foreach(nstu_signable_target
+        nstu-server nstu-service nstu-agent nstu-provision nstu_video_probe)
+    nstu_sign_target(${nstu_signable_target})
+endforeach()
+
 if(WIN32 AND NSTU_ENABLE_PACKAGING)
     include(GNUInstallDirs)
 
@@ -53,12 +59,13 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
             COMPONENT server)
     endif()
     if(TARGET nstu-service)
-        install(TARGETS nstu-service nstu-agent
+        install(TARGETS nstu-service nstu-agent nstu-provision
             RUNTIME DESTINATION client
             COMPONENT client)
         install(FILES
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/install-client-service.ps1"
             "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-client-service.ps1"
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/configure-data-root.ps1"
             DESTINATION client
             COMPONENT client)
     endif()
@@ -68,6 +75,12 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
         "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
         DESTINATION docs
+        COMPONENT docs)
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/configure-data-root.ps1"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/new-enrollment-secret.ps1"
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/test-production-deployment.ps1"
+        DESTINATION docs/deployment
         COMPONENT docs)
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/"
         DESTINATION docs/project
@@ -103,18 +116,40 @@ if(WIN32 AND NSTU_ENABLE_PACKAGING)
         "${CMAKE_BINARY_DIR}/CPackClientConfig.cmake" @ONLY)
 
     if(TARGET nstu-server)
+        set(nstu_server_package_sign_command)
+        if(NSTU_ENABLE_SIGNING)
+            list(APPEND nstu_server_package_sign_command
+                COMMAND "${CMAKE_COMMAND}"
+                    -DNSTU_SIGN_INPUT=${CMAKE_BINARY_DIR}/nstu-server-${PROJECT_VERSION}.exe
+                    -DNSTU_SIGNTOOL_EXECUTABLE=${NSTU_SIGNTOOL_EXECUTABLE}
+                    -DNSTU_SIGN_CERT_SHA1=${NSTU_SIGN_CERT_SHA1}
+                    -DNSTU_SIGN_TIMESTAMP_URL=${NSTU_SIGN_TIMESTAMP_URL}
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SignFile.cmake")
+        endif()
         add_custom_target(nstu-package-server
             COMMAND "${CMAKE_CPACK_COMMAND}" --config
                 "${CMAKE_BINARY_DIR}/CPackServerConfig.cmake"
+            ${nstu_server_package_sign_command}
             DEPENDS nstu-server
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             COMMENT "Packaging NSTU server installer")
     endif()
     if(TARGET nstu-service)
+        set(nstu_client_package_sign_command)
+        if(NSTU_ENABLE_SIGNING)
+            list(APPEND nstu_client_package_sign_command
+                COMMAND "${CMAKE_COMMAND}"
+                    -DNSTU_SIGN_INPUT=${CMAKE_BINARY_DIR}/nstu-client-${PROJECT_VERSION}.exe
+                    -DNSTU_SIGNTOOL_EXECUTABLE=${NSTU_SIGNTOOL_EXECUTABLE}
+                    -DNSTU_SIGN_CERT_SHA1=${NSTU_SIGN_CERT_SHA1}
+                    -DNSTU_SIGN_TIMESTAMP_URL=${NSTU_SIGN_TIMESTAMP_URL}
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SignFile.cmake")
+        endif()
         add_custom_target(nstu-package-client
             COMMAND "${CMAKE_CPACK_COMMAND}" --config
                 "${CMAKE_BINARY_DIR}/CPackClientConfig.cmake"
-            DEPENDS nstu-service nstu-agent
+            ${nstu_client_package_sign_command}
+            DEPENDS nstu-service nstu-agent nstu-provision
             WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
             COMMENT "Packaging NSTU client installer")
     endif()

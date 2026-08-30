@@ -121,6 +121,22 @@ int NamedPipe::read(std::span<std::byte> bytes, std::string* error) const {
     return static_cast<int>(read_bytes);
 }
 
+bool NamedPipe::available_bytes(std::uint32_t& bytes, std::string* error) const {
+    bytes = 0;
+    if (!is_open()) {
+        set_error(error, "pipe is not open");
+        return false;
+    }
+    DWORD available = 0;
+    if (!PeekNamedPipe(reinterpret_cast<HANDLE>(handle_), nullptr, 0, nullptr,
+                       &available, nullptr)) {
+        set_error(error, "PeekNamedPipe failed");
+        return false;
+    }
+    bytes = available;
+    return true;
+}
+
 bool NamedPipe::is_open() const noexcept {
     return handle_ != 0 && handle_ !=
            reinterpret_cast<std::uintptr_t>(INVALID_HANDLE_VALUE);

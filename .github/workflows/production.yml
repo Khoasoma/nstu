@@ -1,0 +1,138 @@
+name: Production release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag, for example v1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  signed-release:
+    runs-on: windows-2022
+    environment: production
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate tag
+        shell: pwsh
+        run: |
+          if ('${{ inputs.tag }}' -notmatch '^v\d+\.\d+\.\d+([.-][0-9A-Za-z.-]+)?$') {
+            throw 'Production tag must use semantic version syntax.'
+          }
+
+      - name: Require completed production evidence
+        shell: pwsh
+        run: |
+          $requiredGates = @(
+            'Authenticode', '50-client soak', 'CPU/RAM/network',
+            'Multicast switches', 'Unicast fallback', 'Windows matrix',
+            'Intel driver matrix', 'Deep Freeze', 'Security review',
+            'Confidentiality decision')
+          $lines = Get-Content docs\PRODUCTION_VALIDATION.md
+          foreach ($gate in $requiredGates) {
+            $pattern = '^\|\s*' + [Regex]::Escape($gate) + '\s*\|'
+            $rows = @($lines | Where-Object { $_ -match $pattern })
+            if ($rows.Count -ne 1) {
+              throw "Production evidence row is missing or duplicated: $gate"
+            }
+            $columns = @($rows[0].Trim('|').Split('|') | ForEach-Object { $_.Trim() })
+            if ($columns.Count -ne 4 -or $columns[2] -ne 'Passed' -or
+                [string]::IsNullOrWhiteSpace($columns[3])) {
+              throw "Production evidence is incomplete: $gate"
+            }
+          }
+
+      - name: Import signing certificate
+        id: certificate
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.NSTU_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.NSTU_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
+            throw 'Production signing secrets are not configured.'
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'nstu-signing.pfx'
+          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:SIGNING_PFX_BASE64))
+          $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $pfxPath `
+              -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if ($null -eq $certificate) { throw 'Certificate import failed.' }
+          "thumbprint=$($certificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          Remove-Item -LiteralPath $pfxPath -Force
+
+      - name: Locate SignTool
+        id: signtool
+        shell: pwsh
+        run: |
+          $tool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              -Filter signtool.exe -Recurse -File |
+              Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1
+          if ($null -eq $tool) { throw 'signtool.exe was not found.' }
+          "path=$($tool.FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Configure signed build
+        shell: pwsh
+        run: >-
+          cmake -S . -B build -A x64
+          -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_ENABLE_SIGNING=ON
+          -DNSTU_SIGNTOOL_EXECUTABLE="${{ steps.signtool.outputs.path }}"
+          -DNSTU_SIGN_CERT_SHA1="${{ steps.certificate.outputs.thumbprint }}"
+
+      - name: Build and test
+        run: |
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package signed installers
+        run: |
+          choco install nsis --no-progress --yes
+          cmake --build build --config Release --target nstu-package-server --parallel
+          cmake --build build --config Release --target nstu-package-client --parallel
+
+      - name: Verify signatures and hashes
+        shell: pwsh
+        run: |
+          $installers = @(Get-ChildItem build\nstu-*.exe -File)
+          if ($installers.Count -ne 2) { throw 'Expected two installers.' }
+          $requiredBinaries = @(
+            'nstu-server.exe', 'nstu-service.exe', 'nstu-agent.exe',
+            'nstu-provision.exe', 'nstu_video_probe.exe')
+          $artifacts = @($installers)
+          foreach ($name in $requiredBinaries) {
+            $binaryMatches = @(Get-ChildItem build -Recurse -Filter $name -File |
+              Where-Object { $_.FullName -notmatch '\\_CPack_Packages\\' })
+            if ($binaryMatches.Count -ne 1) {
+              throw "Expected one built artifact named $name, found $($binaryMatches.Count)."
+            }
+            $artifacts += $binaryMatches[0]
+          }
+          foreach ($artifact in $artifacts) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $artifact.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid signature: $($artifact.FullName)"
+            }
+          }
+          $installers | Get-FileHash -Algorithm SHA256 |
+              ForEach-Object { "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))" } |
+              Set-Content build\SHA256SUMS.txt -Encoding ascii
+
+      - name: Publish production release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ inputs.tag }}' build\nstu-*.exe build\SHA256SUMS.txt `
+              --target '${{ github.sha }}' `
+              --title "Project NSTU ${{ inputs.tag }}" `
+              --notes-file docs\PRODUCTION_RELEASE_NOTES.md

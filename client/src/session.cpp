@@ -67,7 +67,7 @@ bool harden_service_dacl(const std::wstring& service_name, std::string* error) {
     constexpr wchar_t sddl[] =
         L"D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)"
         L"(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)"
-        L"(A;;CCLCSWLOCRRC;;;AU)";
+        L"(A;;LCLORC;;;AU)";
     const bool converted = ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl, SDDL_REVISION_1, &descriptor, nullptr) != FALSE;
     const bool applied = converted &&

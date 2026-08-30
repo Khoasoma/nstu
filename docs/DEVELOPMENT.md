@@ -279,8 +279,11 @@ Winsock, DXGI, D3D11 và Media Foundation là thành phần của Windows SDK, k
 
 ## Trạng thái production
 
-Green CI chỉ chứng minh build và local correctness. Trước khi triển khai thật
-cần hoàn tất IOCP `AcceptEx`/`WSARecv`/`WSASend` dispatcher, persisted keyring và
-enrollment transport, packetizer/jitter/NACK/keyframe scheduling, service-agent
-routing, installer/signing, device-loss recovery, 50-client soak test, switch
-multicast matrix và Intel driver matrix.
+IOCP dispatcher, persisted keyring, enrollment transport, packetizer, jitter,
+NACK, keyframe scheduling, service-agent routing, signing automation và
+device-loss recovery đã có implementation và automated test. Green CI vẫn chỉ
+chứng minh build và local correctness. Trước khi triển khai thật phải nối hoàn
+chỉnh UDP/H.264 decode vào live screen wall, chạy production signing bằng
+certificate thật, review/fuzz protocol, rồi hoàn tất 50-client soak test, switch
+multicast matrix, forced unicast fallback, Windows matrix và Intel driver matrix
+theo [PRODUCTION_VALIDATION.md](PRODUCTION_VALIDATION.md).

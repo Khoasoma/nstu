@@ -29,6 +29,8 @@ public:
                             std::string* error = nullptr) const;
     [[nodiscard]] int read(std::span<std::byte> bytes,
                            std::string* error = nullptr) const;
+    [[nodiscard]] bool available_bytes(std::uint32_t& bytes,
+                                       std::string* error = nullptr) const;
     [[nodiscard]] bool is_open() const noexcept;
     void close() noexcept;
 

@@ -1,10 +1,13 @@
-#include "nstu/named_pipe.hpp"
+#include "nstu/agent_protocol.hpp"
 
 #include <windows.h>
 #include <shellapi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <iterator>
+#include <string>
+#include <thread>
 
 namespace {
 
@@ -12,6 +15,7 @@ constexpr wchar_t kWindowClass[] = L"NstuAgentOverlay";
 constexpr wchar_t kChatWindowClass[] = L"NstuAgentChat";
 constexpr wchar_t kInstanceMutex[] = L"Local\\NSTU.Agent.Singleton";
 constexpr UINT kTrayMessage = WM_APP + 1;
+constexpr UINT kAgentCommandMessage = WM_APP + 2;
 constexpr UINT kTrayId = 1;
 constexpr int kChatMessages = 1001;
 constexpr int kChatInput = 1002;
@@ -20,6 +24,93 @@ constexpr int kChatSend = 1003;
 HWND g_chat_window = nullptr;
 HWND g_chat_messages = nullptr;
 HWND g_chat_input = nullptr;
+std::atomic_bool g_agent_stopping = false;
+std::atomic_bool g_locked = false;
+std::atomic_bool g_streaming = false;
+std::atomic<std::uint8_t> g_stream_fps = 0;
+
+std::wstring utf8_to_wide(std::span<const std::byte> bytes) {
+    if (bytes.empty()) {
+        return {};
+    }
+    const auto* text = reinterpret_cast<const char*>(bytes.data());
+    const int length = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, text, static_cast<int>(bytes.size()),
+        nullptr, 0);
+    if (length <= 0) {
+        return {};
+    }
+    std::wstring wide(static_cast<std::size_t>(length), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text,
+                            static_cast<int>(bytes.size()), wide.data(),
+                            length) != length) {
+        return {};
+    }
+    return wide;
+}
+
+void send_agent_status(nstu::client::NamedPipe& pipe) {
+    const nstu::client::AgentStatus status{
+        .locked = g_locked.load(),
+        .streaming = g_streaming.load(),
+        .frames_per_second = g_stream_fps.load(),
+        .session_id = WTSGetActiveConsoleSessionId(),
+    };
+    (void)nstu::client::send_agent_message(
+        pipe,
+        {nstu::client::AgentMessageType::status_report,
+         nstu::client::encode_agent_status(status)},
+        nullptr);
+}
+
+void pipe_control_loop(HWND overlay) {
+    while (!g_agent_stopping.load()) {
+        nstu::client::NamedPipe pipe;
+        if (!pipe.connect_client(nstu::client::kControlPipeName, 1000,
+                                 nullptr)) {
+            continue;
+        }
+        while (!g_agent_stopping.load()) {
+            std::uint32_t available = 0;
+            if (!pipe.available_bytes(available, nullptr)) {
+                break;
+            }
+            if (available == 0) {
+                Sleep(25);
+                continue;
+            }
+            const auto message =
+                nstu::client::receive_agent_message(pipe, nullptr);
+            if (!message) {
+                break;
+            }
+            if (message->type == nstu::client::AgentMessageType::lock ||
+                message->type == nstu::client::AgentMessageType::unlock ||
+                message->type == nstu::client::AgentMessageType::stop_stream ||
+                message->type ==
+                    nstu::client::AgentMessageType::keyframe_request) {
+                SendMessageW(overlay, kAgentCommandMessage,
+                             static_cast<WPARAM>(message->type), 0);
+            } else if (message->type ==
+                           nstu::client::AgentMessageType::start_stream &&
+                       message->payload.size() == 1) {
+                SendMessageW(
+                    overlay, kAgentCommandMessage,
+                    static_cast<WPARAM>(message->type),
+                    std::to_integer<std::uint8_t>(message->payload[0]));
+            } else if (message->type ==
+                       nstu::client::AgentMessageType::chat) {
+                const auto chat = utf8_to_wide(message->payload);
+                if (!chat.empty()) {
+                    SendMessageW(overlay, kAgentCommandMessage,
+                                 static_cast<WPARAM>(message->type),
+                                 reinterpret_cast<LPARAM>(chat.c_str()));
+                }
+            }
+            send_agent_status(pipe);
+        }
+    }
+}
 
 void append_chat_line(const wchar_t* message) {
     if (g_chat_messages == nullptr) {
@@ -123,6 +214,31 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             }
         }
         return 0;
+    case kAgentCommandMessage: {
+        const auto type = static_cast<nstu::client::AgentMessageType>(wparam);
+        if (type == nstu::client::AgentMessageType::lock) {
+            g_locked = true;
+            ShowWindow(window, SW_SHOW);
+            SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+        } else if (type == nstu::client::AgentMessageType::unlock) {
+            g_locked = false;
+            ShowWindow(window, SW_HIDE);
+        } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
+            append_chat_line(reinterpret_cast<const wchar_t*>(lparam));
+            if (g_chat_window != nullptr) {
+                ShowWindow(g_chat_window, SW_SHOW);
+            }
+        } else if (type == nstu::client::AgentMessageType::start_stream &&
+                   lparam >= 5 && lparam <= 15) {
+            g_stream_fps = static_cast<std::uint8_t>(lparam);
+            g_streaming = true;
+        } else if (type == nstu::client::AgentMessageType::stop_stream) {
+            g_streaming = false;
+            g_stream_fps = 0;
+        }
+        return 0;
+    }
     case WM_PAINT: {
         PAINTSTRUCT paint{};
         HDC context = BeginPaint(window, &paint);
@@ -196,6 +312,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     lstrcpyW(tray.szTip, L"NSTU client");
     Shell_NotifyIconW(NIM_ADD, &tray);
     ShowWindow(g_chat_window, SW_SHOWDEFAULT);
+    std::thread control_thread(pipe_control_loop, window);
 
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
@@ -203,6 +320,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         DispatchMessageW(&message);
     }
     Shell_NotifyIconW(NIM_DELETE, &tray);
+    g_agent_stopping = true;
+    if (control_thread.joinable()) {
+        control_thread.join();
+    }
     CloseHandle(instance_mutex);
     return static_cast<int>(message.wParam);
 }

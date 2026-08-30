@@ -5,6 +5,7 @@
 #include <mfidl.h>
 #include <mftransform.h>
 #include <codecapi.h>
+#include <icodecapi.h>
 #include <d3d11.h>
 #include <wrl/client.h>
 
@@ -306,6 +307,30 @@ bool HardwareH264Encoder::encode_nv12_texture(
     std::copy_n(reinterpret_cast<const std::byte*>(encoded), current_length,
                 access_unit.begin());
     output_buffer->Unlock();
+    return true;
+}
+
+bool HardwareH264Encoder::request_keyframe(std::string* error) {
+    if (!initialized()) {
+        set_error(error, "encoder is not initialized");
+        return false;
+    }
+    Microsoft::WRL::ComPtr<ICodecAPI> codec_api;
+    if (FAILED(impl_->transform.As(&codec_api))) {
+        set_error(error, "encoder keyframe control is unavailable");
+        return false;
+    }
+    VARIANT value;
+    VariantInit(&value);
+    value.vt = VT_UI4;
+    value.ulVal = 1;
+    const HRESULT result = codec_api->SetValue(
+        &CODECAPI_AVEncVideoForceKeyFrame, &value);
+    VariantClear(&value);
+    if (FAILED(result)) {
+        set_error(error, "encoder keyframe request failed");
+        return false;
+    }
     return true;
 }
 

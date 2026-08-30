@@ -35,6 +35,8 @@ public:
                                std::string* error = nullptr) const;
     [[nodiscard]] int receive(std::span<std::byte> bytes,
                               std::string* error = nullptr) const;
+    [[nodiscard]] bool wait_readable(std::uint32_t timeout_ms,
+                                     std::string* error = nullptr) const;
     [[nodiscard]] bool is_open() const noexcept;
     [[nodiscard]] std::uintptr_t native_handle() const noexcept;
     [[nodiscard]] std::uint16_t local_port(

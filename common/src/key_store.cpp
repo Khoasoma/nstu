@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <mutex>
+#include <tuple>
 
 namespace nstu::security {
 namespace {
@@ -140,6 +141,70 @@ std::size_t KeyStore::active_key_count() const noexcept {
 std::size_t KeyStore::key_count() const noexcept {
     std::shared_lock lock(mutex_);
     return entries_.size();
+}
+
+std::vector<KeyRecord> KeyStore::snapshot() const {
+    std::shared_lock lock(mutex_);
+    std::vector<KeyRecord> records;
+    records.reserve(entries_.size());
+    for (const auto& [lookup_key, entry] : entries_) {
+        (void)lookup_key;
+        KeyRecord record;
+        record.client_id = entry.client_id;
+        record.key_id = entry.key_id;
+        record.revoked = entry.revoked;
+        if (!entry.revoked) {
+            record.key = entry.key;
+        }
+        records.push_back(std::move(record));
+    }
+    std::sort(records.begin(), records.end(), [](const auto& left,
+                                                  const auto& right) {
+        return std::tie(left.client_id, left.key_id) <
+               std::tie(right.client_id, right.key_id);
+    });
+    return records;
+}
+
+bool KeyStore::replace(std::span<const KeyRecord> records,
+                       std::string* error) {
+    std::unordered_map<std::string, Entry> replacement;
+    replacement.reserve(records.size());
+    const auto wipe_replacement = [&replacement] {
+        for (auto& [lookup_key, entry] : replacement) {
+            (void)lookup_key;
+            secure_zero(entry.key);
+        }
+    };
+    for (const auto& record : records) {
+        if (record.key_id == 0 ||
+            (record.revoked ? !record.key.empty() : !valid_key(record.key))) {
+            wipe_replacement();
+            set_error(error, "invalid keyring record");
+            return false;
+        }
+        Entry entry;
+        entry.client_id = record.client_id;
+        entry.key_id = record.key_id;
+        entry.revoked = record.revoked;
+        if (!record.revoked) {
+            entry.key = record.key;
+        }
+        const auto lookup_key = make_lookup_key(record.client_id,
+                                                 record.key_id);
+        if (!replacement.emplace(lookup_key, std::move(entry)).second) {
+            secure_zero(entry.key);
+            wipe_replacement();
+            set_error(error, "duplicate keyring record");
+            return false;
+        }
+    }
+
+    std::unique_lock lock(mutex_);
+    entries_.swap(replacement);
+    lock.unlock();
+    wipe_replacement();
+    return true;
 }
 
 std::string KeyStore::make_lookup_key(const ClientId& client_id,

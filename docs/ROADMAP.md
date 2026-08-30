@@ -32,24 +32,47 @@
 - [x] Bilingual deployment-facing README with installation, network, licensing,
       Deep Freeze, and honest MVP-status guidance.
 
-## Next engineering milestones
+## Completed production engineering
 
-- [ ] Add persisted keyring loading/saving and authenticated enrollment transport
-      around the in-process key lifecycle manager.
-- [ ] Wire the handshake rate limiter into the live IOCP accept/dispatch loop and
-      emit security audit events.
-- [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
-- [ ] Packetizer, jitter buffer, NACK policy, and keyframe scheduling.
-- [ ] Wire live service-agent commands for lock/unlock and status reporting.
-- [ ] Connect server UI actions to the control plane.
-- [ ] Device-loss recovery loop for duplication, converter, and encoder.
-- [ ] Signed binaries and thaw-space configuration for Deep Freeze deployments;
-      validate the conservative uninstall guard against supported editions.
-- [ ] 50-client soak, switch multicast matrix, Windows/Intel driver matrix, and
-      memory/CPU benchmark capture.
+- [x] Persisted, versioned DPAPI keyring with active keys and revoked-ID
+      tombstones, plus replay-resistant authenticated bootstrap enrollment.
+- [x] Live IOCP `AcceptEx`/`WSARecv`/`WSASend` dispatcher with bounded connection
+      capacity, source rate limiting, audit events, and a 64-client integration
+      test.
+- [x] Authenticated server control plane and reconnecting service client with
+      status, heartbeat, lock/unlock, chat, stream, stop, and keyframe commands.
+- [x] Live service-agent named-pipe routing and status reporting.
+- [x] Server dashboard actions connected to authenticated client sessions.
+- [x] Authenticated video packetizer, jitter buffer, bounded NACK policy, and
+      keyframe scheduler with deterministic reordering/loss tests.
+- [x] Duplication/converter/encoder recovery orchestration with bounded
+      exponential retry and hardware keyframe control.
+- [x] Authenticode hooks, a certificate-gated production workflow, protected
+      configurable data roots for Deep Freeze thaw spaces, and deployment
+      validation scripts.
+- [x] Reproducible benchmark and multicast-matrix tooling plus a production
+      evidence record.
+
+## Remaining production release gates
+
+- [ ] Connect encoded UDP send/receive, authenticated group-key rotation, H.264
+      decode, and D3D11 preview textures to the room screen wall. Transport
+      primitives exist, but the current preview still has no decoded live frame.
+- [ ] Run the production workflow with the real code-signing certificate and
+      verify signatures/timestamps on both installers and installed binaries.
+- [ ] Validate the conservative Deep Freeze install/uninstall/data-root behavior
+      against every edition and version the project claims to support.
+- [ ] Execute and attach evidence for the 50-client soak, multicast switch
+      matrix, forced unicast fallback, Windows build matrix, Intel driver matrix,
+      and CPU/RAM/network benchmarks.
+- [ ] Complete independent protocol review and fuzzing. Where the LAN threat
+      model requires screen confidentiality, add authenticated encryption before
+      deployment; the current video format authenticates but does not encrypt.
 
 ## Context note
 
-The repository is intentionally an MVP foundation. A green build demonstrates
-API integration and local correctness; it does not establish production
-reliability on unmanaged switches or heterogeneous school hardware.
+The repository now contains the control, enrollment, persistence, packetization,
+and recovery implementations that were previously roadmap stubs. A green build
+still does not establish production reliability, decoded live-screen delivery,
+certificate trust, or compatibility with heterogeneous school hardware. The
+evidence gates above remain release-blocking.

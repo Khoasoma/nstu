@@ -19,6 +19,20 @@ bool ClientRegistry::set_status(std::uint64_t id, ClientStatus status) {
     return true;
 }
 
+bool ClientRegistry::touch(std::uint64_t id) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end()) {
+        return false;
+    }
+    found->second.last_seen = std::chrono::steady_clock::now();
+    if (found->second.status == ClientStatus::connecting ||
+        found->second.status == ClientStatus::offline) {
+        found->second.status = ClientStatus::online;
+    }
+    return true;
+}
+
 bool ClientRegistry::update_health(std::uint64_t id, std::uint32_t latency_ms,
                                    std::uint32_t loss_per_mille,
                                    std::uint64_t finalized_sample_size,

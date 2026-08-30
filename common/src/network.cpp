@@ -232,6 +232,33 @@ int TcpSocket::receive(std::span<std::byte> bytes, std::string* error) const {
 #endif
 }
 
+bool TcpSocket::wait_readable(std::uint32_t timeout_ms,
+                              std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "socket is not open");
+        return false;
+    }
+    fd_set read_set;
+    FD_ZERO(&read_set);
+    FD_SET(static_cast<SOCKET>(handle_), &read_set);
+    timeval timeout{
+        static_cast<long>(timeout_ms / 1000u),
+        static_cast<long>((timeout_ms % 1000u) * 1000u),
+    };
+    const int result = select(0, &read_set, nullptr, nullptr, &timeout);
+    if (result == SOCKET_ERROR) {
+        set_error(error, "socket readiness wait failed");
+        return false;
+    }
+    return result > 0;
+#else
+    (void)timeout_ms;
+    set_error(error, "TCP transport requires Windows");
+    return false;
+#endif
+}
+
 bool TcpSocket::is_open() const noexcept {
     return handle_ != kInvalidNativeHandle;
 }

@@ -11,8 +11,10 @@ lệnh điều khiển được xác thực, chat và truyền màn hình độ 
 nội bộ.
 
 > **Trạng thái phát triển:** NSTU hiện là engineering MVP, chưa phải bản
-> production. Installer và giao diện đã có thể build/kiểm thử, nhưng enrollment,
-> dispatcher nhiều client, routing lệnh và video end-to-end chưa hoàn thành.
+> production. Persisted enrollment, dispatcher nhiều client, authenticated
+> control routing, packetization và device recovery đã có implementation/test;
+> decoded live-screen end-to-end và validation matrix trên phòng máy thật chưa
+> hoàn thành.
 > Không nên dùng bản nightly hiện tại như một biện pháp bảo mật trong trường học
 > thật.
 
@@ -89,8 +91,9 @@ Trước khi triển khai production:
    snooping, multicast có thể bị flood đến mọi port. Nếu multicast bị chặn,
    fallback unicast dự kiến sẽ làm băng thông server và switch tăng theo từng
    client.
-6. Luôn bật Windows Firewall. MVP hiện tại chưa có hợp đồng port production ổn
-   định và cấu hình được, vì vậy không tạo allow rule rộng dựa trên port tự đoán.
+6. Luôn bật Windows Firewall. TCP `47001` là control port mặc định và UDP `47000`
+   dành cho video transport. Chỉ mở rule cho VLAN phòng học và executable cần
+   thiết; không expose rule rộng ra Internet.
 
 Multicast qua nhiều VLAN cần multicast routing được cấu hình có chủ đích. Không
 nên bật tính năng này chỉ để discovery hoạt động.
@@ -123,7 +126,7 @@ chuyển giữa `Room screens`, hiển thị toàn bộ client phù hợp trong 
 responsive, và `Selected client`, tập trung telemetry, điều khiển stream và chat
 cho một máy. Target refresh của screen wall điều chỉnh được từ 5-15 FPS; nên bắt
 đầu ở 5 FPS cho phòng 50 client cho đến khi hoàn tất soak test decoder và mạng.
-Routing control plane và decoded frame thật vẫn đang được tích hợp.
+Control plane thật đã được nối; decoded frame vẫn đang được tích hợp.
 
 ### Client
 
@@ -145,10 +148,19 @@ một lần. Gỡ service thủ công không phải quy trình triển khai đư
 
 ## Kết nối một phòng máy
 
-Bản nightly hiện tại chưa có quy trình kết nối cho người dùng cuối: persisted
-enrollment và live multi-client dispatcher vẫn nằm trong roadmap. Một quy trình
-production hoàn chỉnh phải có đủ các bước sau trước khi client được coi là tin
-cậy:
+Quy trình enrollment engineering hiện dùng command line. Trên server, chạy
+`configure-data-root.ps1` và `new-enrollment-secret.ps1` bằng quyền Administrator,
+sau đó restart `nstu-server.exe`. Trên từng client, dùng identity 128-bit riêng:
+
+```powershell
+$clientId = [guid]::NewGuid().ToString("N")
+& "$env:ProgramFiles\NSTU\client\nstu-provision.exe" `
+  192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+Tool xác thực enrollment transcript, derive PSK mà không truyền PSK trên mạng,
+và lưu cấu hình client bằng machine-scope DPAPI. Xóa mọi bản copy enrollment
+secret sau khi enroll, rồi restart service hoặc Windows.
 
 ```text
 Cài client
@@ -160,15 +172,16 @@ Cài client
 ```
 
 Connection preamble chỉ giúp loại nhanh peer sai rõ ràng. Danh tính máy chỉ
-được chấp nhận sau khi cryptographic handshake thành công. Dự án sẽ công bố
-port chính xác, multicast group policy, firewall rule và enrollment UI khi các
-giao diện này ổn định.
+được chấp nhận sau khi cryptographic handshake thành công. Enrollment UI cho
+giáo viên và workflow multicast/group-key cuối cùng vẫn là release work.
 
 ## Triển khai cùng Deep Freeze
 
 - Cài binary vào vị trí Windows được bảo vệ thông thường.
 - Dành riêng một thawed location có ACL chặt cho identity đã enroll, key material
   được bảo vệ, cấu hình, audit log và update state.
+- Cấu hình vị trí đó trước enrollment bằng `configure-data-root.ps1 -DataRoot
+  "D:\NSTUData"`.
 - Tuyệt đối không đưa PSK, certificate, dump, screen capture hay runtime secret
   vào repository.
 - Không đóng băng image production trước khi đã kiểm thử persistence của
@@ -186,8 +199,10 @@ protected storage. Deep Freeze sẽ hủy mọi state nằm ngoài thawed space 
 - Control session hiện tại dùng mutual HMAC authentication và replay protection.
 - Video datagram có thể được xác thực, nhưng nội dung màn hình chưa được mã hóa.
   Không thử nghiệm màn hình nhạy cảm trên LAN không tin cậy.
-- Code signing, authenticated enrollment transport, persisted keyring,
-  device-loss recovery, review độc lập và fuzzing vẫn là production blocker.
+- Automation Authenticode đã có, nhưng artifact nightly vẫn chưa ký; production
+  release phải chạy workflow với certificate thật.
+- Decoded live screen, review/fuzz độc lập, validation từng edition Deep Freeze
+  và hardware/network matrix vẫn là production blocker.
 - CI xanh chỉ chứng minh build và automated test đạt, không chứng minh an toàn
   hoặc độ bền trên phần cứng trường học thật.
 

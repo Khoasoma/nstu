@@ -1,4 +1,8 @@
 #include "nstu/client_registry.hpp"
+#include "nstu/control_plane.hpp"
+#include "nstu/deployment.hpp"
+#include "nstu/key_store.hpp"
+#include "nstu/secret_store.hpp"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -13,6 +17,7 @@
 #include <array>
 #include <cctype>
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <string_view>
 
@@ -41,6 +46,8 @@ struct DashboardState {
     int screen_fps = 10;
     bool show_offline = true;
     bool stream_requested = false;
+    std::string control_status;
+    std::string startup_error;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
 };
@@ -492,7 +499,8 @@ void draw_telemetry_card(const char* label, const char* value, float width) {
 
 void draw_selected_client(
     const std::vector<nstu::server::ClientRecord>& clients,
-    const nstu::server::ClientRecord* selected_client, DashboardState& state) {
+    const nstu::server::ClientRecord* selected_client, DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
     draw_focus_client_list(clients, state);
     ImGui::SameLine();
     if (!ImGui::BeginChild("focus-detail", {0, 0}, false)) {
@@ -556,11 +564,27 @@ void draw_selected_client(
                           {0.25f, 0.25f, 0.24f, 1.0f});
     ImGui::PushStyleColor(ImGuiCol_Text, {1.0f, 1.0f, 1.0f, 1.0f});
     if (ImGui::Button(state.stream_requested ? "Stop stream" : "Start stream")) {
-        state.stream_requested = !state.stream_requested;
+        const bool enabled = !state.stream_requested;
+        std::string error;
+        if (control_plane.set_streaming(
+                selected_client->id, enabled,
+                static_cast<std::uint8_t>(state.screen_fps), &error)) {
+            state.stream_requested = enabled;
+            state.control_status = enabled ? "Stream command sent."
+                                           : "Stop command sent.";
+        } else {
+            state.control_status = error;
+        }
+        ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(4);
     ImGui::SameLine();
     if (ImGui::Button("Request keyframe")) {
+        std::string error;
+        state.control_status =
+            control_plane.request_keyframe(selected_client->id, &error)
+                ? "Keyframe requested."
+                : error;
         ImGui::OpenPopup("control-status");
     }
     ImGui::SameLine();
@@ -568,12 +592,19 @@ void draw_selected_client(
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
                           {0.97f, 0.86f, 0.86f, 1.0f});
     ImGui::PushStyleColor(ImGuiCol_Text, {0.62f, 0.18f, 0.17f, 1.0f});
-    if (ImGui::Button("Lock client")) {
+    const bool is_locked =
+        selected_client->status == nstu::server::ClientStatus::locked;
+    if (ImGui::Button(is_locked ? "Unlock client" : "Lock client")) {
+        std::string error;
+        state.control_status =
+            control_plane.set_locked(selected_client->id, !is_locked, &error)
+                ? (is_locked ? "Unlock command sent." : "Lock command sent.")
+                : error;
         ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(3);
     if (ImGui::BeginPopup("control-status")) {
-        ImGui::TextUnformatted("Control-plane routing is pending.");
+        ImGui::TextUnformatted(state.control_status.c_str());
         ImGui::EndPopup();
     }
 
@@ -587,7 +618,15 @@ void draw_selected_client(
         ImGui::SameLine();
         if ((submit || ImGui::Button("Send", {68.0f, 0.0f})) &&
             state.chat_input[0] != '\0') {
-            state.chat_input[0] = '\0';
+            std::string error;
+            if (control_plane.send_chat(selected_client->id,
+                                        state.chat_input.data(), &error)) {
+                state.chat_input[0] = '\0';
+                state.control_status = "Message sent.";
+            } else {
+                state.control_status = error;
+            }
+            ImGui::OpenPopup("control-status");
         }
     }
     ImGui::EndChild();
@@ -609,6 +648,13 @@ void draw_dashboard_header(const std::vector<nstu::server::ClientRecord>& client
     const float control_width = 286.0f;
     ImGui::SameLine(ImGui::GetContentRegionMax().x - control_width);
     draw_fps_stepper(state);
+    if (!state.startup_error.empty()) {
+        ImGui::PushTextWrapPos();
+        ImGui::TextColored({0.62f, 0.18f, 0.17f, 1.0f},
+                           "Control service unavailable: %s",
+                           state.startup_error.c_str());
+        ImGui::PopTextWrapPos();
+    }
 
     const float gap = ImGui::GetStyle().ItemSpacing.x;
     const float summary_width =
@@ -670,7 +716,34 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
 
     nstu::server::ClientRegistry registry;
+    nstu::security::KeyStore key_store;
+    nstu::server::ServerControlPlane control_plane(registry, key_store);
     DashboardState dashboard;
+    std::string deployment_error;
+    const auto data_directory = nstu::deployment::data_root(&deployment_error);
+    if (!data_directory.empty() &&
+        nstu::deployment::ensure_data_root(data_directory, &deployment_error)) {
+        nstu::server::ServerControlPlaneConfig control_config;
+        control_config.keyring_path =
+            (data_directory / L"server-keyring.bin").wstring();
+        constexpr char entropy_text[] = "NSTU-SERVER-KEYRING-V1";
+        control_config.keyring_entropy.assign(
+            reinterpret_cast<const std::byte*>(entropy_text),
+            reinterpret_cast<const std::byte*>(entropy_text) +
+                sizeof(entropy_text) - 1);
+        control_config.enrollment_secret = nstu::security::load_machine_secret(
+            (data_directory / L"server-enrollment.bin").wstring(), {}, nullptr);
+        std::string control_error;
+        if (!control_plane.start(std::move(control_config), &control_error)) {
+            dashboard.startup_error = control_error.empty()
+                ? "control listener failed to start"
+                : std::move(control_error);
+        }
+    } else {
+        dashboard.startup_error = deployment_error.empty()
+            ? "protected data directory is unavailable"
+            : std::move(deployment_error);
+    }
     bool running = true;
     while (running) {
         MSG message{};
@@ -714,7 +787,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         if (dashboard.view == DashboardView::room_screens) {
             draw_room_screen_wall(clients, dashboard);
         } else {
-            draw_selected_client(clients, selected, dashboard);
+            draw_selected_client(clients, selected, dashboard, control_plane);
         }
         ImGui::End();
 
@@ -726,6 +799,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         g_swap_chain->Present(1, 0);
     }
 
+    control_plane.stop();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
     ImGui::DestroyContext();

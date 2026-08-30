@@ -78,6 +78,8 @@ public:
                             std::string* error = nullptr);
     [[nodiscard]] std::optional<AuthenticatedCommand> receive(
         std::string* error = nullptr);
+    [[nodiscard]] bool wait_readable(std::uint32_t timeout_ms,
+                                     std::string* error = nullptr) const;
     [[nodiscard]] bool is_open() const noexcept;
     void close() noexcept;
 

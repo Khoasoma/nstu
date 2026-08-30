@@ -1,4 +1,7 @@
-add_library(nstu_server_state STATIC src/client_registry.cpp)
+add_library(nstu_server_state STATIC
+    src/client_registry.cpp
+    src/control_plane.cpp
+)
 target_include_directories(nstu_server_state PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(nstu_server_state PUBLIC cxx_std_20)
 target_link_libraries(nstu_server_state PUBLIC nstu_common)
