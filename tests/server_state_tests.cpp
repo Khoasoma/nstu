@@ -6,6 +6,8 @@
 int main() {
     using namespace std::chrono_literals;
     nstu::server::ClientRegistry registry;
+    assert(registry.size() == 0);
+    assert(registry.snapshot().empty());
     const auto now = std::chrono::steady_clock::now();
     registry.upsert({
         .id = 1,

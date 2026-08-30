@@ -17,6 +17,7 @@ The server shell presents a split operational view: a scannable client registry,
 selected-client telemetry, a 16:9 preview surface with a 15 FPS target, control
 actions, and a compact chat panel. The preview is deliberately stateful and
 shows no-frame status until authenticated video packets are connected. The
+registry starts empty and does not inject demonstration client records. The
 client agent uses standard Win32 LISTBOX/EDIT/BUTTON controls for a small chat
 window; no UI framework is added to the client.
 
@@ -68,4 +69,5 @@ for reporting, hysteresis, stream-reset, and fallback rules.
   overlay is not wired end to end.
 - The encoder accepts NV12 textures and handles asynchronous MFT events, but
   long-duration rate-control and device-loss recovery need soak testing.
-- The UI currently seeds demonstration clients instead of live discovery.
+- The UI starts with an empty registry; the live IOCP dispatcher still needs to
+  feed authenticated client records into that registry.

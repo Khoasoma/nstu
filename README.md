@@ -118,30 +118,31 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-The current dashboard displays demonstration clients. `Start stream`, `Lock`,
-`Request keyframe`, and chat are UI states only until the live control plane is
-connected.
+The dashboard does not inject demonstration records. It starts with an empty
+client registry and displays only records supplied by the runtime registry.
+`Start stream`, `Lock`, `Request keyframe`, and chat remain unavailable until a
+real client record is present; live control-plane routing is still being
+integrated.
 
 ### Client
 
-1. Download and install `nstu-client-<version>.exe` as an administrator.
-2. Open an elevated PowerShell window and run:
+1. Download and run `nstu-client-<version>.exe` as an administrator.
+2. The installer registers `nstu-service` for automatic startup and configures
+   service recovery. It deliberately does not start the service inside the
+   installer session.
+3. Restart Windows when setup requests it. On the next boot the service starts
+   automatically and launches one `nstu-agent.exe` instance in the active user
+   session on logon or unlock.
+4. After restart, an administrator can verify the service with:
 
    ```powershell
-   Set-Location "$env:ProgramFiles\NSTU\client"
-   .\install-client-service.ps1
    Get-Service nstu-service
    ```
 
-3. The service attempts to start `nstu-agent.exe` in the active desktop
-   session. The tray icon and local chat window can be used to inspect the
-   client UI.
-4. Before uninstalling the client, remove the service:
-
-   ```powershell
-   Set-Location "$env:ProgramFiles\NSTU\client"
-   .\uninstall-client-service.ps1
-   ```
+Use Windows **Installed apps** or the NSTU uninstaller to remove the client.
+The uninstaller stops the agent, deletes the service, removes package files,
+and requires another restart. Direct manual service removal is not a supported
+deployment workflow.
 
 ## Connecting a computer room
 
@@ -173,6 +174,11 @@ the enrollment UI when those interfaces become stable.
   the repository.
 - Do not freeze a production image before enrollment persistence, service
   recovery, upgrade, and rollback behavior have been tested.
+- Boot the workstation Thawed and disable Deep Freeze protection before
+  installing, upgrading, or uninstalling NSTU. The client uninstaller checks
+  recognized `DFServ`/`DeepFrz` services and aborts while their protection is
+  still active; this conservative check must be validated against the exact
+  Deep Freeze edition used by the school.
 
 Named pipes and memory-mapped files reduce temporary disk activity but do not
 replace persistent protected storage. Deep Freeze will discard unthawed state

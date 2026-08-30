@@ -14,7 +14,9 @@
 - [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
 - [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
 - [x] Bounded unauthenticated handshake rate limiter with temporary blocking.
-- [x] CPack/NSIS server and client installer targets with service scripts.
+- [x] CPack/NSIS server and client installers with automatic service
+      registration, recovery policy, reboot activation, and package-owned
+      uninstall handling.
 - [x] Server UI layout for client telemetry, 15 FPS preview state, chat and
       control actions; lightweight Native Win32 client chat shell.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
@@ -23,6 +25,7 @@
 - [x] Hardware H.264 MFT configuration and asynchronous event handling.
 - [x] Service/session-agent separation, DACL helpers, named pipe, tray, overlay.
 - [x] Dear ImGui/D3D11 server shell and thread-safe client state registry.
+- [x] Empty-by-default server registry with no demonstration client injection.
 - [x] IOCP completion-port create, socket association, wait, and post wrappers.
 - [x] Unit/integration tests and Windows CI.
 - [x] Bilingual deployment-facing README with installation, network, licensing,
@@ -39,8 +42,8 @@
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.
 - [ ] Connect server UI actions to the control plane.
 - [ ] Device-loss recovery loop for duplication, converter, and encoder.
-- [ ] Signed binaries, service recovery configuration, and thaw-space
-      configuration for Deep Freeze deployments.
+- [ ] Signed binaries and thaw-space configuration for Deep Freeze deployments;
+      validate the conservative uninstall guard against supported editions.
 - [ ] 50-client soak, switch multicast matrix, Windows/Intel driver matrix, and
       memory/CPU benchmark capture.
 

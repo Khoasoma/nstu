@@ -10,6 +10,7 @@ namespace {
 
 constexpr wchar_t kWindowClass[] = L"NstuAgentOverlay";
 constexpr wchar_t kChatWindowClass[] = L"NstuAgentChat";
+constexpr wchar_t kInstanceMutex[] = L"Local\\NSTU.Agent.Singleton";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kTrayId = 1;
 constexpr int kChatMessages = 1001;
@@ -145,6 +146,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    HANDLE instance_mutex = CreateMutexW(nullptr, TRUE, kInstanceMutex);
+    if (instance_mutex == nullptr || GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (instance_mutex != nullptr) {
+            CloseHandle(instance_mutex);
+        }
+        return 0;
+    }
     WNDCLASSW window_class{};
     window_class.hInstance = instance;
     window_class.lpfnWndProc = window_proc;
@@ -166,6 +174,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kWindowClass, L"NSTU Lock",
         WS_POPUP, x, y, width, height, nullptr, nullptr, instance, nullptr);
     if (window == nullptr) {
+        CloseHandle(instance_mutex);
         return 1;
     }
     g_chat_window = CreateWindowExW(
@@ -174,6 +183,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         nullptr);
     if (g_chat_window == nullptr) {
         DestroyWindow(window);
+        CloseHandle(instance_mutex);
         return 1;
     }
     NOTIFYICONDATAW tray{};
@@ -193,5 +203,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         DispatchMessageW(&message);
     }
     Shell_NotifyIconW(NIM_DELETE, &tray);
+    CloseHandle(instance_mutex);
     return static_cast<int>(message.wParam);
 }

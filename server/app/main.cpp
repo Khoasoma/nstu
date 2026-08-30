@@ -9,7 +9,6 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
-#include <chrono>
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -72,23 +71,6 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
-void seed_demo_clients(nstu::server::ClientRegistry& registry) {
-    const auto now = std::chrono::steady_clock::now();
-    for (std::uint64_t index = 1; index <= 8; ++index) {
-        registry.upsert({
-            .id = index,
-            .hostname = "LAB-PC-" + std::to_string(index),
-            .address = "192.168.1." + std::to_string(100 + index),
-            .status = nstu::server::ClientStatus::online,
-            .delivery = nstu::net::VideoDeliveryMode::multicast,
-            .latency_ms = static_cast<std::uint32_t>(2 + index),
-            .packet_loss_per_mille = 0,
-            .packet_loss_sample_size = 1000,
-            .last_seen = now,
-        });
-    }
-}
-
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
@@ -114,8 +96,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
 
     nstu::server::ClientRegistry registry;
-    seed_demo_clients(registry);
-    std::uint64_t selected_client_id = 1;
+    std::uint64_t selected_client_id = 0;
     bool stream_requested = false;
     std::array<char, 512> chat_input{};
     bool running = true;
@@ -142,14 +123,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         ImGui::Text("Connected clients: %zu", registry.size());
         ImGui::Separator();
         const auto clients = registry.snapshot();
+        const auto selected_client = std::find_if(
+            clients.begin(), clients.end(),
+            [selected_client_id](const auto& client) {
+                return client.id == selected_client_id;
+            });
+        const bool has_selected_client = selected_client != clients.end();
         const float left_width = ImGui::GetContentRegionAvail().x * 0.58f;
         if (ImGui::BeginChild("client-list", {left_width, 0}, true)) {
             ImGui::TextUnformatted("Clients");
             ImGui::Separator();
-            if (ImGui::BeginTable("clients", 6,
-                                  ImGuiTableFlags_Borders |
-                                      ImGuiTableFlags_RowBg |
-                                      ImGuiTableFlags_SizingStretchProp)) {
+            if (clients.empty()) {
+                ImGui::TextDisabled("No authenticated clients connected.");
+            } else if (ImGui::BeginTable(
+                           "clients", 6,
+                           ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                               ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn("Host");
                 ImGui::TableSetupColumn("Address");
                 ImGui::TableSetupColumn("Status");
@@ -186,24 +175,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         ImGui::EndChild();
         ImGui::SameLine();
         if (ImGui::BeginChild("client-detail", {0, 0}, true)) {
-            const auto found = std::find_if(
-                clients.begin(), clients.end(),
-                [selected_client_id](const auto& client) {
-                    return client.id == selected_client_id;
-                });
-            if (found == clients.end()) {
-                ImGui::TextUnformatted("Select a client");
+            if (!has_selected_client) {
+                ImGui::TextUnformatted(clients.empty()
+                                           ? "Waiting for an authenticated client"
+                                           : "Select a client");
             } else {
-                ImGui::Text("%s", found->hostname.c_str());
-                ImGui::TextUnformatted(found->address.c_str());
+                ImGui::Text("%s", selected_client->hostname.c_str());
+                ImGui::TextUnformatted(selected_client->address.c_str());
                 ImGui::Separator();
                 ImGui::Text("Status: %s",
-                            nstu::server::to_string(found->status));
-                ImGui::Text("Latency: %u ms", found->latency_ms);
+                            nstu::server::to_string(selected_client->status));
+                ImGui::Text("Latency: %u ms", selected_client->latency_ms);
                 ImGui::Text("Packet loss: %.1f%%",
-                            found->packet_loss_per_mille / 10.0f);
+                            selected_client->packet_loss_per_mille / 10.0f);
                 ImGui::Text("Delivery: %s",
-                            found->delivery == nstu::net::VideoDeliveryMode::multicast
+                            selected_client->delivery ==
+                                    nstu::net::VideoDeliveryMode::multicast
                                 ? "Multicast"
                                 : "Unicast");
                 ImGui::Separator();
@@ -248,7 +235,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         ImGui::Separator();
         if (ImGui::BeginChild("chat-panel", {0, 116}, true)) {
             ImGui::TextUnformatted("Chat");
-            ImGui::TextDisabled("No messages in this local UI session.");
+            ImGui::TextDisabled(has_selected_client
+                                    ? "No messages in this local UI session."
+                                    : "Select an authenticated client to chat.");
+            ImGui::BeginDisabled(!has_selected_client);
             ImGui::SetNextItemWidth(-92.0f);
             const bool submit = ImGui::InputText("##chat-input", chat_input.data(),
                                                   chat_input.size(),
@@ -257,6 +247,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             if ((submit || ImGui::Button("Send")) && chat_input[0] != '\0') {
                 chat_input[0] = '\0';
             }
+            ImGui::EndDisabled();
         }
         ImGui::EndChild();
         ImGui::End();

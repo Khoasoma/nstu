@@ -151,18 +151,10 @@ plane tiếp theo.
 
 ## Cài đặt và kiểm thử
 
-Để cài client từ installer, chạy PowerShell với quyền Administrator trong thư mục
-đã cài:
-
-```powershell
-.\install-client-service.ps1
-```
-
-Gỡ service trước khi uninstall client:
-
-```powershell
-.\uninstall-client-service.ps1
-```
+Client installer tự gọi service lifecycle script với quyền Administrator. Cài
+đặt đăng ký service ở chế độ automatic, cấu hình recovery và đặt cờ bắt buộc
+restart; service bắt đầu ở lần boot tiếp theo. Uninstaller dừng agent, xóa
+service trước khi xóa file và cũng đặt cờ restart.
 
 Kiểm thử nhanh sau build:
 
@@ -198,16 +190,18 @@ cpack --config build-msvc/CPackConfig.cmake -G ZIP `
 ```
 
 Client package có `install-client-service.ps1` và
-`uninstall-client-service.ps1`. Các script yêu cầu PowerShell chạy với quyền
-Administrator; installer không tự tạo service ngoài ý muốn.
+`uninstall-client-service.ps1` làm helper nội bộ cho NSIS. Các script yêu cầu
+quyền Administrator; quy trình được hỗ trợ là chạy installer/uninstaller thay
+vì gọi script trực tiếp. Uninstall helper fail closed khi phát hiện service
+Deep Freeze `DFServ` hoặc `DeepFrz` chưa bị disable.
 
 Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo hai installer và
 phát hành một GitHub pre-release tự động dạng `nightly-<run-number>`. Pull
 Request vẫn được build/test nhưng không tạo release. Các release thủ công như
 `v0.2.0-dev` vẫn được giữ độc lập.
 
-MVP chưa tự động signing, cấp key, cấu hình multicast hoặc service recovery.
-Các bước đó phải được thực hiện trong deployment workflow riêng.
+MVP chưa tự động signing, cấp key hoặc cấu hình multicast. Service recovery đã
+được installer cấu hình, nhưng vẫn cần kiểm thử upgrade/reboot trên image thật.
 
 ## Secret, memory và Deep Freeze
 

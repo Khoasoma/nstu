@@ -117,29 +117,28 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-Dashboard hiện tại hiển thị client demo. `Start stream`, `Lock`, `Request
-keyframe` và chat mới chỉ là trạng thái UI cho đến khi control plane thật được
-kết nối.
+Dashboard không tự chèn dữ liệu demo. Registry client khởi động ở trạng thái
+trống và chỉ hiển thị record do runtime registry cung cấp. `Start stream`,
+`Lock`, `Request keyframe` và chat chỉ khả dụng khi có record client thật;
+routing qua control plane vẫn đang được tích hợp.
 
 ### Client
 
-1. Tải và cài `nstu-client-<version>.exe` bằng tài khoản Administrator.
-2. Mở PowerShell bằng quyền Administrator và chạy:
+1. Tải và chạy `nstu-client-<version>.exe` bằng quyền Administrator.
+2. Installer tự đăng ký `nstu-service` để khởi động cùng Windows và cấu hình
+   service recovery. Service không được khởi động ngay bên trong phiên cài đặt.
+3. Restart Windows khi installer yêu cầu. Ở lần boot tiếp theo, service tự chạy
+   và khởi động đúng một instance `nstu-agent.exe` trong user session đang active
+   khi đăng nhập hoặc mở khóa.
+4. Sau khi restart, Administrator có thể kiểm tra service bằng:
 
    ```powershell
-   Set-Location "$env:ProgramFiles\NSTU\client"
-   .\install-client-service.ps1
    Get-Service nstu-service
    ```
 
-3. Service sẽ thử khởi động `nstu-agent.exe` trong desktop session đang active.
-   Có thể dùng tray icon và cửa sổ chat local để kiểm tra giao diện client.
-4. Trước khi uninstall client, gỡ service:
-
-   ```powershell
-   Set-Location "$env:ProgramFiles\NSTU\client"
-   .\uninstall-client-service.ps1
-   ```
+Để gỡ client, dùng **Installed apps** của Windows hoặc NSTU uninstaller. Trình
+gỡ cài đặt sẽ dừng agent, xóa service, xóa file package và yêu cầu restart thêm
+một lần. Gỡ service thủ công không phải quy trình triển khai được hỗ trợ.
 
 ## Kết nối một phòng máy
 
@@ -171,6 +170,10 @@ giao diện này ổn định.
   vào repository.
 - Không đóng băng image production trước khi đã kiểm thử persistence của
   enrollment, service recovery, upgrade và rollback.
+- Boot máy ở trạng thái Thawed và tắt bảo vệ Deep Freeze trước khi cài, nâng cấp
+  hoặc gỡ NSTU. Client uninstaller kiểm tra các service `DFServ`/`DeepFrz` đã
+  biết và dừng thao tác khi bảo vệ vẫn active; cần xác minh cơ chế kiểm tra thận
+  trọng này với đúng edition Deep Freeze được trường sử dụng.
 
 Named pipe và memory-mapped file chỉ giảm I/O tạm thời, không thay thế persistent
 protected storage. Deep Freeze sẽ hủy mọi state nằm ngoài thawed space sau reboot.
