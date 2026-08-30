@@ -39,17 +39,20 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
         g_chat_messages = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"LISTBOX", nullptr,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOINTEGRALHEIGHT,
-            8, 8, 460, 220, window, reinterpret_cast<HMENU>(kChatMessages),
+            8, 8, 460, 220, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatMessages)),
             GetModuleHandleW(nullptr), nullptr);
         g_chat_input = CreateWindowExW(
             WS_EX_CLIENTEDGE, L"EDIT", nullptr,
             WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-            8, 240, 360, 26, window, reinterpret_cast<HMENU>(kChatInput),
+            8, 240, 360, 26, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatInput)),
             GetModuleHandleW(nullptr), nullptr);
         CreateWindowExW(
             0, L"BUTTON", L"Send",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
-            380, 240, 80, 26, window, reinterpret_cast<HMENU>(kChatSend),
+            380, 240, 80, 26, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatSend)),
             GetModuleHandleW(nullptr), nullptr);
         append_chat_line(L"NSTU client chat ready.");
         return 0;
