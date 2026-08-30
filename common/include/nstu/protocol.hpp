@@ -10,9 +10,11 @@
 namespace nstu::protocol {
 
 inline constexpr std::uint32_t kMagic = 0x4E535455; // "NSTU"
-inline constexpr std::uint16_t kVersion = 1;
+inline constexpr std::uint16_t kCommandVersion = 1;
+inline constexpr std::uint16_t kVideoVersion = 2;
+inline constexpr std::uint16_t kVersion = kCommandVersion;
 inline constexpr std::size_t kCommandHeaderBytes = 20;
-inline constexpr std::size_t kVideoHeaderBytes = 36;
+inline constexpr std::size_t kVideoHeaderBytes = 44;
 inline constexpr std::uint32_t kMaxCommandPayload = 64u * 1024u;
 inline constexpr std::size_t kMaxTcpBufferedBytes =
     4u * (kCommandHeaderBytes + kMaxCommandPayload);
@@ -41,9 +43,10 @@ struct CommandEnvelope {
 };
 
 struct VideoPacketHeader {
-    std::uint16_t version = kVersion;
+    std::uint16_t version = kVideoVersion;
     VideoFlags flags = VideoFlags::none;
     std::uint32_t stream_id = 0;
+    std::uint64_t packet_sequence = 0;
     std::uint64_t frame_id = 0;
     std::uint16_t fragment_index = 0;
     std::uint16_t fragment_count = 0;

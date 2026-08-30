@@ -1,6 +1,7 @@
 add_library(nstu_common STATIC
     src/multicast.cpp
     src/network.cpp
+    src/packet_loss.cpp
     src/protocol.cpp
 )
 

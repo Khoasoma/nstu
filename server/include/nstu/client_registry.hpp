@@ -27,6 +27,9 @@ struct ClientRecord {
     net::VideoDeliveryMode delivery = net::VideoDeliveryMode::multicast;
     std::uint32_t latency_ms = 0;
     std::uint32_t packet_loss_per_mille = 0;
+    std::uint64_t packet_loss_sample_size = 0;
+    std::uint8_t bad_loss_windows = 0;
+    std::uint8_t good_loss_windows = 0;
     std::chrono::steady_clock::time_point last_seen{};
 };
 
@@ -36,6 +39,7 @@ public:
     [[nodiscard]] bool set_status(std::uint64_t id, ClientStatus status);
     [[nodiscard]] bool update_health(std::uint64_t id, std::uint32_t latency_ms,
                                      std::uint32_t loss_per_mille,
+                                     std::uint64_t finalized_sample_size,
                                      net::VideoDeliveryMode delivery);
     std::size_t expire(std::chrono::steady_clock::time_point now,
                        std::chrono::milliseconds timeout);

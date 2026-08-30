@@ -33,6 +33,13 @@ TCP frames are length-prefixed and contain explicitly serialized little-endian
 headers. No C++ struct memory layout is placed directly on the wire. Parsers
 enforce payload and buffered-byte limits before allocating.
 
+## Packet loss
+
+Video protocol v2 includes a monotonic packet sequence independent of frame and
+fragment identifiers. Receivers use a bounded reorder window and only confirm a
+loss after the missing sequence leaves that window. See `docs/PACKET_LOSS.md`
+for reporting, hysteresis, stream-reset, and fallback rules.
+
 ## Known limitations
 
 - TCP authentication/HMAC and key provisioning are not implemented yet.

@@ -279,15 +279,25 @@ void IocpPort::close() noexcept {
 }
 
 DeliveryModeSelector::DeliveryModeSelector(
-    std::uint32_t failures_before_fallback)
-    : threshold_(std::max(1u, failures_before_fallback)) {}
+    std::uint32_t failures_before_fallback,
+    std::uint32_t successes_before_recovery)
+    : threshold_(std::max(1u, failures_before_fallback)),
+      recovery_threshold_(std::max(1u, successes_before_recovery)) {}
 
 void DeliveryModeSelector::record_multicast_probe(bool received) noexcept {
     if (received) {
         failures_ = 0;
-        mode_ = VideoDeliveryMode::multicast;
+        if (mode_ == VideoDeliveryMode::unicast) {
+            recovery_successes_ =
+                std::min(recovery_successes_ + 1, recovery_threshold_);
+            if (recovery_successes_ >= recovery_threshold_) {
+                mode_ = VideoDeliveryMode::multicast;
+                recovery_successes_ = 0;
+            }
+        }
         return;
     }
+    recovery_successes_ = 0;
     if (failures_ < threshold_) {
         ++failures_;
     }
@@ -298,6 +308,7 @@ void DeliveryModeSelector::record_multicast_probe(bool received) noexcept {
 
 void DeliveryModeSelector::reset() noexcept {
     failures_ = 0;
+    recovery_successes_ = 0;
     mode_ = VideoDeliveryMode::multicast;
 }
 
@@ -307,6 +318,11 @@ VideoDeliveryMode DeliveryModeSelector::mode() const noexcept {
 
 std::uint32_t DeliveryModeSelector::consecutive_failures() const noexcept {
     return failures_;
+}
+
+std::uint32_t DeliveryModeSelector::consecutive_recovery_successes() const
+    noexcept {
+    return recovery_successes_;
 }
 
 } // namespace nstu::net

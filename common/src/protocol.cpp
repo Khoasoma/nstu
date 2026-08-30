@@ -77,6 +77,7 @@ std::vector<std::byte> encode_video_header(const VideoPacketHeader& header) {
     write_le<std::uint16_t>(wire, offset,
                             static_cast<std::uint16_t>(header.flags));
     write_le<std::uint32_t>(wire, offset, header.stream_id);
+    write_le<std::uint64_t>(wire, offset, header.packet_sequence);
     write_le<std::uint64_t>(wire, offset, header.frame_id);
     write_le<std::uint16_t>(wire, offset, header.fragment_index);
     write_le<std::uint16_t>(wire, offset, header.fragment_count);
@@ -99,12 +100,13 @@ std::optional<VideoPacketHeader> decode_video_header(
         !read_le(wire, offset, header.version) ||
         !read_le(wire, offset, flags) ||
         !read_le(wire, offset, header.stream_id) ||
+        !read_le(wire, offset, header.packet_sequence) ||
         !read_le(wire, offset, header.frame_id) ||
         !read_le(wire, offset, header.fragment_index) ||
         !read_le(wire, offset, header.fragment_count) ||
         !read_le(wire, offset, header.payload_bytes) ||
         !read_le(wire, offset, header.capture_time_100ns) ||
-        header.version != kVersion || header.fragment_count == 0 ||
+        header.version != kVideoVersion || header.fragment_count == 0 ||
         header.fragment_index >= header.fragment_count) {
         return std::nullopt;
     }

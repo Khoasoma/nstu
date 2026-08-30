@@ -66,16 +66,20 @@ enum class VideoDeliveryMode : std::uint8_t {
 
 class DeliveryModeSelector {
 public:
-    explicit DeliveryModeSelector(std::uint32_t failures_before_fallback = 3);
+    explicit DeliveryModeSelector(std::uint32_t failures_before_fallback = 3,
+                                  std::uint32_t successes_before_recovery = 5);
 
     void record_multicast_probe(bool received) noexcept;
     void reset() noexcept;
     [[nodiscard]] VideoDeliveryMode mode() const noexcept;
     [[nodiscard]] std::uint32_t consecutive_failures() const noexcept;
+    [[nodiscard]] std::uint32_t consecutive_recovery_successes() const noexcept;
 
 private:
     std::uint32_t threshold_ = 3;
+    std::uint32_t recovery_threshold_ = 5;
     std::uint32_t failures_ = 0;
+    std::uint32_t recovery_successes_ = 0;
     VideoDeliveryMode mode_ = VideoDeliveryMode::multicast;
 };
 

@@ -24,9 +24,10 @@ int main() {
     assert(decoded_command->request_id == command.request_id);
 
     const VideoPacketHeader video{
-        .version = kVersion,
+        .version = kVideoVersion,
         .flags = VideoFlags::keyframe,
         .stream_id = 42,
+        .packet_sequence = 1234,
         .frame_id = 99,
         .fragment_index = 0,
         .fragment_count = 1,
@@ -38,6 +39,7 @@ int main() {
     const auto decoded_video = decode_video_header(video_wire);
     assert(decoded_video.has_value());
     assert(decoded_video->stream_id == video.stream_id);
+    assert(decoded_video->packet_sequence == video.packet_sequence);
     assert(decoded_video->flags == video.flags);
     assert(decoded_video->capture_time_100ns == video.capture_time_100ns);
 
@@ -87,11 +89,15 @@ int main() {
     assert(!winsock.ready());
 #endif
 
-    nstu::net::DeliveryModeSelector delivery(2);
+    nstu::net::DeliveryModeSelector delivery(2, 3);
     assert(delivery.mode() == nstu::net::VideoDeliveryMode::multicast);
     delivery.record_multicast_probe(false);
     assert(delivery.mode() == nstu::net::VideoDeliveryMode::multicast);
     delivery.record_multicast_probe(false);
+    assert(delivery.mode() == nstu::net::VideoDeliveryMode::unicast);
+    delivery.record_multicast_probe(true);
+    assert(delivery.mode() == nstu::net::VideoDeliveryMode::unicast);
+    delivery.record_multicast_probe(true);
     assert(delivery.mode() == nstu::net::VideoDeliveryMode::unicast);
     delivery.record_multicast_probe(true);
     assert(delivery.mode() == nstu::net::VideoDeliveryMode::multicast);

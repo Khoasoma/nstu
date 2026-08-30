@@ -7,6 +7,7 @@
 - [x] Versioned binary protocol and bounded incremental TCP parser.
 - [x] Winsock TCP/IOCP and UDP multicast foundations.
 - [x] Multicast-to-unicast fallback state machine.
+- [x] Reorder-aware packet-loss estimator and server health hysteresis.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
 - [x] Hardware H.264 MFT configuration and asynchronous event handling.
@@ -18,7 +19,7 @@
 
 - [ ] Authenticated hello/handshake with replay protection and key rotation.
 - [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
-- [ ] Video fragmentation/reassembly, jitter buffer, loss metrics, and NACK.
+- [ ] Video fragmentation/reassembly, jitter buffer, frame-loss metrics, and NACK.
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.
 - [ ] Connect server UI actions to the control plane.
 - [ ] Device-loss recovery loop for duplication, converter, and encoder.

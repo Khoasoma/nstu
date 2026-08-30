@@ -21,6 +21,7 @@ bool ClientRegistry::set_status(std::uint64_t id, ClientStatus status) {
 
 bool ClientRegistry::update_health(std::uint64_t id, std::uint32_t latency_ms,
                                    std::uint32_t loss_per_mille,
+                                   std::uint64_t finalized_sample_size,
                                    net::VideoDeliveryMode delivery) {
     std::scoped_lock lock(mutex_);
     const auto found = clients_.find(id);
@@ -29,10 +30,38 @@ bool ClientRegistry::update_health(std::uint64_t id, std::uint32_t latency_ms,
     }
     found->second.latency_ms = latency_ms;
     found->second.packet_loss_per_mille = loss_per_mille;
+    found->second.packet_loss_sample_size = finalized_sample_size;
     found->second.delivery = delivery;
     found->second.last_seen = std::chrono::steady_clock::now();
-    found->second.status = loss_per_mille > 50 ? ClientStatus::degraded
-                                               : ClientStatus::online;
+    constexpr std::uint64_t minimum_sample_size = 200;
+    constexpr std::uint32_t degrade_threshold_per_mille = 50;
+    constexpr std::uint32_t recover_threshold_per_mille = 20;
+    constexpr std::uint8_t bad_windows_required = 3;
+    constexpr std::uint8_t good_windows_required = 5;
+    if (finalized_sample_size >= minimum_sample_size) {
+        if (loss_per_mille >= degrade_threshold_per_mille) {
+            found->second.bad_loss_windows = static_cast<std::uint8_t>(
+                std::min<unsigned int>(found->second.bad_loss_windows + 1,
+                                       bad_windows_required));
+            found->second.good_loss_windows = 0;
+        } else if (loss_per_mille <= recover_threshold_per_mille) {
+            found->second.good_loss_windows = static_cast<std::uint8_t>(
+                std::min<unsigned int>(found->second.good_loss_windows + 1,
+                                       good_windows_required));
+            found->second.bad_loss_windows = 0;
+        } else {
+            found->second.bad_loss_windows = 0;
+            found->second.good_loss_windows = 0;
+        }
+    }
+    if (found->second.status != ClientStatus::locked &&
+        found->second.status != ClientStatus::offline) {
+        if (found->second.bad_loss_windows >= bad_windows_required) {
+            found->second.status = ClientStatus::degraded;
+        } else if (found->second.good_loss_windows >= good_windows_required) {
+            found->second.status = ClientStatus::online;
+        }
+    }
     return true;
 }
 

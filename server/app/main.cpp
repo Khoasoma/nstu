@@ -80,6 +80,7 @@ void seed_demo_clients(nstu::server::ClientRegistry& registry) {
             .delivery = nstu::net::VideoDeliveryMode::multicast,
             .latency_ms = static_cast<std::uint32_t>(2 + index),
             .packet_loss_per_mille = 0,
+            .packet_loss_sample_size = 1000,
             .last_seen = now,
         });
     }
