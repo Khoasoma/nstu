@@ -129,8 +129,35 @@ ctest --test-dir build-core --output-on-failure
 - `nstu_video_probe.exe`: kiểm tra khả năng video/MFT trên máy hiện tại.
 - Các executable trong `tests/`: test protocol, auth, networking và video.
 
-MVP chưa có installer tự động. Đăng ký service, cấp key, cấu hình multicast,
-signing và service recovery phải được thực hiện trong deployment workflow riêng.
+## Đóng gói installer
+
+Trên Windows, CMake tạo hai target CPack/NSIS độc lập:
+
+```powershell
+cmake --build build-msvc --config Release --target nstu-package-server
+cmake --build build-msvc --config Release --target nstu-package-client
+```
+
+Kết quả là `nstu-server-0.1.0.exe` và `nstu-client-0.1.0.exe` trong build
+directory. Cần cài [NSIS](https://nsis.sourceforge.io/) và đặt `makensis.exe`
+trong `PATH`. Nếu môi trường build không có NSIS, có thể tạo archive để kiểm
+tra layout bằng CPack:
+
+```powershell
+cpack --config build-msvc/CPackConfig.cmake -G ZIP `
+  -DCPACK_COMPONENTS_ALL="server;docs" `
+  -DCPACK_PACKAGE_FILE_NAME=nstu-server-0.1.0
+cpack --config build-msvc/CPackConfig.cmake -G ZIP `
+  -DCPACK_COMPONENTS_ALL="client;docs" `
+  -DCPACK_PACKAGE_FILE_NAME=nstu-client-0.1.0
+```
+
+Client package có `install-client-service.ps1` và
+`uninstall-client-service.ps1`. Các script yêu cầu PowerShell chạy với quyền
+Administrator; installer không tự tạo service ngoài ý muốn.
+
+MVP chưa tự động signing, cấp key, cấu hình multicast hoặc service recovery.
+Các bước đó phải được thực hiện trong deployment workflow riêng.
 
 ## Secret, memory và Deep Freeze
 

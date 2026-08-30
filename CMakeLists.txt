@@ -11,6 +11,7 @@ option(NSTU_BUILD_SERVER "Build the server UI" ON)
 option(NSTU_BUILD_TESTS "Build unit and integration tests" ON)
 option(NSTU_BUILD_VIDEO "Build DXGI and Media Foundation components" ON)
 option(NSTU_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
+option(NSTU_ENABLE_PACKAGING "Enable Windows CPack/NSIS packaging" ON)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -41,4 +42,78 @@ endif()
 if(NSTU_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(WIN32 AND NSTU_ENABLE_PACKAGING)
+    include(GNUInstallDirs)
+
+    if(TARGET nstu-server)
+        install(TARGETS nstu-server
+            RUNTIME DESTINATION server
+            COMPONENT server)
+    endif()
+    if(TARGET nstu-service)
+        install(TARGETS nstu-service nstu-agent
+            RUNTIME DESTINATION client
+            COMPONENT client)
+        install(FILES
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/install-client-service.ps1"
+            "${CMAKE_CURRENT_SOURCE_DIR}/packaging/uninstall-client-service.ps1"
+            DESTINATION client
+            COMPONENT client)
+    endif()
+    install(FILES
+        "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
+        "${CMAKE_CURRENT_SOURCE_DIR}/THIRD_PARTY_NOTICES.md"
+        DESTINATION docs
+        COMPONENT docs)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/docs/"
+        DESTINATION docs/project
+        COMPONENT docs)
+
+    set(CPACK_PACKAGE_NAME "nstu")
+    set(CPACK_PACKAGE_DIRECTORY "${CMAKE_BINARY_DIR}")
+    set(CPACK_PACKAGE_VENDOR "Project NSTU")
+    set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "NSTU")
+    set(CPACK_NSIS_DISPLAY_NAME "Project NSTU")
+    set(CPACK_NSIS_PACKAGE_NAME "Project NSTU")
+    set(CPACK_NSIS_INSTALL_ROOT "$PROGRAMFILES64")
+    set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
+    set(CPACK_NSIS_MODIFY_PATH OFF)
+    set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE")
+    set(CPACK_COMPONENTS_GROUPING IGNORE)
+    set(CPACK_COMPONENT_SERVER_DISPLAY_NAME "NSTU Server")
+    set(CPACK_COMPONENT_SERVER_DESCRIPTION "NSTU administration server")
+    set(CPACK_COMPONENT_CLIENT_DISPLAY_NAME "NSTU Client")
+    set(CPACK_COMPONENT_CLIENT_DESCRIPTION "NSTU service and session agent")
+    set(CPACK_COMPONENT_DOCS_DISPLAY_NAME "Documentation and licenses")
+    set(CPACK_COMPONENT_DOCS_DESCRIPTION "Project documentation and notices")
+    set(CPACK_GENERATOR "NSIS")
+
+    include(CPack)
+
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/CPackServerConfig.cmake.in"
+        "${CMAKE_BINARY_DIR}/CPackServerConfig.cmake" @ONLY)
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/packaging/CPackClientConfig.cmake.in"
+        "${CMAKE_BINARY_DIR}/CPackClientConfig.cmake" @ONLY)
+
+    if(TARGET nstu-server)
+        add_custom_target(nstu-package-server
+            COMMAND "${CMAKE_CPACK_COMMAND}" --config
+                "${CMAKE_BINARY_DIR}/CPackServerConfig.cmake"
+            DEPENDS nstu-server
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            COMMENT "Packaging NSTU server installer")
+    endif()
+    if(TARGET nstu-service)
+        add_custom_target(nstu-package-client
+            COMMAND "${CMAKE_CPACK_COMMAND}" --config
+                "${CMAKE_BINARY_DIR}/CPackClientConfig.cmake"
+            DEPENDS nstu-service nstu-agent
+            WORKING_DIRECTORY "${CMAKE_BINARY_DIR}"
+            COMMENT "Packaging NSTU client installer")
+    endif()
 endif()

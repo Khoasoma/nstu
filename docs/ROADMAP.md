@@ -14,6 +14,7 @@
 - [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
 - [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
 - [x] Bounded unauthenticated handshake rate limiter with temporary blocking.
+- [x] CPack/NSIS server and client installer targets with service scripts.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
@@ -34,7 +35,7 @@
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.
 - [ ] Connect server UI actions to the control plane.
 - [ ] Device-loss recovery loop for duplication, converter, and encoder.
-- [ ] Installer, signed binaries, service recovery configuration, and thaw-space
+- [ ] Signed binaries, service recovery configuration, and thaw-space
       configuration for Deep Freeze deployments.
 - [ ] 50-client soak, switch multicast matrix, Windows/Intel driver matrix, and
       memory/CPU benchmark capture.

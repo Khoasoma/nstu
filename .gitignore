@@ -3,6 +3,8 @@
 /build-*/
 /out/
 /dist/
+/_CPack_Packages/
+/*.zip
 /cmake-build-*/
 CMakeFiles/
 CMakeCache.txt

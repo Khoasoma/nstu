@@ -15,3 +15,15 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes
+      - name: Package server installer
+        run: cmake --build build --config Release --target nstu-package-server --parallel
+      - name: Package client installer
+        run: cmake --build build --config Release --target nstu-package-client --parallel
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: nstu-installers
+          path: build/nstu-*.exe
+          if-no-files-found: error
