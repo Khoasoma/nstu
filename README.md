@@ -199,6 +199,11 @@ Client package có `install-client-service.ps1` và
 `uninstall-client-service.ps1`. Các script yêu cầu PowerShell chạy với quyền
 Administrator; installer không tự tạo service ngoài ý muốn.
 
+Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo hai installer và
+phát hành một GitHub pre-release tự động dạng `nightly-<run-number>`. Pull
+Request vẫn được build/test nhưng không tạo release. Các release thủ công như
+`v0.2.0-dev` vẫn được giữ độc lập.
+
 MVP chưa tự động signing, cấp key, cấu hình multicast hoặc service recovery.
 Các bước đó phải được thực hiện trong deployment workflow riêng.
 

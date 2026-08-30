@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+  actions: read
+
 jobs:
   build-test:
     runs-on: windows-2022
@@ -27,3 +31,36 @@ jobs:
           name: nstu-installers
           path: build/nstu-*.exe
           if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Development release
+    needs: build-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          name: nstu-installers
+          path: nstu-installers
+      - name: Create GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          tag="nightly-${RUN_NUMBER}"
+          title="Project NSTU nightly ${RUN_NUMBER}"
+          notes="Automated development release for commit ${COMMIT_SHA}. Built and tested by the Windows CI workflow. This is a pre-release and is not production-ready."
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            gh release upload "${tag}" nstu-installers/*.exe --clobber
+            gh release edit "${tag}" --target "${COMMIT_SHA}" \
+              --title "${title}" --notes "${notes}" --prerelease
+          else
+            gh release create "${tag}" nstu-installers/*.exe \
+              --target "${COMMIT_SHA}" \
+              --title "${title}" \
+              --notes "${notes}" \
+              --prerelease
+          fi
