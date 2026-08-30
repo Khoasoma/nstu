@@ -1,0 +1,34 @@
+# Current Task Log and Roadmap
+
+## Completed in the experimental MVP
+
+- [x] Modular CMake build for common, video, client, server, and tests.
+- [x] Local-only memory, dump, trace, capture, and build exclusions.
+- [x] Versioned binary protocol and bounded incremental TCP parser.
+- [x] Winsock TCP/IOCP and UDP multicast foundations.
+- [x] Multicast-to-unicast fallback state machine.
+- [x] Desktop Duplication capture and device-loss reporting.
+- [x] GPU BGRA-to-NV12 conversion.
+- [x] Hardware H.264 MFT configuration and asynchronous event handling.
+- [x] Service/session-agent separation, DACL helpers, named pipe, tray, overlay.
+- [x] Dear ImGui/D3D11 server shell and thread-safe client state registry.
+- [x] Unit/integration tests and Windows CI.
+
+## Next engineering milestones
+
+- [ ] Authenticated hello/handshake with replay protection and key rotation.
+- [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
+- [ ] Video fragmentation/reassembly, jitter buffer, loss metrics, and NACK.
+- [ ] Wire live service-agent commands for lock/unlock and status reporting.
+- [ ] Connect server UI actions to the control plane.
+- [ ] Device-loss recovery loop for duplication, converter, and encoder.
+- [ ] Installer, signed binaries, service recovery configuration, and thaw-space
+      configuration for Deep Freeze deployments.
+- [ ] 50-client soak, switch multicast matrix, Windows/Intel driver matrix, and
+      memory/CPU benchmark capture.
+
+## Context note
+
+The repository is intentionally an MVP foundation. A green build demonstrates
+API integration and local correctness; it does not establish production
+reliability on unmanaged switches or heterogeneous school hardware.

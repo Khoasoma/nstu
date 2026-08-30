@@ -1,0 +1,185 @@
+#include "nstu/client_registry.hpp"
+
+#include <d3d11.h>
+#include <dxgi.h>
+#include <windows.h>
+#include <wrl/client.h>
+
+#include "imgui.h"
+#include "imgui_impl_dx11.h"
+#include "imgui_impl_win32.h"
+
+#include <chrono>
+
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
+    HWND window, UINT message, WPARAM wparam, LPARAM lparam);
+
+namespace {
+
+Microsoft::WRL::ComPtr<ID3D11Device> g_device;
+Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_context;
+Microsoft::WRL::ComPtr<IDXGISwapChain> g_swap_chain;
+Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
+
+void create_render_target() {
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
+    if (SUCCEEDED(g_swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) {
+        g_device->CreateRenderTargetView(back_buffer.Get(), nullptr,
+                                         &g_render_target);
+    }
+}
+
+bool create_device(HWND window) {
+    DXGI_SWAP_CHAIN_DESC description{};
+    description.BufferCount = 2;
+    description.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    description.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    description.OutputWindow = window;
+    description.SampleDesc.Count = 1;
+    description.Windowed = TRUE;
+    description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
+    D3D_FEATURE_LEVEL selected{};
+    if (FAILED(D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
+            D3D11_SDK_VERSION, &description, &g_swap_chain, &g_device,
+            &selected, &g_context))) {
+        return false;
+    }
+    create_render_target();
+    return g_render_target != nullptr;
+}
+
+LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
+                             LPARAM lparam) {
+    if (ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam)) {
+        return 1;
+    }
+    if (message == WM_SIZE && g_swap_chain && wparam != SIZE_MINIMIZED) {
+        g_render_target.Reset();
+        g_swap_chain->ResizeBuffers(0, LOWORD(lparam), HIWORD(lparam),
+                                    DXGI_FORMAT_UNKNOWN, 0);
+        create_render_target();
+        return 0;
+    }
+    if (message == WM_DESTROY) {
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+void seed_demo_clients(nstu::server::ClientRegistry& registry) {
+    const auto now = std::chrono::steady_clock::now();
+    for (std::uint64_t index = 1; index <= 8; ++index) {
+        registry.upsert({
+            .id = index,
+            .hostname = "LAB-PC-" + std::to_string(index),
+            .address = "192.168.1." + std::to_string(100 + index),
+            .status = nstu::server::ClientStatus::online,
+            .delivery = nstu::net::VideoDeliveryMode::multicast,
+            .latency_ms = static_cast<std::uint32_t>(2 + index),
+            .packet_loss_per_mille = 0,
+            .last_seen = now,
+        });
+    }
+}
+
+} // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    WNDCLASSW window_class{};
+    window_class.lpfnWndProc = window_proc;
+    window_class.hInstance = instance;
+    window_class.lpszClassName = L"NstuServerWindow";
+    window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    RegisterClassW(&window_class);
+    HWND window = CreateWindowW(window_class.lpszClassName, L"NSTU Server",
+                                WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
+                                CW_USEDEFAULT, 1100, 700, nullptr, nullptr,
+                                instance, nullptr);
+    if (window == nullptr || !create_device(window)) {
+        return 1;
+    }
+    ShowWindow(window, SW_SHOWDEFAULT);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsLight();
+    ImGui_ImplWin32_Init(window);
+    ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
+
+    nstu::server::ClientRegistry registry;
+    seed_demo_clients(registry);
+    bool running = true;
+    while (running) {
+        MSG message{};
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&message);
+            DispatchMessageW(&message);
+            if (message.message == WM_QUIT) {
+                running = false;
+            }
+        }
+        if (!running) {
+            break;
+        }
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+        ImGui::SetNextWindowPos({0, 0});
+        ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::Begin("NSTU", nullptr,
+                     ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                         ImGuiWindowFlags_NoResize);
+        ImGui::Text("Connected clients: %zu", registry.size());
+        ImGui::Separator();
+        if (ImGui::BeginTable("clients", 6,
+                              ImGuiTableFlags_Borders |
+                                  ImGuiTableFlags_RowBg)) {
+            ImGui::TableSetupColumn("Host");
+            ImGui::TableSetupColumn("Address");
+            ImGui::TableSetupColumn("Status");
+            ImGui::TableSetupColumn("Delivery");
+            ImGui::TableSetupColumn("Latency");
+            ImGui::TableSetupColumn("Loss");
+            ImGui::TableHeadersRow();
+            for (const auto& client : registry.snapshot()) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                ImGui::TextUnformatted(client.hostname.c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGui::TextUnformatted(client.address.c_str());
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted(nstu::server::to_string(client.status));
+                ImGui::TableSetColumnIndex(3);
+                ImGui::TextUnformatted(
+                    client.delivery == nstu::net::VideoDeliveryMode::multicast
+                        ? "Multicast"
+                        : "Unicast");
+                ImGui::TableSetColumnIndex(4);
+                ImGui::Text("%u ms", client.latency_ms);
+                ImGui::TableSetColumnIndex(5);
+                ImGui::Text("%.1f%%", client.packet_loss_per_mille / 10.0f);
+            }
+            ImGui::EndTable();
+        }
+        ImGui::End();
+        ImGui::Render();
+        constexpr float clear_color[4] = {0.94f, 0.94f, 0.93f, 1.0f};
+        g_context->OMSetRenderTargets(1, g_render_target.GetAddressOf(), nullptr);
+        g_context->ClearRenderTargetView(g_render_target.Get(), clear_color);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+        g_swap_chain->Present(1, 0);
+    }
+    ImGui_ImplDX11_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+    g_render_target.Reset();
+    g_swap_chain.Reset();
+    g_context.Reset();
+    g_device.Reset();
+    DestroyWindow(window);
+    UnregisterClassW(window_class.lpszClassName, instance);
+    return 0;
+}

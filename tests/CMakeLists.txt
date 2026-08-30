@@ -1,0 +1,22 @@
+add_executable(nstu_protocol_tests protocol_tests.cpp)
+target_link_libraries(nstu_protocol_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_protocol_tests)
+add_test(NAME nstu.protocol COMMAND nstu_protocol_tests)
+
+if(TARGET nstu_server_state)
+    add_executable(nstu_server_state_tests server_state_tests.cpp)
+    target_link_libraries(nstu_server_state_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_server_state_tests)
+    add_test(NAME nstu.server_state COMMAND nstu_server_state_tests)
+endif()
+
+if(TARGET nstu_client_platform)
+    add_executable(nstu_client_ipc_tests client_ipc_tests.cpp)
+    target_link_libraries(nstu_client_ipc_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_client_ipc_tests)
+    add_test(NAME nstu.client_ipc COMMAND nstu_client_ipc_tests)
+endif()
+
+if(TARGET nstu_video_probe)
+    add_test(NAME nstu.video_capabilities COMMAND nstu_video_probe)
+endif()

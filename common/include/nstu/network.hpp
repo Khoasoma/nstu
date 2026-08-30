@@ -1,0 +1,82 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <span>
+#include <string>
+
+namespace nstu::net {
+
+inline constexpr std::uintptr_t kInvalidNativeHandle =
+    static_cast<std::uintptr_t>(-1);
+
+class TcpSocket {
+public:
+    TcpSocket() noexcept;
+    explicit TcpSocket(std::uintptr_t native_handle) noexcept;
+    ~TcpSocket();
+    TcpSocket(TcpSocket&& other) noexcept;
+    TcpSocket& operator=(TcpSocket&& other) noexcept;
+    TcpSocket(const TcpSocket&) = delete;
+    TcpSocket& operator=(const TcpSocket&) = delete;
+
+    [[nodiscard]] bool connect(const std::string& address, std::uint16_t port,
+                               std::string* error = nullptr);
+    [[nodiscard]] bool listen(std::uint16_t port, int backlog = 64,
+                              std::string* error = nullptr);
+    [[nodiscard]] TcpSocket accept(std::string* error = nullptr) const;
+    [[nodiscard]] bool enable_keepalive(std::uint32_t idle_ms,
+                                        std::uint32_t interval_ms,
+                                        std::string* error = nullptr) const;
+    [[nodiscard]] int send_all(std::span<const std::byte> bytes,
+                               std::string* error = nullptr) const;
+    [[nodiscard]] int receive(std::span<std::byte> bytes,
+                              std::string* error = nullptr) const;
+    [[nodiscard]] bool is_open() const noexcept;
+    [[nodiscard]] std::uintptr_t native_handle() const noexcept;
+    void close() noexcept;
+
+private:
+    std::uintptr_t handle_ = kInvalidNativeHandle;
+};
+
+class IocpPort {
+public:
+    IocpPort() noexcept;
+    ~IocpPort();
+    IocpPort(const IocpPort&) = delete;
+    IocpPort& operator=(const IocpPort&) = delete;
+
+    [[nodiscard]] bool create(std::uint32_t concurrency = 0,
+                              std::string* error = nullptr);
+    [[nodiscard]] bool associate(const TcpSocket& socket,
+                                 std::uintptr_t completion_key,
+                                 std::string* error = nullptr) const;
+    [[nodiscard]] bool is_open() const noexcept;
+    void close() noexcept;
+
+private:
+    std::uintptr_t handle_ = 0;
+};
+
+enum class VideoDeliveryMode : std::uint8_t {
+    multicast,
+    unicast,
+};
+
+class DeliveryModeSelector {
+public:
+    explicit DeliveryModeSelector(std::uint32_t failures_before_fallback = 3);
+
+    void record_multicast_probe(bool received) noexcept;
+    void reset() noexcept;
+    [[nodiscard]] VideoDeliveryMode mode() const noexcept;
+    [[nodiscard]] std::uint32_t consecutive_failures() const noexcept;
+
+private:
+    std::uint32_t threshold_ = 3;
+    std::uint32_t failures_ = 0;
+    VideoDeliveryMode mode_ = VideoDeliveryMode::multicast;
+};
+
+} // namespace nstu::net

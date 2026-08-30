@@ -1,0 +1,311 @@
+#include "nstu/network.hpp"
+
+#if defined(_WIN32)
+#include <winsock2.h>
+#include <mswsock.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#endif
+
+#include <algorithm>
+#include <limits>
+#include <utility>
+
+namespace nstu::net {
+namespace {
+
+void set_error(std::string* error, const char* message) {
+    if (error != nullptr) {
+        *error = message;
+    }
+}
+
+} // namespace
+
+TcpSocket::TcpSocket() noexcept = default;
+
+TcpSocket::TcpSocket(std::uintptr_t native_handle) noexcept
+    : handle_(native_handle) {}
+
+TcpSocket::~TcpSocket() {
+    close();
+}
+
+TcpSocket::TcpSocket(TcpSocket&& other) noexcept
+    : handle_(std::exchange(other.handle_, kInvalidNativeHandle)) {}
+
+TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept {
+    if (this != &other) {
+        close();
+        handle_ = std::exchange(other.handle_, kInvalidNativeHandle);
+    }
+    return *this;
+}
+
+bool TcpSocket::connect(const std::string& address, std::uint16_t port,
+                        std::string* error) {
+#if defined(_WIN32)
+    close();
+    sockaddr_in endpoint{};
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_port = htons(port);
+    if (InetPtonA(AF_INET, address.c_str(), &endpoint.sin_addr) != 1) {
+        set_error(error, "invalid IPv4 address");
+        return false;
+    }
+    const SOCKET socket_handle = WSASocketW(
+        AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+    if (socket_handle == INVALID_SOCKET) {
+        set_error(error, "TCP socket creation failed");
+        return false;
+    }
+    if (::connect(socket_handle, reinterpret_cast<const sockaddr*>(&endpoint),
+                  sizeof(endpoint)) == SOCKET_ERROR) {
+        closesocket(socket_handle);
+        set_error(error, "TCP connect failed");
+        return false;
+    }
+    handle_ = static_cast<std::uintptr_t>(socket_handle);
+    return true;
+#else
+    (void)address;
+    (void)port;
+    set_error(error, "TCP transport requires Windows");
+    return false;
+#endif
+}
+
+bool TcpSocket::listen(std::uint16_t port, int backlog, std::string* error) {
+#if defined(_WIN32)
+    close();
+    const SOCKET socket_handle = WSASocketW(
+        AF_INET, SOCK_STREAM, IPPROTO_TCP, nullptr, 0, WSA_FLAG_OVERLAPPED);
+    if (socket_handle == INVALID_SOCKET) {
+        set_error(error, "TCP listener creation failed");
+        return false;
+    }
+    const BOOL reuse = TRUE;
+    setsockopt(socket_handle, SOL_SOCKET, SO_REUSEADDR,
+               reinterpret_cast<const char*>(&reuse), sizeof(reuse));
+    sockaddr_in endpoint{};
+    endpoint.sin_family = AF_INET;
+    endpoint.sin_port = htons(port);
+    endpoint.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (bind(socket_handle, reinterpret_cast<const sockaddr*>(&endpoint),
+             sizeof(endpoint)) == SOCKET_ERROR ||
+        ::listen(socket_handle, backlog) == SOCKET_ERROR) {
+        closesocket(socket_handle);
+        set_error(error, "TCP bind/listen failed");
+        return false;
+    }
+    handle_ = static_cast<std::uintptr_t>(socket_handle);
+    return true;
+#else
+    (void)port;
+    (void)backlog;
+    set_error(error, "TCP transport requires Windows");
+    return false;
+#endif
+}
+
+TcpSocket TcpSocket::accept(std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "listener is not open");
+        return {};
+    }
+    const SOCKET accepted = ::accept(static_cast<SOCKET>(handle_), nullptr,
+                                     nullptr);
+    if (accepted == INVALID_SOCKET) {
+        set_error(error, "TCP accept failed");
+        return {};
+    }
+    return TcpSocket(static_cast<std::uintptr_t>(accepted));
+#else
+    set_error(error, "TCP transport requires Windows");
+    return {};
+#endif
+}
+
+bool TcpSocket::enable_keepalive(std::uint32_t idle_ms,
+                                 std::uint32_t interval_ms,
+                                 std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "socket is not open");
+        return false;
+    }
+    tcp_keepalive keepalive{TRUE, idle_ms, interval_ms};
+    DWORD returned = 0;
+    if (WSAIoctl(static_cast<SOCKET>(handle_), SIO_KEEPALIVE_VALS, &keepalive,
+                 sizeof(keepalive), nullptr, 0, &returned, nullptr, nullptr) ==
+        SOCKET_ERROR) {
+        set_error(error, "TCP keepalive configuration failed");
+        return false;
+    }
+    return true;
+#else
+    (void)idle_ms;
+    (void)interval_ms;
+    set_error(error, "TCP transport requires Windows");
+    return false;
+#endif
+}
+
+int TcpSocket::send_all(std::span<const std::byte> bytes,
+                        std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open() || bytes.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        set_error(error, "invalid TCP send");
+        return -1;
+    }
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        const auto remaining = bytes.size() - sent;
+        const int result = ::send(
+            static_cast<SOCKET>(handle_),
+            reinterpret_cast<const char*>(bytes.data() + sent),
+            static_cast<int>(remaining), 0);
+        if (result <= 0) {
+            set_error(error, "TCP send failed");
+            return -1;
+        }
+        sent += static_cast<std::size_t>(result);
+    }
+    return static_cast<int>(sent);
+#else
+    (void)bytes;
+    set_error(error, "TCP transport requires Windows");
+    return -1;
+#endif
+}
+
+int TcpSocket::receive(std::span<std::byte> bytes, std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open() || bytes.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        set_error(error, "invalid TCP receive");
+        return -1;
+    }
+    const int result = ::recv(static_cast<SOCKET>(handle_),
+                              reinterpret_cast<char*>(bytes.data()),
+                              static_cast<int>(bytes.size()), 0);
+    if (result == SOCKET_ERROR) {
+        set_error(error, "TCP receive failed");
+        return -1;
+    }
+    return result;
+#else
+    (void)bytes;
+    set_error(error, "TCP transport requires Windows");
+    return -1;
+#endif
+}
+
+bool TcpSocket::is_open() const noexcept {
+    return handle_ != kInvalidNativeHandle;
+}
+
+std::uintptr_t TcpSocket::native_handle() const noexcept {
+    return handle_;
+}
+
+void TcpSocket::close() noexcept {
+#if defined(_WIN32)
+    if (is_open()) {
+        closesocket(static_cast<SOCKET>(handle_));
+    }
+#endif
+    handle_ = kInvalidNativeHandle;
+}
+
+IocpPort::IocpPort() noexcept = default;
+
+IocpPort::~IocpPort() {
+    close();
+}
+
+bool IocpPort::create(std::uint32_t concurrency, std::string* error) {
+#if defined(_WIN32)
+    close();
+    const HANDLE port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, nullptr, 0,
+                                                concurrency);
+    if (port == nullptr) {
+        set_error(error, "CreateIoCompletionPort failed");
+        return false;
+    }
+    handle_ = reinterpret_cast<std::uintptr_t>(port);
+    return true;
+#else
+    (void)concurrency;
+    set_error(error, "IOCP requires Windows");
+    return false;
+#endif
+}
+
+bool IocpPort::associate(const TcpSocket& socket,
+                         std::uintptr_t completion_key,
+                         std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open() || !socket.is_open() ||
+        CreateIoCompletionPort(
+            reinterpret_cast<HANDLE>(socket.native_handle()),
+            reinterpret_cast<HANDLE>(handle_), completion_key, 0) == nullptr) {
+        set_error(error, "IOCP socket association failed");
+        return false;
+    }
+    return true;
+#else
+    (void)socket;
+    (void)completion_key;
+    set_error(error, "IOCP requires Windows");
+    return false;
+#endif
+}
+
+bool IocpPort::is_open() const noexcept {
+    return handle_ != 0;
+}
+
+void IocpPort::close() noexcept {
+#if defined(_WIN32)
+    if (is_open()) {
+        CloseHandle(reinterpret_cast<HANDLE>(handle_));
+    }
+#endif
+    handle_ = 0;
+}
+
+DeliveryModeSelector::DeliveryModeSelector(
+    std::uint32_t failures_before_fallback)
+    : threshold_(std::max(1u, failures_before_fallback)) {}
+
+void DeliveryModeSelector::record_multicast_probe(bool received) noexcept {
+    if (received) {
+        failures_ = 0;
+        mode_ = VideoDeliveryMode::multicast;
+        return;
+    }
+    if (failures_ < threshold_) {
+        ++failures_;
+    }
+    if (failures_ >= threshold_) {
+        mode_ = VideoDeliveryMode::unicast;
+    }
+}
+
+void DeliveryModeSelector::reset() noexcept {
+    failures_ = 0;
+    mode_ = VideoDeliveryMode::multicast;
+}
+
+VideoDeliveryMode DeliveryModeSelector::mode() const noexcept {
+    return mode_;
+}
+
+std::uint32_t DeliveryModeSelector::consecutive_failures() const noexcept {
+    return failures_;
+}
+
+} // namespace nstu::net

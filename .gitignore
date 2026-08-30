@@ -1,0 +1,96 @@
+# Build trees and generated CMake files
+/build/
+/build-*/
+/out/
+/dist/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Visual Studio and compiler output
+.vs/
+*.suo
+*.user
+*.VC.db
+*.VC.opendb
+*.obj
+*.o
+*.iobj
+*.pdb
+*.idb
+*.ilk
+*.exp
+*.lib
+*.dll
+*.exe
+*.msi
+*.tlog/
+
+# Runtime state that must remain local (including memory-related artifacts)
+/local/
+/.local/
+/runtime/
+/state/
+/cache/
+/logs/
+/dumps/
+/memory/
+/.memory/
+/mem/
+*.mem
+*.memory
+*.dmp
+*.hdmp
+*.mdmp
+*.core
+*.heap
+*.hprof
+*.etl
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local.json
+*.local.yaml
+*.local.yml
+*.secret
+*.secrets
+*.key
+*.pfx
+*.p12
+
+# Test recordings and temporary media
+/test-output/
+/captures/
+/recordings/
+*.yuv
+*.ivf
+*.h264
+*.mp4
+
+# Coverage and static-analysis output
+/coverage/
+/cppcheck/
+/clang-tidy/
+*.gcda
+*.gcno
+*.gcov
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local Codex/agent metadata
+/.codex/
+/.agents/
