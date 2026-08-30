@@ -2,6 +2,7 @@ add_library(nstu_common STATIC
     src/auth.cpp
     src/control_channel.cpp
     src/frame_reassembler.cpp
+    src/key_store.cpp
     src/multicast.cpp
     src/network.cpp
     src/packet_loss.cpp

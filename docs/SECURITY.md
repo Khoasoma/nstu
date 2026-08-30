@@ -53,6 +53,14 @@ full access only to LocalSystem, built-in Administrators, and the file owner.
 The PSK and DPAPI entropy remain deployment inputs and must be provisioned by an
 installer or enrollment workflow; they are never generated into the repository.
 
+`security::KeyStore` now provides the in-process lifecycle boundary used by a
+server key resolver: enrollment rejects weak or reused IDs, rotation allocates a
+new monotonic ID before revoking older active keys, and revocation zeroizes key
+material while retaining an ID tombstone. `resolve()` returns only active key
+copies. The store is intentionally memory-only; a deployment must load and save
+its entries through DPAPI-protected files or a certificate-backed enrollment
+service before accepting clients.
+
 ## Authenticated control frames
 
 After the handshake, every command carries:
@@ -108,8 +116,8 @@ metadata before UDP reception begins.
 
 ## Remaining blockers
 
-- Protected PSK enrollment, key rotation, and revocation workflow (the DPAPI
-  storage primitive is available, but lifecycle management is not wired).
+- Persisted keyring loading/saving and authenticated enrollment transport around
+  the in-process `KeyStore` lifecycle manager.
 - Secure group-key distribution messages wired into the control connection.
 - Connection-level rate limiting and audit events.
 - Confidentiality: HMAC authenticates but does not encrypt screen content.

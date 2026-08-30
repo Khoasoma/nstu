@@ -24,6 +24,12 @@ nstu_enable_warnings(nstu_auth_tests)
 nstu_enable_test_assertions(nstu_auth_tests)
 add_test(NAME nstu.auth COMMAND nstu_auth_tests)
 
+add_executable(nstu_key_store_tests key_store_tests.cpp)
+target_link_libraries(nstu_key_store_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_key_store_tests)
+nstu_enable_test_assertions(nstu_key_store_tests)
+add_test(NAME nstu.key_store COMMAND nstu_key_store_tests)
+
 add_executable(nstu_frame_reassembler_tests frame_reassembler_tests.cpp)
 target_link_libraries(nstu_frame_reassembler_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_frame_reassembler_tests)

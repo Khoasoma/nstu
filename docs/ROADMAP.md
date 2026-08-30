@@ -12,6 +12,7 @@
 - [x] Live blocking TCP handshake and authenticated control channel.
 - [x] Fixed connection preamble for early role/version/identity filtering.
 - [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
+- [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
@@ -23,8 +24,8 @@
 
 ## Next engineering milestones
 
-- [ ] Add key enrollment, rotation, and revocation workflow around the DPAPI
-      storage primitive.
+- [ ] Add persisted keyring loading/saving and authenticated enrollment transport
+      around the in-process key lifecycle manager.
 - [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
 - [ ] Packetizer, jitter buffer, NACK policy, and keyframe scheduling.
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.
