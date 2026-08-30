@@ -48,8 +48,9 @@ for reporting, hysteresis, stream-reset, and fallback rules.
 
 - Authentication primitives are implemented, but protected key provisioning
   and live connection integration remain.
-- IOCP primitives exist, but the complete multi-client accept/dispatch loop is
-  not connected to the server UI.
+- IOCP create/associate/dequeue/post primitives exist, but the complete
+  multi-client AcceptEx/WSARecv/WSASend dispatch loop is not connected to the
+  server UI.
 - Bounded UDP frame reassembly is implemented; jitter buffering, NACK policy,
   and keyframe scheduling remain.
 - The service/agent IPC transport exists, but command routing from server to

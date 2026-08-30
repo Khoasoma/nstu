@@ -314,6 +314,60 @@ bool IocpPort::associate(const TcpSocket& socket,
 #endif
 }
 
+bool IocpPort::wait(Completion& completion, std::uint32_t timeout_ms,
+                    std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "IOCP is not open");
+        return false;
+    }
+    DWORD bytes_transferred = 0;
+    ULONG_PTR completion_key = 0;
+    OVERLAPPED* overlapped = nullptr;
+    const BOOL result = GetQueuedCompletionStatus(
+        reinterpret_cast<HANDLE>(handle_), &bytes_transferred,
+        &completion_key, &overlapped, timeout_ms);
+    completion.bytes_transferred = bytes_transferred;
+    completion.completion_key = static_cast<std::uintptr_t>(completion_key);
+    completion.overlapped = reinterpret_cast<std::uintptr_t>(overlapped);
+    completion.error_code = result != FALSE
+                                ? ERROR_SUCCESS
+                                : GetLastError();
+    if (result == FALSE && overlapped == nullptr) {
+        if (completion.error_code == WAIT_TIMEOUT) {
+            set_error(error, "IOCP wait timed out");
+        } else {
+            set_error(error, "GetQueuedCompletionStatus failed");
+        }
+        return false;
+    }
+    return true;
+#else
+    (void)completion;
+    (void)timeout_ms;
+    set_error(error, "IOCP requires Windows");
+    return false;
+#endif
+}
+
+bool IocpPort::post(const Completion& completion, std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open() ||
+        PostQueuedCompletionStatus(
+            reinterpret_cast<HANDLE>(handle_), completion.bytes_transferred,
+            static_cast<ULONG_PTR>(completion.completion_key),
+            reinterpret_cast<OVERLAPPED*>(completion.overlapped)) == FALSE) {
+        set_error(error, "PostQueuedCompletionStatus failed");
+        return false;
+    }
+    return true;
+#else
+    (void)completion;
+    set_error(error, "IOCP requires Windows");
+    return false;
+#endif
+}
+
 bool IocpPort::is_open() const noexcept {
     return handle_ != 0;
 }

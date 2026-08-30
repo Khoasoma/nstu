@@ -17,6 +17,7 @@
 - [x] Hardware H.264 MFT configuration and asynchronous event handling.
 - [x] Service/session-agent separation, DACL helpers, named pipe, tray, overlay.
 - [x] Dear ImGui/D3D11 server shell and thread-safe client state registry.
+- [x] IOCP completion-port create, socket association, wait, and post wrappers.
 - [x] Unit/integration tests and Windows CI.
 
 ## Next engineering milestones

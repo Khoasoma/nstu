@@ -147,5 +147,21 @@ int main() {
     nstu::security::secure_zero(loaded);
     assert(DeleteFileW(secret_path.c_str()));
     nstu::security::secure_zero(key);
+
+    nstu::net::IocpPort iocp;
+    assert(iocp.create(1, &error));
+    const nstu::net::IocpPort::Completion posted{
+        .bytes_transferred = 17,
+        .completion_key = 0x1234,
+        .overlapped = 0,
+        .error_code = 0,
+    };
+    assert(iocp.post(posted, &error));
+    nstu::net::IocpPort::Completion received_completion{};
+    assert(iocp.wait(received_completion, 1000, &error));
+    assert(received_completion.bytes_transferred == posted.bytes_transferred);
+    assert(received_completion.completion_key == posted.completion_key);
+    assert(received_completion.overlapped == 0);
+    assert(received_completion.error_code == 0);
     return 0;
 }

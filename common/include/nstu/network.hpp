@@ -47,6 +47,13 @@ private:
 
 class IocpPort {
 public:
+    struct Completion {
+        std::uint32_t bytes_transferred = 0;
+        std::uintptr_t completion_key = 0;
+        std::uintptr_t overlapped = 0;
+        std::uint32_t error_code = 0;
+    };
+
     IocpPort() noexcept;
     ~IocpPort();
     IocpPort(const IocpPort&) = delete;
@@ -57,6 +64,11 @@ public:
     [[nodiscard]] bool associate(const TcpSocket& socket,
                                  std::uintptr_t completion_key,
                                  std::string* error = nullptr) const;
+    [[nodiscard]] bool wait(Completion& completion,
+                            std::uint32_t timeout_ms = 0xffffffffu,
+                            std::string* error = nullptr) const;
+    [[nodiscard]] bool post(const Completion& completion,
+                            std::string* error = nullptr) const;
     [[nodiscard]] bool is_open() const noexcept;
     void close() noexcept;
 
