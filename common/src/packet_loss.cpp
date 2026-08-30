@@ -69,13 +69,14 @@ std::optional<PacketLossStats> packet_loss_delta(
 
 PacketLossTracker::PacketLossTracker(std::size_t reorder_window,
                                      std::uint64_t max_forward_jump)
-    : received_(std::clamp<std::size_t>(reorder_window, 8, 65'536), 0),
+    : received_(std::clamp<std::size_t>(reorder_window, 8, 65'536),
+                std::uint8_t{0}),
       max_forward_jump_(std::max<std::uint64_t>(max_forward_jump, 1)) {}
 
 void PacketLossTracker::reset(
     std::uint32_t stream_id,
     std::optional<std::uint64_t> initial_sequence) noexcept {
-    std::fill(received_.begin(), received_.end(), 0);
+    std::fill(received_.begin(), received_.end(), std::uint8_t{0});
     head_ = 0;
     window_start_ = initial_sequence.value_or(0);
     highest_sequence_ = initial_sequence.value_or(0);
@@ -180,7 +181,7 @@ void PacketLossTracker::advance(std::uint64_t count) noexcept {
             finalize_slot(index);
         }
         saturating_add(stats_.confirmed_lost, count - window_size);
-        std::fill(received_.begin(), received_.end(), 0);
+        std::fill(received_.begin(), received_.end(), std::uint8_t{0});
         head_ = 0;
     } else {
         for (std::uint64_t index = 0; index < count; ++index) {
