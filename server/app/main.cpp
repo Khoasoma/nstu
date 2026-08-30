@@ -10,6 +10,9 @@
 #include "imgui_impl_win32.h"
 
 #include <chrono>
+#include <algorithm>
+#include <array>
+#include <cstdio>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND window, UINT message, WPARAM wparam, LPARAM lparam);
@@ -112,6 +115,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
 
     nstu::server::ClientRegistry registry;
     seed_demo_clients(registry);
+    std::uint64_t selected_client_id = 1;
+    bool stream_requested = false;
+    std::array<char, 512> chat_input{};
     bool running = true;
     while (running) {
         MSG message{};
@@ -135,36 +141,124 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                          ImGuiWindowFlags_NoResize);
         ImGui::Text("Connected clients: %zu", registry.size());
         ImGui::Separator();
-        if (ImGui::BeginTable("clients", 6,
-                              ImGuiTableFlags_Borders |
-                                  ImGuiTableFlags_RowBg)) {
-            ImGui::TableSetupColumn("Host");
-            ImGui::TableSetupColumn("Address");
-            ImGui::TableSetupColumn("Status");
-            ImGui::TableSetupColumn("Delivery");
-            ImGui::TableSetupColumn("Latency");
-            ImGui::TableSetupColumn("Loss");
-            ImGui::TableHeadersRow();
-            for (const auto& client : registry.snapshot()) {
-                ImGui::TableNextRow();
-                ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(client.hostname.c_str());
-                ImGui::TableSetColumnIndex(1);
-                ImGui::TextUnformatted(client.address.c_str());
-                ImGui::TableSetColumnIndex(2);
-                ImGui::TextUnformatted(nstu::server::to_string(client.status));
-                ImGui::TableSetColumnIndex(3);
-                ImGui::TextUnformatted(
-                    client.delivery == nstu::net::VideoDeliveryMode::multicast
-                        ? "Multicast"
-                        : "Unicast");
-                ImGui::TableSetColumnIndex(4);
-                ImGui::Text("%u ms", client.latency_ms);
-                ImGui::TableSetColumnIndex(5);
-                ImGui::Text("%.1f%%", client.packet_loss_per_mille / 10.0f);
+        const auto clients = registry.snapshot();
+        const float left_width = ImGui::GetContentRegionAvail().x * 0.58f;
+        if (ImGui::BeginChild("client-list", {left_width, 0}, true)) {
+            ImGui::TextUnformatted("Clients");
+            ImGui::Separator();
+            if (ImGui::BeginTable("clients", 6,
+                                  ImGuiTableFlags_Borders |
+                                      ImGuiTableFlags_RowBg |
+                                      ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn("Host");
+                ImGui::TableSetupColumn("Address");
+                ImGui::TableSetupColumn("Status");
+                ImGui::TableSetupColumn("Path");
+                ImGui::TableSetupColumn("Latency");
+                ImGui::TableSetupColumn("Loss");
+                ImGui::TableHeadersRow();
+                for (const auto& client : clients) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    const bool selected = selected_client_id == client.id;
+                    if (ImGui::Selectable(client.hostname.c_str(), selected,
+                                         ImGuiSelectableFlags_SpanAllColumns)) {
+                        selected_client_id = client.id;
+                        stream_requested = false;
+                    }
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(client.address.c_str());
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(nstu::server::to_string(client.status));
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TextUnformatted(
+                        client.delivery == nstu::net::VideoDeliveryMode::multicast
+                            ? "Multicast"
+                            : "Unicast");
+                    ImGui::TableSetColumnIndex(4);
+                    ImGui::Text("%u ms", client.latency_ms);
+                    ImGui::TableSetColumnIndex(5);
+                    ImGui::Text("%.1f%%", client.packet_loss_per_mille / 10.0f);
+                }
+                ImGui::EndTable();
             }
-            ImGui::EndTable();
         }
+        ImGui::EndChild();
+        ImGui::SameLine();
+        if (ImGui::BeginChild("client-detail", {0, 0}, true)) {
+            const auto found = std::find_if(
+                clients.begin(), clients.end(),
+                [selected_client_id](const auto& client) {
+                    return client.id == selected_client_id;
+                });
+            if (found == clients.end()) {
+                ImGui::TextUnformatted("Select a client");
+            } else {
+                ImGui::Text("%s", found->hostname.c_str());
+                ImGui::TextUnformatted(found->address.c_str());
+                ImGui::Separator();
+                ImGui::Text("Status: %s",
+                            nstu::server::to_string(found->status));
+                ImGui::Text("Latency: %u ms", found->latency_ms);
+                ImGui::Text("Packet loss: %.1f%%",
+                            found->packet_loss_per_mille / 10.0f);
+                ImGui::Text("Delivery: %s",
+                            found->delivery == nstu::net::VideoDeliveryMode::multicast
+                                ? "Multicast"
+                                : "Unicast");
+                ImGui::Separator();
+                ImGui::TextUnformatted("Screen stream");
+                const float preview_width = ImGui::GetContentRegionAvail().x;
+                const float preview_height =
+                    std::max(120.0f, std::min(220.0f, preview_width * 9.0f / 16.0f));
+                if (ImGui::BeginChild("stream-preview",
+                                      {0, preview_height}, true,
+                                      ImGuiWindowFlags_NoScrollbar)) {
+                    const auto top_left = ImGui::GetCursorScreenPos();
+                    const auto bottom_right = ImVec2(
+                        top_left.x + ImGui::GetContentRegionAvail().x,
+                        top_left.y + preview_height - 12.0f);
+                    ImGui::GetWindowDrawList()->AddRectFilled(
+                        top_left, bottom_right, IM_COL32(28, 31, 35, 255));
+                    ImGui::SetCursorPos({12.0f, preview_height * 0.42f});
+                    ImGui::TextUnformatted(stream_requested
+                                               ? "Waiting for authenticated video frames"
+                                               : "No live stream requested");
+                }
+                ImGui::EndChild();
+                ImGui::TextUnformatted("Target: 15 FPS");
+                if (ImGui::Button(stream_requested ? "Stop stream" : "Start stream")) {
+                    stream_requested = !stream_requested;
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Request keyframe")) {
+                    ImGui::OpenPopup("control-status");
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Lock")) {
+                    ImGui::OpenPopup("control-status");
+                }
+                if (ImGui::BeginPopup("control-status")) {
+                    ImGui::TextUnformatted("Control-plane routing is pending.");
+                    ImGui::EndPopup();
+                }
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Separator();
+        if (ImGui::BeginChild("chat-panel", {0, 116}, true)) {
+            ImGui::TextUnformatted("Chat");
+            ImGui::TextDisabled("No messages in this local UI session.");
+            ImGui::SetNextItemWidth(-92.0f);
+            const bool submit = ImGui::InputText("##chat-input", chat_input.data(),
+                                                  chat_input.size(),
+                                                  ImGuiInputTextFlags_EnterReturnsTrue);
+            ImGui::SameLine();
+            if ((submit || ImGui::Button("Send")) && chat_input[0] != '\0') {
+                chat_input[0] = '\0';
+            }
+        }
+        ImGui::EndChild();
         ImGui::End();
         ImGui::Render();
         constexpr float clear_color[4] = {0.94f, 0.94f, 0.93f, 1.0f};

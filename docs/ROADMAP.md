@@ -15,6 +15,8 @@
 - [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
 - [x] Bounded unauthenticated handshake rate limiter with temporary blocking.
 - [x] CPack/NSIS server and client installer targets with service scripts.
+- [x] Server UI layout for client telemetry, 15 FPS preview state, chat and
+      control actions; lightweight Native Win32 client chat shell.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.

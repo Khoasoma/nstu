@@ -28,6 +28,9 @@ phải bản triển khai production hoàn chỉnh cho trường học. Các gi�
 - Windows Service, active-session agent, secure named pipe, tray icon và
   fullscreen overlay.
 - Server UI dùng Dear ImGui + D3D11 và client registry thread-safe.
+- Server UI có client list, preview stream 16:9 theo target 15 FPS, telemetry,
+  chat và control actions.
+- Client agent có chat window Native Win32 dùng các control hệ thống nhẹ.
 - CMake modular, build được bằng MSVC hoặc MinGW-w64, có Windows CI.
 
 ## Kiến trúc thư mục
@@ -128,6 +131,46 @@ ctest --test-dir build-core --output-on-failure
 - `nstu-agent.exe`: interactive session agent.
 - `nstu_video_probe.exe`: kiểm tra khả năng video/MFT trên máy hiện tại.
 - Các executable trong `tests/`: test protocol, auth, networking và video.
+
+## Chạy thử giao diện
+
+Sau khi build trên Windows, chạy `nstu-server.exe` để mở server shell. Màn hình
+server gồm danh sách client bên trái, panel chi tiết và preview bên phải, cùng
+chat ở phía dưới. Preview hiển thị trạng thái chờ frame khi control/video path
+chưa được nối với thiết bị thật; target mặc định là 15 FPS.
+
+Chạy `nstu-agent.exe` để mở chat client Native Win32 và tray icon. Double-click
+tray icon để ẩn/hiện chat. Fullscreen overlay vẫn là lớp hiển thị riêng cho
+trạng thái lock và không che chat khi máy không bị khóa.
+
+Các nút `Start stream`, `Request keyframe`, `Lock` và `Send` hiện đã có UI state
+local. Routing lệnh thật qua TCP/service/agent sẽ được nối ở milestone control
+plane tiếp theo.
+
+## Cài đặt và kiểm thử
+
+Để cài client từ installer, chạy PowerShell với quyền Administrator trong thư mục
+đã cài:
+
+```powershell
+.\install-client-service.ps1
+```
+
+Gỡ service trước khi uninstall client:
+
+```powershell
+.\uninstall-client-service.ps1
+```
+
+Kiểm thử nhanh sau build:
+
+```powershell
+ctest --test-dir build-msvc -C Release --output-on-failure
+.\build-msvc\video\Release\nstu_video_probe.exe
+```
+
+`nstu_video_probe.exe` chỉ báo khả năng adapter/MFT trên máy đang chạy, không
+thay thế soak test hoặc kiểm tra multicast trên switch thật.
 
 ## Đóng gói installer
 

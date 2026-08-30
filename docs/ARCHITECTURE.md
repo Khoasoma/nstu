@@ -13,6 +13,13 @@ directly with the logged-in user's desktop. IPC uses a local named pipe whose
 DACL permits SYSTEM, Administrators, and the interactive user and rejects
 remote clients.
 
+The server shell presents a split operational view: a scannable client registry,
+selected-client telemetry, a 16:9 preview surface with a 15 FPS target, control
+actions, and a compact chat panel. The preview is deliberately stateful and
+shows no-frame status until authenticated video packets are connected. The
+client agent uses standard Win32 LISTBOX/EDIT/BUTTON controls for a small chat
+window; no UI framework is added to the client.
+
 ## Video path
 
 ```text
