@@ -1,4 +1,6 @@
 add_library(nstu_common STATIC
+    src/auth.cpp
+    src/frame_reassembler.cpp
     src/multicast.cpp
     src/network.cpp
     src/packet_loss.cpp
@@ -14,5 +16,5 @@ target_compile_features(nstu_common PUBLIC cxx_std_20)
 nstu_enable_warnings(nstu_common)
 
 if(WIN32)
-    target_link_libraries(nstu_common PUBLIC ws2_32)
+    target_link_libraries(nstu_common PUBLIC bcrypt ws2_32)
 endif()

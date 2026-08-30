@@ -8,6 +8,8 @@
 - [x] Winsock TCP/IOCP and UDP multicast foundations.
 - [x] Multicast-to-unicast fallback state machine.
 - [x] Reorder-aware packet-loss estimator and server health hysteresis.
+- [x] Mutual HMAC handshake, replay cache, control/video MAC primitives.
+- [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
 - [x] Hardware H.264 MFT configuration and asynchronous event handling.
@@ -17,9 +19,10 @@
 
 ## Next engineering milestones
 
-- [ ] Authenticated hello/handshake with replay protection and key rotation.
+- [ ] Wire authenticated handshake into live TCP connections and add protected
+      key enrollment, rotation, and revocation.
 - [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
-- [ ] Video fragmentation/reassembly, jitter buffer, frame-loss metrics, and NACK.
+- [ ] Packetizer, jitter buffer, NACK policy, and keyframe scheduling.
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.
 - [ ] Connect server UI actions to the control plane.
 - [ ] Device-loss recovery loop for duplication, converter, and encoder.

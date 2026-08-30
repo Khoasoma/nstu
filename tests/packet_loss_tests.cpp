@@ -23,6 +23,9 @@ int main() {
     using nstu::net::PacketLossTracker;
 
     PacketLossTracker reordered(8, 1000);
+    assert(reordered.observe(packet(7, 100)) ==
+           PacketDisposition::uninitialized);
+    reordered.reset(7, 100);
     assert(reordered.observe(packet(7, 100)) == PacketDisposition::in_order);
     assert(reordered.observe(packet(7, 102)) == PacketDisposition::in_order);
     assert(reordered.stats().confirmed_lost == 0);
@@ -45,6 +48,7 @@ int main() {
     assert(startup_reorder.stats().finalized_received == 3);
 
     PacketLossTracker missing(8, 1000);
+    missing.reset(9, 10);
     assert(missing.observe(packet(9, 10)) == PacketDisposition::in_order);
     assert(missing.observe(packet(9, 12)) == PacketDisposition::in_order);
     for (std::uint64_t sequence = 13; sequence <= 19; ++sequence) {
@@ -57,12 +61,14 @@ int main() {
     assert(missing.stats().too_late == 1);
 
     PacketLossTracker large_gap(8, 1000);
+    large_gap.reset(11, 0);
     assert(large_gap.observe(packet(11, 0)) == PacketDisposition::in_order);
     assert(large_gap.observe(packet(11, 100)) == PacketDisposition::in_order);
     assert(large_gap.stats().finalized_received == 1);
     assert(large_gap.stats().confirmed_lost == 92);
 
     PacketLossTracker invalid_jump(8, 100);
+    invalid_jump.reset(12, 1000);
     assert(invalid_jump.observe(packet(12, 1000)) == PacketDisposition::in_order);
     assert(invalid_jump.observe(packet(12, 5000)) ==
            PacketDisposition::invalid_forward_jump);
@@ -72,6 +78,7 @@ int main() {
            PacketDisposition::wrong_stream);
 
     PacketLossTracker flushed(8, 1000);
+    flushed.reset(14, 20);
     assert(flushed.observe(packet(14, 20)) == PacketDisposition::in_order);
     assert(flushed.observe(packet(14, 22)) == PacketDisposition::in_order);
     flushed.flush();

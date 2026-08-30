@@ -27,6 +27,10 @@ enum class CommandType : std::uint16_t {
     unlock = 5,
     chat = 6,
     keyframe_request = 7,
+    auth_hello = 8,
+    auth_challenge = 9,
+    auth_proof = 10,
+    auth_accept = 11,
 };
 
 enum class VideoFlags : std::uint16_t {

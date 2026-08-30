@@ -93,8 +93,9 @@ void PacketLossTracker::reset(
 PacketDisposition PacketLossTracker::observe(
     const protocol::VideoPacketHeader& packet) noexcept {
     if (!stream_set_) {
-        reset(packet.stream_id);
-    } else if (packet.stream_id != stream_id_) {
+        return PacketDisposition::uninitialized;
+    }
+    if (packet.stream_id != stream_id_) {
         saturating_add(stats_.wrong_stream, 1);
         return PacketDisposition::wrong_stream;
     }

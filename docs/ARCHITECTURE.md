@@ -33,6 +33,10 @@ TCP frames are length-prefixed and contain explicitly serialized little-endian
 headers. No C++ struct memory layout is placed directly on the wire. Parsers
 enforce payload and buffered-byte limits before allocating.
 
+Control authentication uses a nonce-based mutual HMAC handshake, derived
+session keys, strict per-direction command sequences, and replay protection.
+See `docs/SECURITY.md`.
+
 ## Packet loss
 
 Video protocol v2 includes a monotonic packet sequence independent of frame and
@@ -42,10 +46,12 @@ for reporting, hysteresis, stream-reset, and fallback rules.
 
 ## Known limitations
 
-- TCP authentication/HMAC and key provisioning are not implemented yet.
+- Authentication primitives are implemented, but protected key provisioning
+  and live connection integration remain.
 - IOCP primitives exist, but the complete multi-client accept/dispatch loop is
   not connected to the server UI.
-- UDP packet reassembly, jitter buffering, NACK, and keyframe scheduling remain.
+- Bounded UDP frame reassembly is implemented; jitter buffering, NACK policy,
+  and keyframe scheduling remain.
 - The service/agent IPC transport exists, but command routing from server to
   overlay is not wired end to end.
 - The encoder accepts NV12 textures and handles asynchronous MFT events, but

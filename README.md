@@ -9,6 +9,9 @@ low-overhead control and one-to-many screen broadcast.
 - Incremental TCP framing plus Windows TCP/IOCP primitives.
 - UDP multicast sender/receiver and automatic unicast fallback policy.
 - Reorder-aware packet-loss accounting with duplicate/late/jump protection.
+- Mutual HMAC handshake, replay protection, and authenticated control/video
+  packet primitives.
+- Bounded UDP frame reassembly with deadline and memory-pressure accounting.
 - DXGI Desktop Duplication capture.
 - GPU BGRA-to-NV12 conversion using the D3D11 video processor.
 - Media Foundation hardware H.264 encoding with asynchronous MFT events.

@@ -18,6 +18,18 @@ nstu_enable_warnings(nstu_packet_loss_tests)
 nstu_enable_test_assertions(nstu_packet_loss_tests)
 add_test(NAME nstu.packet_loss COMMAND nstu_packet_loss_tests)
 
+add_executable(nstu_auth_tests auth_tests.cpp)
+target_link_libraries(nstu_auth_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_auth_tests)
+nstu_enable_test_assertions(nstu_auth_tests)
+add_test(NAME nstu.auth COMMAND nstu_auth_tests)
+
+add_executable(nstu_frame_reassembler_tests frame_reassembler_tests.cpp)
+target_link_libraries(nstu_frame_reassembler_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_frame_reassembler_tests)
+nstu_enable_test_assertions(nstu_frame_reassembler_tests)
+add_test(NAME nstu.frame_reassembler COMMAND nstu_frame_reassembler_tests)
+
 if(TARGET nstu_server_state)
     add_executable(nstu_server_state_tests server_state_tests.cpp)
     target_link_libraries(nstu_server_state_tests PRIVATE nstu_server_state)

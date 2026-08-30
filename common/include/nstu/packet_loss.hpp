@@ -10,6 +10,7 @@
 namespace nstu::net {
 
 enum class PacketDisposition : std::uint8_t {
+    uninitialized,
     in_order,
     reordered,
     duplicate,
