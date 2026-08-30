@@ -39,6 +39,10 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository metadata
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - name: Download installers
         uses: actions/download-artifact@v4
         with:
