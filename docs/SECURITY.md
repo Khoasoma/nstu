@@ -45,6 +45,13 @@ against `AuthHello` and is never trusted without the subsequent HMAC proof.
 Preamble parsing is fixed-size and allocation-free; deployments should apply a
 short read timeout and per-source rate limit at this boundary.
 
+`security::HandshakeRateLimiter` provides that bounded admission primitive. It
+tracks a source by stable address or enrollment identity, limits failures in a
+fixed window, applies a temporary block after the threshold, evicts oldest
+entries when the source table is full, and clears state after a successful
+handshake. It must be called before `client_handshake`/`server_handshake`; it
+does not replace replay protection or HMAC verification.
+
 For local key material, `protect_machine_secret` and
 `unprotect_machine_secret` use Windows DPAPI with `CRYPTPROTECT_LOCAL_MACHINE`.
 `save_machine_secret` writes an ACL-restricted temporary file, flushes it, and

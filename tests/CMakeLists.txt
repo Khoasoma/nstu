@@ -30,6 +30,12 @@ nstu_enable_warnings(nstu_key_store_tests)
 nstu_enable_test_assertions(nstu_key_store_tests)
 add_test(NAME nstu.key_store COMMAND nstu_key_store_tests)
 
+add_executable(nstu_rate_limiter_tests rate_limiter_tests.cpp)
+target_link_libraries(nstu_rate_limiter_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_rate_limiter_tests)
+nstu_enable_test_assertions(nstu_rate_limiter_tests)
+add_test(NAME nstu.rate_limiter COMMAND nstu_rate_limiter_tests)
+
 add_executable(nstu_frame_reassembler_tests frame_reassembler_tests.cpp)
 target_link_libraries(nstu_frame_reassembler_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_frame_reassembler_tests)

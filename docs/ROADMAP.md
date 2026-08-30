@@ -13,6 +13,7 @@
 - [x] Fixed connection preamble for early role/version/identity filtering.
 - [x] DPAPI machine-scoped secret storage with restrictive ACL and atomic replace.
 - [x] In-process key enrollment, monotonic rotation, revocation, and zeroization.
+- [x] Bounded unauthenticated handshake rate limiter with temporary blocking.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
@@ -26,6 +27,8 @@
 
 - [ ] Add persisted keyring loading/saving and authenticated enrollment transport
       around the in-process key lifecycle manager.
+- [ ] Wire the handshake rate limiter into the live IOCP accept/dispatch loop and
+      emit security audit events.
 - [ ] Complete IOCP accept/receive/send dispatcher for 50+ clients.
 - [ ] Packetizer, jitter buffer, NACK policy, and keyframe scheduling.
 - [ ] Wire live service-agent commands for lock/unlock and status reporting.

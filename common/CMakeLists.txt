@@ -7,6 +7,7 @@ add_library(nstu_common STATIC
     src/network.cpp
     src/packet_loss.cpp
     src/protocol.cpp
+    src/rate_limiter.cpp
     src/secret_store.cpp
 )
 
