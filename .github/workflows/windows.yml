@@ -8,7 +8,7 @@ jobs:
   build-test:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S . -B build -A x64 -DNSTU_ENABLE_WERROR=ON
       - name: Build
