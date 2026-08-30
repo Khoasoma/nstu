@@ -25,6 +25,8 @@
 - [x] Dear ImGui/D3D11 server shell and thread-safe client state registry.
 - [x] IOCP completion-port create, socket association, wait, and post wrappers.
 - [x] Unit/integration tests and Windows CI.
+- [x] Bilingual deployment-facing README with installation, network, licensing,
+      Deep Freeze, and honest MVP-status guidance.
 
 ## Next engineering milestones
 

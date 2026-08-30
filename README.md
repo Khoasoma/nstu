@@ -1,288 +1,209 @@
 # Project NSTU
 
-NSTU là dự án mã nguồn mở dành cho quản lý phòng máy và classroom lab trên
-Windows. Mục tiêu là cung cấp server quản trị tập trung, client nhẹ chạy nền,
-và kênh truyền màn hình độ trễ thấp từ một máy giáo viên tới nhiều máy học
-sinh.
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md)
 
-Repository: <https://github.com/Khoasoma/nstu>
+[![Windows CI](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-NSTU hiện là engineering MVP dùng để phát triển và kiểm thử kiến trúc, chưa
-phải bản triển khai production hoàn chỉnh cho trường học. Các giới hạn thực tế
-được ghi trong [ROADMAP.md](docs/ROADMAP.md).
+NSTU is a free and open-source classroom and computer-lab management project
+for Windows. It is designed around a centralized teacher server, lightweight
+student clients, authenticated control commands, chat, and low-latency screen
+broadcasting over a local network.
 
-## Tính năng hiện tại
+> **Development status:** NSTU is currently an engineering MVP, not a
+> production release. The installers can be built and the user interfaces can
+> be tested, but live enrollment, multi-client dispatch, control routing, and
+> end-to-end video delivery are not complete. Do not deploy the current nightly
+> build as a security control in a real school.
 
-- Protocol nhị phân versioned, little-endian, có giới hạn kích thước và parser
-  TCP incremental.
-- TCP control channel với connection preamble, mutual HMAC handshake, replay
-  protection, sequence guard và rate limiter cho kết nối chưa xác thực.
-- `KeyStore` hỗ trợ enrollment, rotation, revocation, tombstone `key_id` và
-  zeroization; DPAPI dùng để bảo vệ secret ở local machine.
-- UDP multicast cho broadcast và policy fallback sang unicast.
-- Packet-loss tracker có reorder window, duplicate/late/wrong-stream/jump
-  handling. Xem [PACKET_LOSS.md](docs/PACKET_LOSS.md).
-- Bounded video frame reassembly, deadline, duplicate/conflict detection và
-  memory-pressure accounting. Xem [VIDEO_REASSEMBLY.md](docs/VIDEO_REASSEMBLY.md).
-- DXGI Desktop Duplication, D3D11 BGRA-to-NV12 và Media Foundation H.264 MFT.
-- Windows Service, active-session agent, secure named pipe, tray icon và
-  fullscreen overlay.
-- Server UI dùng Dear ImGui + D3D11 và client registry thread-safe.
-- Server UI có client list, preview stream 16:9 theo target 15 FPS, telemetry,
-  chat và control actions.
-- Client agent có chat window Native Win32 dùng các control hệ thống nhẹ.
-- CMake modular, build được bằng MSVC hoặc MinGW-w64, có Windows CI.
+## Why NSTU exists
 
-## Kiến trúc thư mục
+NSTU grew from regret at seeing schools rely on unlicensed classroom software.
+Software obtained from untrusted sources can be modified, exploited, or used to
+turn lab computers into cryptocurrency-mining infrastructure without the
+school's knowledge. At the same time, stronger copyright enforcement in
+Vietnam can make it harder for schools with limited budgets to equip and manage
+computer rooms legally.
+
+We are building NSTU as a practical alternative: free to obtain, open for
+inspection, easy to install, and designed with security and low-resource
+hardware in mind. NSTU uses the MIT License. Schools, teachers, businesses, and
+individuals may use, study, modify, and redistribute it, including for
+commercial purposes, as long as the copyright and license notice is retained.
+
+Open source does not automatically make software secure. NSTU therefore keeps
+its threat model and unfinished production work public in
+[SECURITY.md](docs/SECURITY.md) and [ROADMAP.md](docs/ROADMAP.md).
+
+## Intended capabilities
+
+- Manage 50 or more Windows clients from one teacher workstation.
+- Broadcast a teacher screen using H.264 and UDP multicast so LAN bandwidth
+  does not grow linearly with the client count.
+- Fall back to unicast when multicast health is persistently poor.
+- Show client status, latency, packet loss, a 15 FPS preview, and chat in the
+  server application.
+- Run a small Windows service and native Win32 tray/chat agent on each client.
+- Authenticate control and video traffic without JSON, XML, Electron, or a
+  custom kernel driver.
+- Keep secrets, dumps, captures, and runtime state local and outside Git.
+
+## System requirements
+
+The following values are project targets and still require validation on a
+real 50-client lab.
+
+| Role | Baseline target | Network |
+| --- | --- | --- |
+| Server | Intel Core i5-6400, 8 GB RAM, 512 MB free disk, Windows 10/11 x64 | Wired Gigabit Ethernet recommended |
+| Client | Intel Core i5-6400, 8 GB RAM, 512 MB free disk, Windows 10/11 x64 | Wired Ethernet recommended |
+| Router/switch | UDP multicast support, IGMPv2 or IGMPv3, IGMP snooping, and an IGMP querier | One controlled LAN/VLAN for the first deployment |
+
+For a server supervising 50 or more devices, 16 GB RAM and an SSD are prudent
+until the 8 GB target has passed long-duration hardware testing. Intel HD
+Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
+all driver versions.
+
+## Recommended network layout
 
 ```text
-nstu/
-|-- common/                  Protocol, auth, TCP/UDP, IOCP, key, rate limit
-|   |-- include/nstu/        Public C++ headers
-|   `-- src/                 Implementation dùng chung
-|-- video/                   DXGI, D3D11 converter, Media Foundation encoder
-|-- client/
-|   |-- service/             Windows Service entry point
-|   |-- agent/               Interactive-session tray/overlay entry point
-|   `-- src/                 Named pipe và session integration
-|-- server/
-|   |-- app/                 Server UI entry point
-|   |-- include/nstu/        Client state registry headers
-|   `-- src/                 Client registry implementation
-|-- tests/                   Protocol, auth, packet-loss, reassembly, IPC tests
-|-- docs/                    Architecture, security, packet-loss, roadmap
-|-- cmake/                   Compiler warning policy
-|-- CMakeLists.txt           Root build configuration
-|-- CMakePresets.json        Windows Debug/Release presets
-|-- LICENSE                  MIT license
-`-- THIRD_PARTY_NOTICES.md   Dependency and license notices
+Teacher PC (NSTU Server)
+          |
+     Gigabit Ethernet
+          |
+Managed switch / router with IGMP snooping + one IGMP querier
+     |            |             |
+ Client 01     Client 02      Client 50+
 ```
 
-## Yêu cầu cài đặt
+Before a production deployment:
 
-- Windows 10 hoặc Windows 11 x64.
-- Visual Studio 2022 với Desktop development with C++ và Windows SDK, hoặc
-  MinGW-w64 hỗ trợ C++20.
-- CMake 3.25 trở lên, Git.
-- Ninja nếu dùng CMake presets.
+1. Put the server and clients on the same trusted VLAN or subnet for the first
+   rollout.
+2. Enable IGMP snooping on managed switches and ensure exactly one router or
+   Layer-3 switch acts as the IGMP querier for that VLAN.
+3. Do not expose NSTU control or video traffic directly to the internet.
+4. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
+   client isolation and confirm multicast is not rate-limited to legacy data
+   rates.
+5. Avoid unmanaged switches for a large room. Without IGMP snooping, multicast
+   may be flooded to every port. If multicast is blocked, the planned unicast
+   fallback increases server and switch bandwidth with every client.
+6. Keep Windows Firewall enabled. The current MVP does not yet define stable,
+   user-configurable production ports, so do not create broad permanent allow
+   rules based on guessed port numbers.
 
-Các API video và service là Windows-only. Build đầy đủ và integration tests cần
-Windows.
+Cross-VLAN multicast requires intentionally configured multicast routing. It
+should not be enabled merely to make discovery work.
 
-## Clone và build
+## Install the current test build
+
+Nightly installers are available on the
+[Releases page](https://github.com/Khoasoma/nstu/releases). They are unsigned
+development artifacts and may trigger Microsoft Defender SmartScreen. Verify
+the release origin and SHA-256 digest before running them:
 
 ```powershell
-git clone https://github.com/Khoasoma/nstu.git
-cd nstu
+Get-FileHash .\nstu-server-*.exe -Algorithm SHA256
+Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
 ```
 
-### MSVC / Visual Studio
+### Server
 
-```powershell
-cmake -S . -B build-msvc -A x64 -DNSTU_ENABLE_WERROR=ON
-cmake --build build-msvc --config Release --parallel
-ctest --test-dir build-msvc -C Release --output-on-failure
-```
-
-### MinGW-w64
-
-```powershell
-cmake -S . -B build-mingw -G "MinGW Makefiles" `
-  -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON
-cmake --build build-mingw
-ctest --test-dir build-mingw --output-on-failure
-```
-
-### CMake presets
-
-Preset yêu cầu Ninja và một toolchain C++20 phù hợp:
-
-```powershell
-cmake --preset windows-debug
-cmake --build --preset windows-debug
-ctest --preset windows-debug
-```
-
-Release dùng `windows-release` thay cho `windows-debug`.
-
-## Tùy chọn CMake
-
-- `NSTU_BUILD_CLIENT=ON|OFF`: build service và agent client.
-- `NSTU_BUILD_SERVER=ON|OFF`: build server UI.
-- `NSTU_BUILD_VIDEO=ON|OFF`: build DXGI/Media Foundation trên Windows.
-- `NSTU_BUILD_TESTS=ON|OFF`: build test suite.
-- `NSTU_SERVER_USE_IMGUI=ON|OFF`: bật/tắt server UI Dear ImGui.
-- `NSTU_ENABLE_WERROR=ON|OFF`: coi warning là error.
-
-Ví dụ chỉ build core protocol/test:
-
-```powershell
-cmake -S . -B build-core -G "MinGW Makefiles" `
-  -DCMAKE_BUILD_TYPE=Release -DNSTU_BUILD_VIDEO=OFF `
-  -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF
-cmake --build build-core
-ctest --test-dir build-core --output-on-failure
-```
-
-## Artifact sau khi build
-
-- `nstu-server.exe`: server administration UI.
-- `nstu-service.exe`: Windows Service process.
-- `nstu-agent.exe`: interactive session agent.
-- `nstu_video_probe.exe`: kiểm tra khả năng video/MFT trên máy hiện tại.
-- Các executable trong `tests/`: test protocol, auth, networking và video.
-
-## Chạy thử giao diện
-
-Sau khi build trên Windows, chạy `nstu-server.exe` để mở server shell. Màn hình
-server gồm danh sách client bên trái, panel chi tiết và preview bên phải, cùng
-chat ở phía dưới. Preview hiển thị trạng thái chờ frame khi control/video path
-chưa được nối với thiết bị thật; target mặc định là 15 FPS.
-
-Chạy `nstu-agent.exe` để mở chat client Native Win32 và tray icon. Double-click
-tray icon để ẩn/hiện chat. Fullscreen overlay vẫn là lớp hiển thị riêng cho
-trạng thái lock và không che chat khi máy không bị khóa.
-
-Các nút `Start stream`, `Request keyframe`, `Lock` và `Send` hiện đã có UI state
-local. Routing lệnh thật qua TCP/service/agent sẽ được nối ở milestone control
-plane tiếp theo.
-
-## Cài đặt và kiểm thử
-
-Để cài client từ installer, chạy PowerShell với quyền Administrator trong thư mục
-đã cài:
-
-```powershell
-.\install-client-service.ps1
-```
-
-Gỡ service trước khi uninstall client:
-
-```powershell
-.\uninstall-client-service.ps1
-```
-
-Kiểm thử nhanh sau build:
-
-```powershell
-ctest --test-dir build-msvc -C Release --output-on-failure
-.\build-msvc\video\Release\nstu_video_probe.exe
-```
-
-`nstu_video_probe.exe` chỉ báo khả năng adapter/MFT trên máy đang chạy, không
-thay thế soak test hoặc kiểm tra multicast trên switch thật.
-
-## Đóng gói installer
-
-Trên Windows, CMake tạo hai target CPack/NSIS độc lập:
-
-```powershell
-cmake --build build-msvc --config Release --target nstu-package-server
-cmake --build build-msvc --config Release --target nstu-package-client
-```
-
-Kết quả là `nstu-server-0.1.0.exe` và `nstu-client-0.1.0.exe` trong build
-directory. Cần cài [NSIS](https://nsis.sourceforge.io/) và đặt `makensis.exe`
-trong `PATH`. Nếu môi trường build không có NSIS, có thể tạo archive để kiểm
-tra layout bằng CPack:
-
-```powershell
-cpack --config build-msvc/CPackConfig.cmake -G ZIP `
-  -DCPACK_COMPONENTS_ALL="server;docs" `
-  -DCPACK_PACKAGE_FILE_NAME=nstu-server-0.1.0
-cpack --config build-msvc/CPackConfig.cmake -G ZIP `
-  -DCPACK_COMPONENTS_ALL="client;docs" `
-  -DCPACK_PACKAGE_FILE_NAME=nstu-client-0.1.0
-```
-
-Client package có `install-client-service.ps1` và
-`uninstall-client-service.ps1`. Các script yêu cầu PowerShell chạy với quyền
-Administrator; installer không tự tạo service ngoài ý muốn.
-
-Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo hai installer và
-phát hành một GitHub pre-release tự động dạng `nightly-<run-number>`. Pull
-Request vẫn được build/test nhưng không tạo release. Các release thủ công như
-`v0.2.0-dev` vẫn được giữ độc lập.
-
-MVP chưa tự động signing, cấp key, cấu hình multicast hoặc service recovery.
-Các bước đó phải được thực hiện trong deployment workflow riêng.
-
-## Secret, memory và Deep Freeze
-
-Không commit PSK, DPAPI entropy, certificate, dump, memory snapshot, capture,
-log hoặc file runtime. Các thư mục local được ignore gồm `local/`, `memory/`,
-`dumps/`, `logs/`, `runtime/` và các build tree.
-
-Secret runtime nên được lưu bằng DPAPI machine scope hoặc certificate store.
-Named pipe và memory-mapped/local runtime data chỉ giảm disk I/O; chúng không
-thay thế ACL, authentication, key rotation hoặc policy của Deep Freeze.
-
-## Bảo mật và protocol
-
-Connection preamble là admission filter nhanh cho magic, version, role,
-`client_id` và `key_id`; nó không chứng minh danh tính máy con. Danh tính chỉ
-được chấp nhận sau HMAC handshake thành công.
-
-Luồng video xác thực HMAC trước packet-loss accounting và frame reassembly.
-HMAC không mã hóa nội dung màn hình; nếu LAN không được tin cậy cần AES-GCM
-hoặc cơ chế confidentiality tương đương.
-
-Chi tiết xem [ARCHITECTURE.md](docs/ARCHITECTURE.md),
-[SECURITY.md](docs/SECURITY.md), [PACKET_LOSS.md](docs/PACKET_LOSS.md),
-[VIDEO_REASSEMBLY.md](docs/VIDEO_REASSEMBLY.md) và [ROADMAP.md](docs/ROADMAP.md).
-
-## Fork và phát triển
-
-1. Mở repository trên GitHub và chọn **Fork**.
-2. Clone fork, sau đó cấu hình repository gốc làm `upstream`:
+1. Download `nstu-server-<version>.exe` from the latest pre-release.
+2. Run the installer and accept the Windows elevation prompt if requested.
+3. Start:
 
    ```powershell
-   git clone https://github.com/<your-account>/nstu.git
-   cd nstu
-   git remote add upstream https://github.com/Khoasoma/nstu.git
+   & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
-3. Tạo branch cho thay đổi:
+The current dashboard displays demonstration clients. `Start stream`, `Lock`,
+`Request keyframe`, and chat are UI states only until the live control plane is
+connected.
+
+### Client
+
+1. Download and install `nstu-client-<version>.exe` as an administrator.
+2. Open an elevated PowerShell window and run:
 
    ```powershell
-   git fetch upstream
-   git switch -c feature/<short-name> upstream/main
+   Set-Location "$env:ProgramFiles\NSTU\client"
+   .\install-client-service.ps1
+   Get-Service nstu-service
    ```
 
-4. Build với `NSTU_ENABLE_WERROR=ON`, chạy test và kiểm tra diff:
+3. The service attempts to start `nstu-agent.exe` in the active desktop
+   session. The tray icon and local chat window can be used to inspect the
+   client UI.
+4. Before uninstalling the client, remove the service:
 
    ```powershell
-   cmake --build build-msvc --config Release --parallel
-   ctest --test-dir build-msvc -C Release --output-on-failure
-   git diff --check
+   Set-Location "$env:ProgramFiles\NSTU\client"
+   .\uninstall-client-service.ps1
    ```
 
-5. Commit nhỏ, có mục đích rõ ràng, rồi push lên fork:
+## Connecting a computer room
 
-   ```powershell
-   git add <files>
-   git commit -m "Describe the change"
-   git push -u origin feature/<short-name>
-   ```
+There is no honest end-user connection procedure for the current nightly:
+persisted enrollment and the live multi-client dispatcher are still roadmap
+items. A finished production flow will require all of the following before a
+client is shown as trusted:
 
-6. Mở Pull Request từ fork tới `Khoasoma/nstu:main`. PR phải nêu test đã chạy,
-   thay đổi protocol/ABI nếu có, rủi ro Windows compatibility và ảnh hưởng
-   tới memory/runtime artifact.
+```text
+Install client
+  -> provision a unique client identity and protected enrollment credential
+  -> authenticate to the server over TCP
+  -> register the device and receive room policy
+  -> receive an authenticated video-group configuration
+  -> join multicast, measure loss, and use bounded unicast fallback if needed
+```
 
-Giữ thay đổi tập trung theo module và cập nhật roadmap khi hoàn tất milestone.
+Connection preambles only reject obviously invalid peers quickly. Device
+identity is accepted only after the cryptographic handshake succeeds. The
+project will publish exact ports, multicast group policy, firewall rules, and
+the enrollment UI when those interfaces become stable.
 
-## License và dependency
+## Deep Freeze deployments
 
-NSTU phát hành theo MIT License. Dependency runtime phải tương thích MIT,
-Apache-2.0 hoặc license permissive tương đương; không thêm GPL dependency.
-Dear ImGui được fetch ở thời điểm configure và dùng MIT License. Windows SDK,
-Winsock, DXGI, D3D11 và Media Foundation là thành phần của Windows SDK, không
-được redistribute như source dependency. Xem [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Install binaries in the normal protected Windows location.
+- Reserve a thawed, ACL-restricted location for enrolled identity, protected
+  key material, configuration, audit logs, and update state.
+- Never store PSKs, certificates, dumps, screen captures, or runtime secrets in
+  the repository.
+- Do not freeze a production image before enrollment persistence, service
+  recovery, upgrade, and rollback behavior have been tested.
 
-## Trạng thái production
+Named pipes and memory-mapped files reduce temporary disk activity but do not
+replace persistent protected storage. Deep Freeze will discard unthawed state
+after a reboot.
 
-Green CI chỉ chứng minh build và local correctness. Trước khi triển khai thật
-cần hoàn tất IOCP `AcceptEx`/`WSARecv`/`WSASend` dispatcher, persisted keyring và
-enrollment transport, packetizer/jitter/NACK/keyframe scheduling, service-agent
-routing, installer/signing, device-loss recovery, 50-client soak test, switch
-multicast matrix và Intel driver matrix.
+## Security notes
+
+- Current control sessions use mutual HMAC authentication and replay
+  protection.
+- Video datagrams can be authenticated, but screen content is not yet
+  encrypted. Do not test real sensitive screens on an untrusted LAN.
+- Code signing, authenticated enrollment transport, persisted keyrings,
+  device-loss recovery, independent review, and fuzzing remain production
+  blockers.
+- A green CI build proves compilation and automated tests, not security or
+  reliability on real school hardware.
+
+## Contributing and development
+
+Build instructions, repository structure, CMake options, testing, and fork/PR
+steps are in the [development guide](docs/DEVELOPMENT.md). Contributions must
+remain compatible with permissive licensing; GPL dependencies are not accepted.
+
+## Contributors
+
+- **Bùi Hồng Hải Đăng (`yanij`)**: project ideation, test-hardware support, and
+  contributions to building NSTU.
+
+## License
+
+Project NSTU is released under the [MIT License](LICENSE). You may use, copy,
+modify, publish, distribute, sublicense, and sell copies subject to the license
+notice requirements. Third-party notices are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
