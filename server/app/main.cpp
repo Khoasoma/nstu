@@ -51,6 +51,27 @@ enum class DashboardView : int {
     selected_client,
 };
 
+enum class RoomFilter : int {
+    all,
+    online,
+    attention,
+    locked,
+    offline,
+};
+
+enum class IconKind : int {
+    grid,
+    monitor,
+    camera,
+    stop,
+    lock,
+    unlock,
+    pen,
+    erase,
+    broadcast,
+    chat,
+};
+
 enum class Language : int {
     english,
     vietnamese,
@@ -60,6 +81,7 @@ Language g_language = Language::english;
 
 struct DashboardState {
     DashboardView view = DashboardView::room_screens;
+    RoomFilter room_filter = RoomFilter::all;
     std::uint64_t selected_client_id = 0;
     int snapshot_interval_seconds = 7;
     Language language = Language::english;
@@ -240,17 +262,17 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 void apply_dashboard_style(bool dark_mode) {
     g_dark_mode = dark_mode;
     auto& style = ImGui::GetStyle();
-    style.WindowPadding = {20.0f, 16.0f};
-    style.FramePadding = {10.0f, 7.0f};
-    style.CellPadding = {10.0f, 8.0f};
-    style.ItemSpacing = {10.0f, 8.0f};
-    style.ItemInnerSpacing = {7.0f, 6.0f};
+    style.WindowPadding = {8.0f, 6.0f};
+    style.FramePadding = {8.0f, 5.0f};
+    style.CellPadding = {7.0f, 6.0f};
+    style.ItemSpacing = {6.0f, 5.0f};
+    style.ItemInnerSpacing = {5.0f, 4.0f};
     style.WindowRounding = 0.0f;
-    style.ChildRounding = 6.0f;
-    style.FrameRounding = 5.0f;
-    style.PopupRounding = 6.0f;
-    style.ScrollbarRounding = 5.0f;
-    style.GrabRounding = 4.0f;
+    style.ChildRounding = 3.0f;
+    style.FrameRounding = 3.0f;
+    style.PopupRounding = 3.0f;
+    style.ScrollbarRounding = 3.0f;
+    style.GrabRounding = 3.0f;
     style.WindowBorderSize = 0.0f;
     style.ChildBorderSize = 1.0f;
     style.FrameBorderSize = 1.0f;
@@ -330,12 +352,12 @@ void load_dashboard_fonts() {
     auto& atlas = ImGui::GetIO().Fonts;
     const ImWchar* glyph_ranges = atlas->GetGlyphRangesVietnamese();
     if (GetFileAttributesA(regular.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        atlas->AddFontFromFileTTF(regular.c_str(), 17.0f, nullptr,
+        atlas->AddFontFromFileTTF(regular.c_str(), 15.0f, nullptr,
                                   glyph_ranges);
     }
     if (GetFileAttributesA(bold.c_str()) != INVALID_FILE_ATTRIBUTES) {
         g_heading_font = atlas->AddFontFromFileTTF(
-            bold.c_str(), 22.0f, nullptr, glyph_ranges);
+            bold.c_str(), 17.0f, nullptr, glyph_ranges);
     }
 }
 
@@ -437,6 +459,31 @@ bool client_matches_filter(const nstu::server::ClientRecord& client,
         client.status == nstu::server::ClientStatus::offline) {
         return false;
     }
+    switch (state.room_filter) {
+    case RoomFilter::all:
+        break;
+    case RoomFilter::online:
+        if (client.status != nstu::server::ClientStatus::online) {
+            return false;
+        }
+        break;
+    case RoomFilter::attention:
+        if (client.status != nstu::server::ClientStatus::connecting &&
+            client.status != nstu::server::ClientStatus::degraded) {
+            return false;
+        }
+        break;
+    case RoomFilter::locked:
+        if (client.status != nstu::server::ClientStatus::locked) {
+            return false;
+        }
+        break;
+    case RoomFilter::offline:
+        if (client.status != nstu::server::ClientStatus::offline) {
+            return false;
+        }
+        break;
+    }
     if (state.client_filter[0] == '\0') {
         return true;
     }
@@ -453,6 +500,150 @@ void push_client_id(std::uint64_t id) {
 void pop_client_id() {
     ImGui::PopID();
     ImGui::PopID();
+}
+
+void draw_icon(ImDrawList* draw_list, IconKind icon, ImVec2 center,
+               float size, ImU32 color) {
+    const float half = size * 0.5f;
+    const float left = center.x - half;
+    const float top = center.y - half;
+    const float right = center.x + half;
+    const float bottom = center.y + half;
+    const float stroke = 1.8f;
+    switch (icon) {
+    case IconKind::grid: {
+        const float cell = size * 0.34f;
+        const float gap = size * 0.12f;
+        for (int row = 0; row < 2; ++row) {
+            for (int column = 0; column < 2; ++column) {
+                const ImVec2 minimum{
+                    left + column * (cell + gap),
+                    top + row * (cell + gap)};
+                draw_list->AddRect(
+                    minimum, {minimum.x + cell, minimum.y + cell}, color,
+                    1.5f, 0, stroke);
+            }
+        }
+        break;
+    }
+    case IconKind::monitor:
+        draw_list->AddRect({left, top + 1.0f}, {right, bottom - 4.0f}, color,
+                           2.0f, 0, stroke);
+        draw_list->AddLine({center.x, bottom - 4.0f}, {center.x, bottom}, color,
+                           stroke);
+        draw_list->AddLine({center.x - 5.0f, bottom},
+                           {center.x + 5.0f, bottom}, color, stroke);
+        break;
+    case IconKind::camera:
+        draw_list->AddRect({left, top + 3.0f}, {right, bottom}, color, 2.0f, 0,
+                           stroke);
+        draw_list->AddRect({left + 4.0f, top}, {left + 10.0f, top + 4.0f},
+                           color, 1.0f, 0, stroke);
+        draw_list->AddCircle(center, size * 0.21f, color, 16, stroke);
+        break;
+    case IconKind::stop:
+        draw_list->AddRectFilled({left + 3.0f, top + 3.0f},
+                                 {right - 3.0f, bottom - 3.0f}, color, 2.0f);
+        break;
+    case IconKind::lock:
+    case IconKind::unlock: {
+        const bool unlocked = icon == IconKind::unlock;
+        draw_list->AddRect({left + 3.0f, center.y - 1.0f},
+                           {right - 3.0f, bottom}, color, 2.0f, 0, stroke);
+        draw_list->PathClear();
+        const ImVec2 shackle_center{
+            center.x + (unlocked ? 3.0f : 0.0f), center.y - 1.0f};
+        draw_list->PathArcTo(shackle_center, size * 0.26f,
+                             3.1415926f, 6.2831852f, 12);
+        draw_list->PathStroke(color, 0, stroke);
+        if (unlocked) {
+            draw_list->AddLine({left + 2.0f, top + 7.0f},
+                               {left + 2.0f, center.y - 1.0f}, color, stroke);
+        }
+        break;
+    }
+    case IconKind::pen:
+        draw_list->AddLine({left + 3.0f, bottom - 2.0f},
+                           {right - 2.0f, top + 3.0f}, color, 3.0f);
+        draw_list->AddTriangleFilled({right - 2.0f, top + 3.0f},
+                                     {right - 6.0f, top + 4.0f},
+                                     {right - 3.0f, top + 7.0f}, color);
+        break;
+    case IconKind::erase:
+        draw_list->AddQuad({left + 3.0f, bottom - 6.0f},
+                           {center.x + 2.0f, top + 2.0f},
+                           {right - 2.0f, top + 7.0f},
+                           {center.x - 3.0f, bottom - 1.0f}, color, stroke);
+        draw_list->AddLine({left + 5.0f, bottom - 4.0f},
+                           {right - 1.0f, bottom - 4.0f}, color, stroke);
+        break;
+    case IconKind::broadcast:
+        draw_list->AddCircleFilled(center, 2.4f, color);
+        for (int ring = 1; ring <= 2; ++ring) {
+            const float radius = size * (0.18f + ring * 0.15f);
+            draw_list->PathClear();
+            draw_list->PathArcTo(center, radius, -0.8f, 0.8f, 12);
+            draw_list->PathStroke(color, 0, stroke);
+            draw_list->PathClear();
+            draw_list->PathArcTo(center, radius, 2.34f, 3.94f, 12);
+            draw_list->PathStroke(color, 0, stroke);
+        }
+        break;
+    case IconKind::chat:
+        draw_list->AddRect({left, top}, {right, bottom - 4.0f}, color, 3.0f, 0,
+                           stroke);
+        draw_list->AddTriangleFilled({left + 4.0f, bottom - 4.0f},
+                                     {left + 8.0f, bottom - 4.0f},
+                                     {left + 4.0f, bottom}, color);
+        draw_list->AddCircleFilled({center.x - 6.0f, center.y - 2.0f}, 1.5f,
+                                   color);
+        draw_list->AddCircleFilled({center.x, center.y - 2.0f}, 1.5f, color);
+        draw_list->AddCircleFilled({center.x + 6.0f, center.y - 2.0f}, 1.5f,
+                                   color);
+        break;
+    }
+}
+
+bool draw_icon_button(const char* id, const char* label, IconKind icon,
+                      ImVec2 size, bool selected = false,
+                      bool enabled = true, bool show_label = true) {
+    ImGui::PushID(id);
+    if (!enabled) {
+        ImGui::BeginDisabled();
+    }
+    ImGui::InvisibleButton("##icon-button", size);
+    const bool pressed = enabled && ImGui::IsItemClicked();
+    const bool hovered = enabled && ImGui::IsItemHovered();
+    const ImVec2 minimum = ImGui::GetItemRectMin();
+    const ImVec2 maximum = ImGui::GetItemRectMax();
+    auto* draw_list = ImGui::GetWindowDrawList();
+    if (selected || hovered) {
+        const ImU32 background = ImGui::GetColorU32(
+            selected ? ImGuiCol_Header : ImGuiCol_FrameBgHovered);
+        draw_list->AddRectFilled(minimum, maximum, background, 4.0f);
+    }
+    const ImU32 foreground = ImGui::GetColorU32(
+        enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+    const float label_height = show_label ? 20.0f : 0.0f;
+    draw_icon(draw_list, icon,
+              {minimum.x + size.x * 0.5f,
+               minimum.y + (size.y - label_height) * 0.43f},
+              show_label ? 22.0f : 20.0f, foreground);
+    if (show_label) {
+        const ImVec2 text_size = ImGui::CalcTextSize(label);
+        draw_list->AddText(
+            {minimum.x + std::max(3.0f, (size.x - text_size.x) * 0.5f),
+             maximum.y - text_size.y - 5.0f},
+            foreground, label);
+    }
+    if (hovered && !show_label) {
+        ImGui::SetTooltip("%s", label);
+    }
+    if (!enabled) {
+        ImGui::EndDisabled();
+    }
+    ImGui::PopID();
+    return pressed;
 }
 
 void draw_status_badge(nstu::server::ClientStatus status,
@@ -474,73 +665,6 @@ void draw_status_badge(nstu::server::ClientStatus status,
                            status_text_color(status)),
                        label);
     ImGui::PopID();
-}
-
-void draw_summary_card(const char* label, std::size_t value,
-                       const ImVec4& accent, float width) {
-    ImGui::PushID(label);
-    if (ImGui::BeginChild("summary", {width, 62.0f}, true,
-                          ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::TextColored(accent, "%zu", value);
-        ImGui::TextDisabled("%s", label);
-    }
-    ImGui::EndChild();
-    ImGui::PopID();
-}
-
-bool draw_mode_button(const char* label, DashboardView value,
-                      DashboardState& state) {
-    const bool selected = state.view == value;
-    ImGui::PushStyleColor(ImGuiCol_Button,
-        selected ? (g_dark_mode ? ImVec4{0.82f, 0.81f, 0.78f, 1.0f}
-                                : ImVec4{0.12f, 0.12f, 0.11f, 1.0f})
-                 : ImGui::GetStyleColorVec4(ImGuiCol_Button));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-        selected ? (g_dark_mode ? ImVec4{0.90f, 0.89f, 0.86f, 1.0f}
-                                : ImVec4{0.20f, 0.20f, 0.19f, 1.0f})
-                 : ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
-        selected ? (g_dark_mode ? ImVec4{0.96f, 0.95f, 0.92f, 1.0f}
-                                : ImVec4{0.24f, 0.24f, 0.23f, 1.0f})
-                 : ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
-    ImGui::PushStyleColor(ImGuiCol_Text,
-        selected ? (g_dark_mode ? ImVec4{0.10f, 0.10f, 0.09f, 1.0f}
-                                : ImVec4{1.0f, 1.0f, 1.0f, 1.0f})
-                 : ImGui::GetStyleColorVec4(ImGuiCol_Text));
-    const bool pressed = ImGui::Button(label, {142.0f, 34.0f});
-    ImGui::PopStyleColor(4);
-    if (pressed) {
-        state.view = value;
-    }
-    return pressed;
-}
-
-void draw_snapshot_stepper(DashboardState& state) {
-    ImGui::TextUnformatted(tr(state, "Snapshot interval", "Chu kỳ chụp"));
-    ImGui::SameLine();
-    ImGui::BeginDisabled(state.snapshot_interval_seconds <=
-                         kMinimumSnapshotInterval);
-    if (ImGui::Button("-", {30.0f, 30.0f})) {
-        --state.snapshot_interval_seconds;
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(68.0f);
-    ImGui::InputInt("##snapshot-interval", &state.snapshot_interval_seconds,
-                    0, 0,
-                    ImGuiInputTextFlags_ReadOnly);
-    state.snapshot_interval_seconds = std::clamp(
-        state.snapshot_interval_seconds, kMinimumSnapshotInterval,
-        kMaximumSnapshotInterval);
-    ImGui::SameLine();
-    ImGui::BeginDisabled(state.snapshot_interval_seconds >=
-                         kMaximumSnapshotInterval);
-    if (ImGui::Button("+", {30.0f, 30.0f})) {
-        ++state.snapshot_interval_seconds;
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", tr(state, "seconds", "giây"));
 }
 
 SnapshotTexture* snapshot_texture(
@@ -611,7 +735,7 @@ ScreenSurfaceResult draw_screen_surface(
                        : IM_COL32(100, 98, 94, 255))
         : IM_COL32(240, 239, 235, 255);
     auto* draw_list = ImGui::GetWindowDrawList();
-    draw_list->AddRectFilled(minimum, maximum, background, 5.0f);
+    draw_list->AddRectFilled(minimum, maximum, background, 2.0f);
     auto* texture = snapshot_texture(client);
     if (!offline && texture != nullptr) {
         const float source_aspect = static_cast<float>(texture->width) /
@@ -652,31 +776,24 @@ void draw_client_card(const nstu::server::ClientRecord& client, float width,
         selected ? (g_dark_mode ? ImVec4{0.42f, 0.68f, 0.78f, 1.0f}
                                 : ImVec4{0.31f, 0.56f, 0.68f, 1.0f})
                  : ImGui::GetStyleColorVec4(ImGuiCol_Border));
-    if (ImGui::BeginChild("client-card", {width, width * 0.5625f + 92.0f},
+    if (ImGui::BeginChild("client-card", {width, width * 0.5625f + 58.0f},
                           true, ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::TextUnformatted(client.hostname.c_str());
-        const float badge_width =
-            ImGui::CalcTextSize(client_status_label(client.status, state)).x +
-            16.0f;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - badge_width);
-        draw_status_badge(client.status, state);
         if (draw_screen_surface(client, width * 0.5625f, "##screen", state)
                 .clicked) {
-            state.selected_client_id = client.id;
-        }
-        ImGui::TextDisabled("%s", client.address.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%u ms", client.latency_ms);
-        ImGui::SameLine();
-        ImGui::TextDisabled("%.1f%% loss",
-                            client.packet_loss_per_mille / 10.0f);
-        const float open_width = 56.0f;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - open_width);
-        if (ImGui::Button(tr(state, "Open", "Mở"), {open_width, 0.0f})) {
             state.selected_client_id = client.id;
             state.view = DashboardView::selected_client;
             state.annotation_enabled = false;
         }
+        ImGui::TextUnformatted(client.hostname.c_str());
+        const float status_width =
+            ImGui::CalcTextSize(client_status_label(client.status, state)).x;
+        ImGui::SameLine(ImGui::GetContentRegionMax().x - status_width);
+        ImGui::TextColored(status_text_color(client.status), "%s",
+                           client_status_label(client.status, state));
+        ImGui::TextDisabled("%s", client.address.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("%u ms  %.1f%%", client.latency_ms,
+                            client.packet_loss_per_mille / 10.0f);
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -694,12 +811,6 @@ void draw_room_screen_wall(
         }
     }
 
-    ImGui::TextUnformatted(tr(state, "Latest room snapshots",
-                              "Ảnh chụp mới nhất trong phòng"));
-    ImGui::SameLine();
-    ImGui::TextDisabled(tr(state, "%zu shown", "Đang hiển thị %zu"),
-                        visible_clients.size());
-    ImGui::Separator();
     if (visible_clients.empty()) {
         const float offset = std::max(36.0f,
                                       ImGui::GetContentRegionAvail().y * 0.34f);
@@ -715,13 +826,17 @@ void draw_room_screen_wall(
         return;
     }
 
+    const ImVec4 workspace_background = g_dark_mode
+        ? ImVec4{0.065f, 0.085f, 0.095f, 1.0f}
+        : ImVec4{0.91f, 0.965f, 0.985f, 1.0f};
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, workspace_background);
     if (ImGui::BeginChild("screen-wall", {0, 0}, false)) {
-        constexpr float minimum_card_width = 270.0f;
+        constexpr float minimum_card_width = 205.0f;
         const float gap = ImGui::GetStyle().ItemSpacing.x;
         const float available = ImGui::GetContentRegionAvail().x;
         const int columns = std::clamp(
             static_cast<int>((available + gap) / (minimum_card_width + gap)),
-            1, 5);
+            1, 6);
         const float card_width =
             (available - gap * static_cast<float>(columns - 1)) /
             static_cast<float>(columns);
@@ -733,6 +848,7 @@ void draw_room_screen_wall(
         }
     }
     ImGui::EndChild();
+    ImGui::PopStyleColor();
 }
 
 void draw_focus_client_list(
@@ -1087,169 +1203,409 @@ void draw_preferences(DashboardState& state) {
     }
 }
 
-void draw_dashboard_header(const std::vector<nstu::server::ClientRecord>& clients,
-                           DashboardState& state,
-                           nstu::server::ServerControlPlane& control_plane) {
-    const auto counts = count_room_statuses(clients);
+void set_room_snapshots(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    DashboardState& state, nstu::server::ServerControlPlane& control_plane,
+    bool enabled) {
+    std::size_t sent = 0;
+    std::string last_error;
+    for (const auto& client : clients) {
+        if (client.status == nstu::server::ClientStatus::offline) {
+            continue;
+        }
+        std::string error;
+        if (control_plane.set_snapshots(
+                client.id, enabled,
+                static_cast<std::uint16_t>(state.snapshot_interval_seconds),
+                &error)) {
+            ++sent;
+        } else {
+            last_error = std::move(error);
+        }
+    }
+    state.control_status = sent == 0
+        ? (last_error.empty()
+               ? tr(state, "No online clients are available.",
+                    "Không có máy trực tuyến để điều khiển.")
+               : std::move(last_error))
+        : (enabled ? tr(state, "Room snapshots started.",
+                        "Đã bắt đầu chụp toàn phòng.")
+                   : tr(state, "Room snapshots stopped.",
+                        "Đã dừng chụp toàn phòng."));
+}
+
+void set_room_lock(const std::vector<nstu::server::ClientRecord>& clients,
+                   DashboardState& state,
+                   nstu::server::ServerControlPlane& control_plane,
+                   bool locked) {
+    std::size_t sent = 0;
+    for (const auto& client : clients) {
+        if (client.status != nstu::server::ClientStatus::offline &&
+            control_plane.set_locked(client.id, locked, nullptr)) {
+            ++sent;
+        }
+    }
+    state.control_status = sent == 0
+        ? tr(state, "No online clients are available.",
+             "Không có máy trực tuyến để điều khiển.")
+        : (locked ? tr(state, "Room lock command sent.",
+                       "Đã gửi lệnh khóa toàn phòng.")
+                  : tr(state, "Room unlock command sent.",
+                       "Đã gửi lệnh mở khóa toàn phòng."));
+}
+
+void toggle_teacher_broadcast(DashboardState& state,
+                              nstu::server::ServerControlPlane& control_plane) {
+    if (state.broadcast_enabled) {
+        std::string error;
+        if (control_plane.stop_host_broadcast(&error)) {
+            state.broadcast_enabled = false;
+            state.control_status = tr(state, "Teacher broadcast stopped.",
+                                      "Đã dừng phát màn hình giáo viên.");
+        } else {
+            state.control_status = error;
+        }
+        return;
+    }
+    state.broadcast_enabled = true;
+    state.next_host_snapshot = {};
+    state.control_status = tr(state, "Teacher broadcast started.",
+                              "Đã bắt đầu phát màn hình giáo viên.");
+}
+
+void draw_menu_strip(DashboardState& state, bool has_clients) {
+    if (!ImGui::BeginChild("menu-strip", {0, 31.0f}, false,
+                           ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::EndChild();
+        return;
+    }
     if (g_heading_font != nullptr) {
         ImGui::PushFont(g_heading_font);
     }
-    ImGui::TextUnformatted(tr(state, "NSTU Classroom", "Lớp học NSTU"));
+    ImGui::TextUnformatted("NSTU School");
     if (g_heading_font != nullptr) {
         ImGui::PopFont();
     }
+    ImGui::SameLine();
+    if (draw_segment_option(tr(state, "Class", "Lớp"),
+                            state.view == DashboardView::room_screens, 58.0f)) {
+        state.view = DashboardView::room_screens;
+    }
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!has_clients);
+    if (draw_segment_option(tr(state, "Client", "Máy"),
+                            state.view == DashboardView::selected_client,
+                            60.0f)) {
+        state.view = DashboardView::selected_client;
+    }
+    ImGui::EndDisabled();
     draw_preferences(state);
-    ImGui::TextDisabled("%s", tr(state, "Computer room overview",
-                                  "Tổng quan phòng máy"));
+    ImGui::EndChild();
+}
 
-    const float control_width = 334.0f;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - control_width);
-    draw_snapshot_stepper(state);
-    if (!state.startup_error.empty()) {
-        ImGui::PushTextWrapPos();
-        ImGui::TextColored(
-            status_text_color(nstu::server::ClientStatus::locked), "%s: %s",
-            tr(state, "Control service unavailable",
-               "Dịch vụ điều khiển không khả dụng"),
-            state.startup_error.c_str());
-        ImGui::PopTextWrapPos();
-    }
+void draw_ribbon_group_caption(float width, const char* label) {
+    const ImVec2 text_size = ImGui::CalcTextSize(label);
+    ImGui::SetCursorPosY(58.0f);
+    ImGui::SetCursorPosX(std::max(
+        ImGui::GetStyle().WindowPadding.x, (width - text_size.x) * 0.5f));
+    ImGui::TextDisabled("%s", label);
+}
 
-    const auto send_room_snapshots = [&](bool enabled) {
-        std::size_t sent = 0;
-        std::string last_error;
-        for (const auto& client : clients) {
-            if (client.status == nstu::server::ClientStatus::offline) {
-                continue;
-            }
-            std::string error;
-            if (control_plane.set_snapshots(
-                    client.id, enabled,
-                    static_cast<std::uint16_t>(
-                        state.snapshot_interval_seconds), &error)) {
-                ++sent;
-            } else {
-                last_error = std::move(error);
-            }
-        }
-        if (sent == 0) {
-            state.control_status = last_error.empty()
-                ? tr(state, "No online clients are available.",
-                     "Không có máy trực tuyến để điều khiển.")
-                : std::move(last_error);
-        } else {
-            state.control_status = enabled
-                ? tr(state, "Room snapshot refresh started.",
-                     "Đã bắt đầu chụp màn hình toàn phòng.")
-                : tr(state, "Room snapshot refresh stopped.",
-                     "Đã dừng chụp màn hình toàn phòng.");
-        }
-    };
-    const auto set_room_lock = [&](bool locked) {
-        std::size_t sent = 0;
-        for (const auto& client : clients) {
-            if (client.status != nstu::server::ClientStatus::offline &&
-                control_plane.set_locked(client.id, locked, nullptr)) {
-                ++sent;
-            }
-        }
-        state.control_status = sent == 0
-            ? tr(state, "No online clients are available.",
-                 "Không có máy trực tuyến để điều khiển.")
-            : (locked ? tr(state, "Room lock command sent.",
-                           "Đã gửi lệnh khóa toàn phòng.")
-                      : tr(state, "Room unlock command sent.",
-                           "Đã gửi lệnh mở khóa toàn phòng."));
-    };
+void draw_ribbon_divider() {
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    ImGui::Dummy({1.0f, 64.0f});
+    ImGui::GetWindowDrawList()->AddLine(
+        {start.x, start.y + 3.0f}, {start.x, start.y + 61.0f},
+        ImGui::GetColorU32(ImGuiCol_Separator));
+}
 
-    ImGui::BeginDisabled(clients.empty());
-    if (ImGui::Button(tr(state, "Start room snapshots",
-                         "Bắt đầu chụp toàn phòng"))) {
-        send_room_snapshots(true);
+void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
+                 const nstu::server::ClientRecord* selected_client,
+                 DashboardState& state,
+                 nstu::server::ServerControlPlane& control_plane) {
+    if (!ImGui::BeginChild("command-ribbon", {0, 82.0f}, true,
+                           ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::EndChild();
+        return;
     }
-    ImGui::SameLine();
-    if (ImGui::Button(tr(state, "Stop snapshots", "Dừng chụp"))) {
-        send_room_snapshots(false);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(tr(state, "Lock room", "Khóa phòng"))) {
-        set_room_lock(true);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(tr(state, "Unlock room", "Mở khóa phòng"))) {
-        set_room_lock(false);
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(
-            state.broadcast_enabled
-                ? tr(state, "Stop teacher broadcast", "Dừng phát màn hình")
-                : tr(state, "Broadcast teacher screen",
-                     "Phát màn hình giáo viên"))) {
-        if (state.broadcast_enabled) {
-            std::string error;
-            if (control_plane.stop_host_broadcast(&error)) {
-                state.broadcast_enabled = false;
-                state.control_status = tr(state, "Teacher broadcast stopped.",
-                                          "Đã dừng phát màn hình giáo viên.");
-            } else {
-                state.control_status = error;
-            }
-        } else {
-            state.broadcast_enabled = true;
-            state.next_host_snapshot = {};
-            state.control_status = tr(state, "Teacher broadcast started.",
-                                      "Đã bắt đầu phát màn hình giáo viên.");
+    const bool has_clients = !clients.empty();
+    constexpr float student_width = 256.0f;
+    if (ImGui::BeginChild("student-commands", {student_width, 74.0f}, false,
+                          ImGuiWindowFlags_NoScrollbar)) {
+        if (draw_icon_button("start-room", tr(state, "Start", "Chụp"),
+                             IconKind::camera, {58.0f, 54.0f}, false,
+                             has_clients)) {
+            set_room_snapshots(clients, state, control_plane, true);
         }
-    }
-    ImGui::EndDisabled();
-    if (!state.control_status.empty()) {
         ImGui::SameLine();
-        ImGui::TextDisabled("%s", state.control_status.c_str());
+        if (draw_icon_button("stop-room", tr(state, "Stop", "Dừng"),
+                             IconKind::stop, {58.0f, 54.0f}, false,
+                             has_clients)) {
+            set_room_snapshots(clients, state, control_plane, false);
+        }
+        ImGui::SameLine();
+        if (draw_icon_button("lock-room", tr(state, "Lock", "Khóa"),
+                             IconKind::lock, {58.0f, 54.0f}, false,
+                             has_clients)) {
+            set_room_lock(clients, state, control_plane, true);
+        }
+        ImGui::SameLine();
+        if (draw_icon_button("unlock-room", tr(state, "Unlock", "Mở khóa"),
+                             IconKind::unlock, {64.0f, 54.0f}, false,
+                             has_clients)) {
+            set_room_lock(clients, state, control_plane, false);
+        }
+        draw_ribbon_group_caption(student_width,
+                                  tr(state, "Student", "Học sinh"));
     }
+    ImGui::EndChild();
 
-    const float gap = ImGui::GetStyle().ItemSpacing.x;
-    const float summary_width =
-        (ImGui::GetContentRegionAvail().x - gap * 3.0f) / 4.0f;
-    draw_summary_card(tr(state, "Online", "Trực tuyến"), counts.online,
-                      status_text_color(nstu::server::ClientStatus::online),
-                      summary_width);
     ImGui::SameLine();
-    draw_summary_card(tr(state, "Needs attention", "Cần chú ý"),
-                      counts.attention,
-                      status_text_color(nstu::server::ClientStatus::degraded),
-                      summary_width);
+    draw_ribbon_divider();
     ImGui::SameLine();
-    draw_summary_card(tr(state, "Locked", "Đã khóa"), counts.locked,
-                      status_text_color(nstu::server::ClientStatus::locked),
-                      summary_width);
-    ImGui::SameLine();
-    draw_summary_card(tr(state, "Offline", "Ngoại tuyến"), counts.offline,
-                      status_text_color(nstu::server::ClientStatus::offline),
-                      summary_width);
+    constexpr float teaching_width = 330.0f;
+    if (ImGui::BeginChild("teaching-commands", {teaching_width, 74.0f}, false,
+                          ImGuiWindowFlags_NoScrollbar)) {
+        if (draw_icon_button("show-room", tr(state, "Screens", "Màn hình"),
+                             IconKind::grid, {66.0f, 54.0f},
+                             state.view == DashboardView::room_screens)) {
+            state.view = DashboardView::room_screens;
+        }
+        ImGui::SameLine();
+        if (draw_icon_button("focus-client", tr(state, "Focus", "Tập trung"),
+                             IconKind::monitor, {66.0f, 54.0f},
+                             state.view == DashboardView::selected_client,
+                             selected_client != nullptr)) {
+            state.view = DashboardView::selected_client;
+        }
+        ImGui::SameLine();
+        if (draw_icon_button("draw-client", tr(state, "Draw", "Vẽ"),
+                             IconKind::pen, {58.0f, 54.0f},
+                             state.annotation_enabled,
+                             selected_client != nullptr)) {
+            state.view = DashboardView::selected_client;
+            state.annotation_enabled = !state.annotation_enabled;
+            state.annotation_dragging = false;
+        }
+        ImGui::SameLine();
+        if (draw_icon_button("clear-client", tr(state, "Clear", "Xóa"),
+                             IconKind::erase, {58.0f, 54.0f}, false,
+                             selected_client != nullptr)) {
+            std::string error;
+            state.control_status = control_plane.clear_overlay(
+                                       selected_client->id, &error)
+                ? tr(state, "Student overlay cleared.", "Đã xóa lớp vẽ.")
+                : error;
+        }
+        ImGui::SameLine();
+        if (draw_icon_button("chat-client", tr(state, "Chat", "Chat"),
+                             IconKind::chat, {58.0f, 54.0f}, false,
+                             selected_client != nullptr)) {
+            state.view = DashboardView::selected_client;
+        }
+        draw_ribbon_group_caption(teaching_width,
+                                  tr(state, "Teaching", "Giảng dạy"));
+    }
+    ImGui::EndChild();
 
-    draw_mode_button(tr(state, "Room screens", "Màn hình phòng"),
-                     DashboardView::room_screens, state);
     ImGui::SameLine();
-    ImGui::BeginDisabled(clients.empty());
-    draw_mode_button(tr(state, "Selected client", "Máy đang chọn"),
-                     DashboardView::selected_client, state);
-    ImGui::EndDisabled();
-    const float filter_width = 220.0f;
-    const char* show_offline_label =
-        tr(state, "Show offline", "Hiện ngoại tuyến");
-    const float checkbox_width =
-        ImGui::CalcTextSize(show_offline_label).x + 34.0f;
-    const float filter_start = ImGui::GetContentRegionMax().x -
-                               filter_width - checkbox_width - gap;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + gap, filter_start));
-    ImGui::SetNextItemWidth(filter_width);
+    draw_ribbon_divider();
+    ImGui::SameLine();
+    constexpr float broadcast_width = 92.0f;
+    if (ImGui::BeginChild("broadcast-commands", {broadcast_width, 74.0f}, false,
+                          ImGuiWindowFlags_NoScrollbar)) {
+        if (draw_icon_button(
+                "broadcast-room",
+                state.broadcast_enabled ? tr(state, "Stop", "Dừng")
+                                        : tr(state, "Broadcast", "Phát"),
+                state.broadcast_enabled ? IconKind::stop : IconKind::broadcast,
+                {broadcast_width, 54.0f}, state.broadcast_enabled,
+                has_clients)) {
+            toggle_teacher_broadcast(state, control_plane);
+        }
+        draw_ribbon_group_caption(
+            broadcast_width, tr(state, "Teacher screen", "Màn hình GV"));
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
+}
+
+bool draw_filter_chip(const char* id, const char* label, std::size_t count,
+                      bool selected) {
+    char text[96]{};
+    sprintf_s(text, "%s  %zu", label, count);
+    ImGui::PushID(id);
+    if (selected) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(
+                                                    ImGuiCol_Header));
+    }
+    const bool pressed = ImGui::Button(text, {0, 28.0f});
+    if (selected) {
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopID();
+    return pressed;
+}
+
+void draw_workspace_toolbar(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    DashboardState& state) {
+    const auto counts = count_room_statuses(clients);
+    if (draw_filter_chip("all", tr(state, "All", "Tất cả"), clients.size(),
+                         state.room_filter == RoomFilter::all)) {
+        state.room_filter = RoomFilter::all;
+    }
+    ImGui::SameLine();
+    if (draw_filter_chip("online", tr(state, "Online", "Trực tuyến"),
+                         counts.online,
+                         state.room_filter == RoomFilter::online)) {
+        state.room_filter = RoomFilter::online;
+    }
+    ImGui::SameLine();
+    if (draw_filter_chip("attention", tr(state, "Attention", "Chú ý"),
+                         counts.attention,
+                         state.room_filter == RoomFilter::attention)) {
+        state.room_filter = RoomFilter::attention;
+    }
+    ImGui::SameLine();
+    if (draw_filter_chip("locked", tr(state, "Locked", "Đã khóa"),
+                         counts.locked,
+                         state.room_filter == RoomFilter::locked)) {
+        state.room_filter = RoomFilter::locked;
+    }
+    ImGui::SameLine();
+    if (draw_filter_chip("offline", tr(state, "Offline", "Ngoại tuyến"),
+                         counts.offline,
+                         state.room_filter == RoomFilter::offline)) {
+        state.room_filter = RoomFilter::offline;
+        state.show_offline = true;
+    }
+    constexpr float search_width = 210.0f;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f,
+                             ImGui::GetContentRegionMax().x - search_width));
+    ImGui::SetNextItemWidth(search_width);
     ImGui::InputTextWithHint("##client-filter",
                              tr(state, "Find client", "Tìm máy"),
                              state.client_filter.data(),
                              state.client_filter.size());
-    ImGui::SameLine();
-    ImGui::Checkbox(show_offline_label, &state.show_offline);
     ImGui::Separator();
+}
+
+void draw_navigation_rail(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    const nstu::server::ClientRecord* selected_client, DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    if (!ImGui::BeginChild("navigation-rail", {48.0f, 0}, true,
+                           ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::EndChild();
+        return;
+    }
+    if (draw_icon_button("nav-room", tr(state, "Room screens", "Màn hình phòng"),
+                         IconKind::grid, {36.0f, 38.0f},
+                         state.view == DashboardView::room_screens, true,
+                         false)) {
+        state.view = DashboardView::room_screens;
+    }
+    if (draw_icon_button("nav-focus", tr(state, "Selected client", "Máy đang chọn"),
+                         IconKind::monitor, {36.0f, 38.0f},
+                         state.view == DashboardView::selected_client,
+                         selected_client != nullptr, false)) {
+        state.view = DashboardView::selected_client;
+    }
+    ImGui::Separator();
+    if (draw_icon_button("nav-snapshot", tr(state, "Start snapshots", "Bắt đầu chụp"),
+                         IconKind::camera, {36.0f, 38.0f}, false,
+                         !clients.empty(), false)) {
+        set_room_snapshots(clients, state, control_plane, true);
+    }
+    if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
+                         IconKind::lock, {36.0f, 38.0f}, false,
+                         !clients.empty(), false)) {
+        set_room_lock(clients, state, control_plane, true);
+    }
+    if (draw_icon_button("nav-broadcast",
+                         tr(state, "Teacher broadcast", "Phát màn hình giáo viên"),
+                         IconKind::broadcast, {36.0f, 38.0f},
+                         state.broadcast_enabled, !clients.empty(), false)) {
+        toggle_teacher_broadcast(state, control_plane);
+    }
+    if (draw_icon_button("nav-chat", tr(state, "Client chat", "Chat với máy"),
+                         IconKind::chat, {36.0f, 38.0f}, false,
+                         selected_client != nullptr, false)) {
+        state.view = DashboardView::selected_client;
+    }
+    ImGui::EndChild();
+}
+
+void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
+                     DashboardState& state) {
+    const auto counts = count_room_statuses(clients);
+    if (!ImGui::BeginChild("status-bar", {0, 28.0f}, true,
+                           ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::EndChild();
+        return;
+    }
+    ImGui::TextColored(status_text_color(nstu::server::ClientStatus::online),
+                       "●");
+    ImGui::SameLine();
+    ImGui::Text("%zu %s", counts.online,
+                tr(state, "online", "trực tuyến"));
+    if (!state.control_status.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", state.control_status.c_str());
+    }
+    const char* show_offline_label =
+        tr(state, "Show offline", "Hiện ngoại tuyến");
+    const float controls_width =
+        ImGui::CalcTextSize(show_offline_label).x + 190.0f;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f,
+                             ImGui::GetContentRegionMax().x - controls_width));
+    ImGui::Checkbox(show_offline_label, &state.show_offline);
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", tr(state, "Refresh", "Chu kỳ"));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("-##interval")) {
+        state.snapshot_interval_seconds = std::max(
+            kMinimumSnapshotInterval, state.snapshot_interval_seconds - 1);
+    }
+    ImGui::SameLine();
+    ImGui::Text("%d s", state.snapshot_interval_seconds);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("+##interval")) {
+        state.snapshot_interval_seconds = std::min(
+            kMaximumSnapshotInterval, state.snapshot_interval_seconds + 1);
+    }
+    ImGui::EndChild();
+}
+
+void draw_dashboard_shell(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    const nstu::server::ClientRecord* selected_client, DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    draw_menu_strip(state, !clients.empty());
+    draw_ribbon(clients, selected_client, state, control_plane);
+    draw_workspace_toolbar(clients, state);
+
+    if (ImGui::BeginChild("main-workspace", {0, -32.0f}, false)) {
+        draw_navigation_rail(clients, selected_client, state, control_plane);
+        ImGui::SameLine();
+        const ImVec4 content_background = g_dark_mode
+            ? ImVec4{0.065f, 0.085f, 0.095f, 1.0f}
+            : ImVec4{0.91f, 0.965f, 0.985f, 1.0f};
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, content_background);
+        if (ImGui::BeginChild("workspace-content", {0, 0}, false)) {
+            if (state.view == DashboardView::room_screens) {
+                draw_room_screen_wall(clients, state);
+            } else {
+                draw_selected_client(clients, selected_client, state,
+                                     control_plane);
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    }
+    ImGui::EndChild();
+    draw_status_bar(clients, state);
 }
 
 } // namespace
@@ -1395,12 +1751,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         const nstu::server::ClientRecord* selected =
             selected_client == clients.end() ? nullptr : &*selected_client;
 
-        draw_dashboard_header(clients, dashboard, control_plane);
-        if (dashboard.view == DashboardView::room_screens) {
-            draw_room_screen_wall(clients, dashboard);
-        } else {
-            draw_selected_client(clients, selected, dashboard, control_plane);
-        }
+        draw_dashboard_shell(clients, selected, dashboard, control_plane);
         ImGui::End();
 
         ImGui::Render();
