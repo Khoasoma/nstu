@@ -33,7 +33,8 @@ bool send_status(control::AuthenticatedControlChannel& channel,
 bool run_client_control_session(
     const ClientRuntimeConfig& config, std::stop_token stop_token,
     const ClientStatusProvider& status_provider,
-    const ClientCommandHandler& command_handler, std::string* error) {
+    const ClientCommandHandler& command_handler,
+    const ClientOutboundProvider& outbound_provider, std::string* error) {
     if (!status_provider || !command_handler) {
         set_error(error, "client control callbacks are missing");
         return false;
@@ -81,6 +82,18 @@ bool run_client_control_session(
                 return false;
             }
             next_status = now + std::chrono::seconds(2);
+        }
+        if (outbound_provider) {
+            for (int sent = 0; sent < 4; ++sent) {
+                auto outbound = outbound_provider();
+                if (!outbound) {
+                    break;
+                }
+                if (!channel.send(outbound->type, request_id++,
+                                  outbound->payload, error)) {
+                    return false;
+                }
+            }
         }
         std::string wait_error;
         if (!channel.wait_readable(100, &wait_error)) {

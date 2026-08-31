@@ -20,14 +20,39 @@ Agent status is returned over the same pipe and then reported to the server.
 
 The server shell presents two operational modes. `Room screens` uses a
 responsive grid for all visible clients, health summaries, search/filter, and a
-5-15 FPS screen-refresh target. `Selected client` provides focused telemetry, a
-16:9 preview, control actions, and chat. Preview surfaces are deliberately
-stateful and show no-frame status until authenticated video packets are
-connected. The registry starts empty and does not inject demonstration client
-records. The client agent uses standard Win32 LISTBOX/EDIT/BUTTON controls for
-a small chat window; no UI framework is added to the client.
+5-10 second snapshot interval. `Selected client` provides focused telemetry, a
+16:9 snapshot preview, lock/unlock, snapshot control, annotation, and chat. The
+registry starts empty and does not inject demonstration client records. The
+client agent uses standard Win32 LISTBOX/EDIT/BUTTON controls for a small chat
+window; no UI framework is added to the client.
 
-## Video path
+The server UI has runtime English/Vietnamese localization with Segoe UI's
+Vietnamese glyph range and a light/dark semantic palette. It owns a native
+notification-area icon. Minimize and close hide the window while the control
+plane remains active; the tray menu restores the window or exits the process.
+Windows recreating the taskbar causes the icon to be registered again.
+
+## Snapshot path
+
+```text
+Client primary screen (GDI)
+  -> bounded downscale
+  -> WIC JPEG encode, maximum 60 KiB
+  -> service-agent named pipe
+  -> authenticated TCP control channel
+  -> newest-frame client registry slot
+  -> WIC decode and D3D11 snapshot texture
+```
+
+Snapshots are scheduled every 5-10 seconds. The service replaces an older
+queued snapshot with the newest one instead of building a stale backlog. The
+same bounded JPEG codec carries teacher-screen snapshots in the opposite
+direction. Normalized annotation strokes are authenticated control commands and
+are rendered by a transparent, click-through topmost window in the student's
+interactive session. The lock window is explicitly kept above broadcast and
+annotation windows.
+
+## Optional continuous video path
 
 ```text
 DXGI Desktop Duplication (BGRA texture)
@@ -70,10 +95,11 @@ for reporting, hysteresis, stream-reset, and fallback rules.
 
 ## Known limitations
 
-- The authenticated packetizer, reassembler, jitter buffer, NACK policy, and
-  recovery pipeline are implemented, but the application does not yet connect
-  encoded UDP sockets, group-key rotation, H.264 decoding, and ImGui preview
-  textures end to end. Screen surfaces therefore still show no-frame state.
+- The dashboard and teacher broadcast use periodic JPEG snapshots, not
+  continuous video. The authenticated packetizer, reassembler, jitter buffer,
+  NACK policy, and recovery pipeline exist, but encoded UDP sockets, group-key
+  rotation, H.264 decoding, and ImGui continuous-preview textures are not yet
+  connected end to end.
 - Video group-key payload codecs exist, but membership-driven key generation and
   distribution are not yet wired to stream startup.
 - Video HMAC provides integrity and source authentication, not confidentiality.

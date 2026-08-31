@@ -43,6 +43,18 @@ public:
     [[nodiscard]] bool set_streaming(std::uint64_t client_id, bool enabled,
                                      std::uint8_t frames_per_second,
                                      std::string* error = nullptr);
+    [[nodiscard]] bool set_snapshots(std::uint64_t client_id, bool enabled,
+                                     std::uint16_t interval_seconds,
+                                     std::string* error = nullptr);
+    [[nodiscard]] bool send_overlay_stroke(
+        std::uint64_t client_id, const control::OverlayStroke& stroke,
+        std::string* error = nullptr);
+    [[nodiscard]] bool clear_overlay(std::uint64_t client_id,
+                                     std::string* error = nullptr);
+    [[nodiscard]] bool broadcast_host_snapshot(
+        const control::SnapshotFrame& frame,
+        std::string* error = nullptr);
+    [[nodiscard]] bool stop_host_broadcast(std::string* error = nullptr);
     [[nodiscard]] bool request_keyframe(std::uint64_t client_id,
                                         std::string* error = nullptr);
     [[nodiscard]] bool send_chat(std::uint64_t client_id,

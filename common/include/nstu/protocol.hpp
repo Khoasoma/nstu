@@ -43,6 +43,13 @@ enum class CommandType : std::uint16_t {
     start_stream = 19,
     stop_stream = 20,
     video_nack = 21,
+    start_snapshots = 22,
+    stop_snapshots = 23,
+    snapshot_frame = 24,
+    overlay_stroke = 25,
+    overlay_clear = 26,
+    host_snapshot = 27,
+    host_broadcast_stop = 28,
 };
 
 enum class ConnectionRole : std::uint8_t {

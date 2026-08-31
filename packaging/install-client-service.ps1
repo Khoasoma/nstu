@@ -17,6 +17,8 @@ if (-not (Test-Path -LiteralPath $serviceBinary)) {
     throw "NSTU service binary was not found: $serviceBinary"
 }
 
+& (Join-Path $PSScriptRoot "test-system-setup.ps1") `
+    -Role Client -DataRoot $DataRoot
 & (Join-Path $PSScriptRoot "configure-data-root.ps1") -DataRoot $DataRoot
 
 $escapedBinary = '"' + $serviceBinary.Replace('"', '\"') + '"'

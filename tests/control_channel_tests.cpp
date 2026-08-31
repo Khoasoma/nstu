@@ -1,4 +1,5 @@
 #include "nstu/control_channel.hpp"
+#include "nstu/control_messages.hpp"
 #include "nstu/multicast.hpp"
 #include "nstu/secret_store.hpp"
 
@@ -163,5 +164,55 @@ int main() {
     assert(received_completion.completion_key == posted.completion_key);
     assert(received_completion.overlapped == 0);
     assert(received_completion.error_code == 0);
+
+    nstu::control::ClientStatusReport status;
+    status.hostname = "SNAPSHOT-PC";
+    status.snapshotting = true;
+    status.snapshot_interval_seconds = 7;
+    status.viewing_broadcast = true;
+    const auto status_wire = nstu::control::encode_status_report(status);
+    const auto decoded_status =
+        nstu::control::decode_status_report(status_wire);
+    assert(decoded_status.has_value());
+    assert(decoded_status->snapshotting);
+    assert(decoded_status->snapshot_interval_seconds == 7);
+    assert(decoded_status->viewing_broadcast);
+
+    const auto schedule = nstu::control::encode_snapshot_schedule(8);
+    assert(nstu::control::decode_snapshot_schedule(schedule) == 8);
+    assert(nstu::control::encode_snapshot_schedule(4).empty());
+
+    nstu::control::SnapshotFrame snapshot;
+    snapshot.width = 480;
+    snapshot.height = 270;
+    snapshot.captured_at_unix_milliseconds = 123'456;
+    snapshot.jpeg = {std::byte{0xff}, std::byte{0xd8}, std::byte{0xff},
+                     std::byte{0xd9}};
+    const auto snapshot_wire =
+        nstu::control::encode_snapshot_frame(snapshot);
+    const auto decoded_snapshot =
+        nstu::control::decode_snapshot_frame(snapshot_wire);
+    assert(decoded_snapshot.has_value());
+    assert(decoded_snapshot->width == snapshot.width);
+    assert(decoded_snapshot->jpeg == snapshot.jpeg);
+    auto corrupt_snapshot = snapshot_wire;
+    corrupt_snapshot[6] = std::byte{1};
+    assert(!nstu::control::decode_snapshot_frame(corrupt_snapshot)
+                .has_value());
+
+    const nstu::control::OverlayStroke stroke{
+        .x0 = 100,
+        .y0 = 200,
+        .x1 = 300,
+        .y1 = 400,
+        .thickness = 5,
+        .rgba = 0xff2020ffu,
+    };
+    const auto stroke_wire = nstu::control::encode_overlay_stroke(stroke);
+    const auto decoded_stroke =
+        nstu::control::decode_overlay_stroke(stroke_wire);
+    assert(decoded_stroke.has_value());
+    assert(decoded_stroke->x1 == stroke.x1);
+    assert(decoded_stroke->rgba == stroke.rgba);
     return 0;
 }

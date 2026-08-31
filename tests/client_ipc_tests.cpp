@@ -39,7 +39,10 @@ int main() {
     const nstu::client::AgentStatus status{
         .locked = true,
         .streaming = true,
+        .snapshotting = true,
+        .viewing_broadcast = true,
         .frames_per_second = 10,
+        .snapshot_interval_seconds = 7,
         .session_id = 7,
     };
     const nstu::client::AgentMessage status_message{
@@ -55,7 +58,10 @@ int main() {
     assert(decoded_status.has_value());
     assert(decoded_status->locked);
     assert(decoded_status->streaming);
+    assert(decoded_status->snapshotting);
+    assert(decoded_status->viewing_broadcast);
     assert(decoded_status->frames_per_second == 10);
+    assert(decoded_status->snapshot_interval_seconds == 7);
     assert(decoded_status->session_id == 7);
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};

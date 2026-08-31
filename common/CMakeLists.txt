@@ -13,6 +13,7 @@ add_library(nstu_common STATIC
     src/packet_loss.cpp
     src/protocol.cpp
     src/rate_limiter.cpp
+    src/screen_snapshot.cpp
     src/secret_store.cpp
     src/video_transport.cpp
 )
@@ -26,5 +27,6 @@ target_compile_features(nstu_common PUBLIC cxx_std_20)
 nstu_enable_warnings(nstu_common)
 
 if(WIN32)
-    target_link_libraries(nstu_common PUBLIC advapi32 bcrypt crypt32 ws2_32)
+    target_link_libraries(nstu_common PUBLIC
+        advapi32 bcrypt crypt32 gdi32 ole32 windowscodecs ws2_32)
 endif()

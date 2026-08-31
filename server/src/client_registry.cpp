@@ -6,6 +6,15 @@ namespace nstu::server {
 
 void ClientRegistry::upsert(ClientRecord record) {
     std::scoped_lock lock(mutex_);
+    const auto existing = clients_.find(record.id);
+    if (existing != clients_.end() && record.snapshot_jpeg.empty()) {
+        record.snapshot_width = existing->second.snapshot_width;
+        record.snapshot_height = existing->second.snapshot_height;
+        record.snapshot_captured_at_unix_milliseconds =
+            existing->second.snapshot_captured_at_unix_milliseconds;
+        record.snapshot_generation = existing->second.snapshot_generation;
+        record.snapshot_jpeg = existing->second.snapshot_jpeg;
+    }
     clients_.insert_or_assign(record.id, std::move(record));
 }
 
@@ -30,6 +39,23 @@ bool ClientRegistry::touch(std::uint64_t id) {
         found->second.status == ClientStatus::offline) {
         found->second.status = ClientStatus::online;
     }
+    return true;
+}
+
+bool ClientRegistry::update_snapshot(
+    std::uint64_t id, const control::SnapshotFrame& frame) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end() || frame.jpeg.empty()) {
+        return false;
+    }
+    found->second.snapshot_width = frame.width;
+    found->second.snapshot_height = frame.height;
+    found->second.snapshot_captured_at_unix_milliseconds =
+        frame.captured_at_unix_milliseconds;
+    found->second.snapshot_jpeg = frame.jpeg;
+    ++found->second.snapshot_generation;
+    found->second.last_seen = std::chrono::steady_clock::now();
     return true;
 }
 

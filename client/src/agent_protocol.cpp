@@ -142,34 +142,50 @@ std::optional<AgentMessage> receive_agent_message(const NamedPipe& pipe,
 
 std::vector<std::byte> encode_agent_status(const AgentStatus& status) {
     std::vector<std::byte> payload;
-    payload.reserve(7);
+    payload.reserve(11);
     append_le(payload, static_cast<std::uint8_t>(status.locked ? 1 : 0));
     append_le(payload, static_cast<std::uint8_t>(status.streaming ? 1 : 0));
+    append_le(payload, static_cast<std::uint8_t>(status.snapshotting ? 1 : 0));
+    append_le(payload,
+              static_cast<std::uint8_t>(status.viewing_broadcast ? 1 : 0));
     append_le(payload, status.frames_per_second);
+    append_le(payload, status.snapshot_interval_seconds);
     append_le(payload, status.session_id);
     return payload;
 }
 
 std::optional<AgentStatus> decode_agent_status(
     std::span<const std::byte> payload) {
-    if (payload.size() != 7) {
+    if (payload.size() != 11) {
         return std::nullopt;
     }
     std::size_t offset = 0;
     std::uint8_t locked = 0;
     std::uint8_t streaming = 0;
+    std::uint8_t snapshotting = 0;
+    std::uint8_t viewing_broadcast = 0;
     AgentStatus status;
     if (!read_le(payload, offset, locked) || locked > 1 ||
         !read_le(payload, offset, streaming) || streaming > 1 ||
+        !read_le(payload, offset, snapshotting) || snapshotting > 1 ||
+        !read_le(payload, offset, viewing_broadcast) ||
+        viewing_broadcast > 1 ||
         !read_le(payload, offset, status.frames_per_second) ||
+        !read_le(payload, offset, status.snapshot_interval_seconds) ||
         !read_le(payload, offset, status.session_id)) {
         return std::nullopt;
     }
     status.locked = locked != 0;
     status.streaming = streaming != 0;
+    status.snapshotting = snapshotting != 0;
+    status.viewing_broadcast = viewing_broadcast != 0;
     if ((!status.streaming && status.frames_per_second != 0) ||
         (status.streaming && (status.frames_per_second < 5 ||
-                              status.frames_per_second > 15))) {
+                              status.frames_per_second > 15)) ||
+        (!status.snapshotting && status.snapshot_interval_seconds != 0) ||
+        (status.snapshotting &&
+         (status.snapshot_interval_seconds < 5 ||
+          status.snapshot_interval_seconds > 10))) {
         return std::nullopt;
     }
     return status;

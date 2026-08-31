@@ -17,9 +17,12 @@
 - [x] CPack/NSIS server and client installers with automatic service
       registration, recovery policy, reboot activation, and package-owned
       uninstall handling.
-- [x] Teacher-focused server UI with room screen wall, responsive 5-15 FPS
-      target, health summary, filtering, focused telemetry, chat and controls;
-      lightweight Native Win32 client chat shell.
+- [x] Teacher-focused server UI with a responsive latest-snapshot wall,
+      adjustable 5-10 second interval, health summary, filtering, focused
+      telemetry, chat and controls; lightweight Native Win32 client chat shell.
+- [x] Runtime English/Vietnamese localization, Vietnamese font glyph coverage,
+      light/dark dashboard themes, and a resilient native server tray icon with
+      hide, restore, taskbar-recreation, and exit handling.
 - [x] Bounded frame reassembly, deadlines, duplicate/conflict handling.
 - [x] Desktop Duplication capture and device-loss reporting.
 - [x] GPU BGRA-to-NV12 conversion.
@@ -43,6 +46,15 @@
       status, heartbeat, lock/unlock, chat, stream, stop, and keyframe commands.
 - [x] Live service-agent named-pipe routing and status reporting.
 - [x] Server dashboard actions connected to authenticated client sessions.
+- [x] Bounded authenticated JPEG snapshots from clients to the dashboard, with
+      newest-frame queue replacement, WIC decode, and D3D11 preview textures.
+- [x] Authenticated normalized annotation strokes rendered by a transparent
+      click-through client overlay, plus clear-overlay control.
+- [x] Bounded teacher-screen snapshot broadcast to authenticated clients, with
+      deterministic lock/broadcast/annotation window ordering.
+- [x] Installer setup validation for elevation, supported Windows, data-root
+      ACL filesystem, firewall state, ports, and optional standard-user
+      autologon guidance without credential storage.
 - [x] Authenticated video packetizer, jitter buffer, bounded NACK policy, and
       keyframe scheduler with deterministic reordering/loss tests.
 - [x] Duplication/converter/encoder recovery orchestration with bounded
@@ -53,11 +65,15 @@
 - [x] Reproducible benchmark and multicast-matrix tooling plus a production
       evidence record.
 
-## Remaining production release gates
+## Optional continuous-video work
 
 - [ ] Connect encoded UDP send/receive, authenticated group-key rotation, H.264
-      decode, and D3D11 preview textures to the room screen wall. Transport
-      primitives exist, but the current preview still has no decoded live frame.
+      decode, and D3D11 continuous-preview textures. The production monitoring
+      path is snapshot-first; this work is required only before advertising or
+      enabling continuous H.264 mode.
+
+## Remaining production release gates
+
 - [ ] Run the production workflow with the real code-signing certificate and
       verify signatures/timestamps on both installers and installed binaries.
 - [ ] Validate the conservative Deep Freeze install/uninstall/data-root behavior
@@ -71,8 +87,9 @@
 
 ## Context note
 
-The repository now contains the control, enrollment, persistence, packetization,
-and recovery implementations that were previously roadmap stubs. A green build
-still does not establish production reliability, decoded live-screen delivery,
-certificate trust, or compatibility with heterogeneous school hardware. The
-evidence gates above remain release-blocking.
+The repository now contains the control, enrollment, persistence, bounded
+snapshot, annotation, teacher-broadcast, packetization, and recovery
+implementations that were previously roadmap stubs. A green build still does
+not establish production reliability, certificate trust, or compatibility with
+heterogeneous school hardware. The evidence gates above remain
+release-blocking.

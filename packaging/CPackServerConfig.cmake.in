@@ -4,6 +4,13 @@ set(CPACK_INSTALL_CMAKE_PROJECTS
     "@CMAKE_BINARY_DIR@;nstu;server;/;@CMAKE_BINARY_DIR@;nstu;docs;/")
 set(CPACK_PACKAGE_FILE_NAME "nstu-server-@PROJECT_VERSION@")
 set(CPACK_NSIS_EXTRA_INSTALL_COMMANDS [=[
+  nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\docs\deployment\test-system-setup.ps1" -Role Server -DataRoot "$COMMONAPPDATA\NSTU" -ExpectedServerBinary "$INSTDIR\server\nstu-server.exe"'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" nstu_server_setup_ok
+  MessageBox MB_ICONSTOP|MB_OK "NSTU system setup validation failed.$\r$\n$\r$\n$1"
+  Abort
+nstu_server_setup_ok:
   nsExec::ExecToStack '"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$INSTDIR\docs\deployment\configure-data-root.ps1" -DataRoot "$COMMONAPPDATA\NSTU"'
   Pop $0
   Pop $1

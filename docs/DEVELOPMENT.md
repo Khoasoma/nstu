@@ -27,11 +27,16 @@ phải bản triển khai production hoàn chỉnh cho trường học. Các gi�
 - Bounded video frame reassembly, deadline, duplicate/conflict detection và
   memory-pressure accounting. Xem [VIDEO_REASSEMBLY.md](VIDEO_REASSEMBLY.md).
 - DXGI Desktop Duplication, D3D11 BGRA-to-NV12 và Media Foundation H.264 MFT.
-- Windows Service, active-session agent, secure named pipe, tray icon và
-  fullscreen overlay.
+- Windows Service, active-session agent, secure named pipe, tray icon, lock
+  window, annotation overlay và teacher-broadcast window.
 - Server UI dùng Dear ImGui + D3D11 và client registry thread-safe.
-- Server UI có room screen wall responsive với target 5-15 FPS, health summary,
-  search/filter, selected-client telemetry, chat và control actions.
+- Server UI có room snapshot wall responsive với chu kỳ 5-10 giây, health
+  summary, search/filter, selected-client telemetry, annotation, broadcast,
+  chat và control actions.
+- Server UI chuyển được English/Tiếng Việt, light/dark mode, và có native tray
+  icon để hide/restore/exit mà không dừng control plane ngoài ý muốn.
+- Client capture dùng GDI + WIC JPEG, giới hạn 60 KiB/frame; service chỉ giữ
+  snapshot mới nhất đang chờ gửi để không tạo backlog.
 - Client agent có chat window Native Win32 dùng các control hệ thống nhẹ.
 - CMake modular, build được bằng MSVC hoặc MinGW-w64, có Windows CI.
 
@@ -137,19 +142,25 @@ ctest --test-dir build-core --output-on-failure
 ## Chạy thử giao diện
 
 Sau khi build trên Windows, chạy `nstu-server.exe` để mở server shell. Màn hình
-server mặc định mở `Room screens`: health summary ở đầu trang, target refresh
-5-15 FPS, search/filter và screen wall tự đổi số cột theo kích thước cửa sổ.
-`Selected client` cung cấp danh sách gọn, telemetry, preview 16:9, control và
-chat. Preview hiển thị trạng thái chờ frame khi control/video path chưa được nối
-với thiết bị thật; target mặc định là 10 FPS.
+server mặc định mở `Room screens`: health summary ở đầu trang, chu kỳ snapshot
+5-10 giây, search/filter và screen wall tự đổi số cột theo kích thước cửa sổ.
+`Selected client` cung cấp danh sách gọn, telemetry, preview 16:9, snapshot
+control, lock/unlock, vẽ overlay và chat. Chu kỳ mặc định là 7 giây.
+
+Nút `EN`/`VI` và `Sáng`/`Tối` đổi ngôn ngữ, theme ngay khi chạy. Có thể chọn
+default từ command line bằng `--language=vi`, `--language=en` và `--dark`.
+Minimize hoặc đóng cửa sổ sẽ đưa server xuống notification area; double-click
+tray icon để mở lại, hoặc dùng menu chuột phải để hide/show và exit.
 
 Chạy `nstu-agent.exe` để mở chat client Native Win32 và tray icon. Double-click
-tray icon để ẩn/hiện chat. Fullscreen overlay vẫn là lớp hiển thị riêng cho
-trạng thái lock và không che chat khi máy không bị khóa.
+tray icon để ẩn/hiện chat. Agent có các window riêng cho lock, annotation
+click-through và teacher-screen broadcast; lock luôn được xếp trên hai lớp còn
+lại.
 
-Các nút `Start stream`, `Request keyframe`, `Lock` và `Send` hiện đã có UI state
-local. Routing lệnh thật qua TCP/service/agent sẽ được nối ở milestone control
-plane tiếp theo.
+Các lệnh snapshot, annotation, broadcast, lock/unlock và chat đi qua control
+channel đã xác thực, service và named pipe tới agent. Nền tảng `Start stream`
+và `Request keyframe` của H.264 vẫn còn cho continuous-video mode tùy chọn chưa
+được nối end to end.
 
 ## Cài đặt và kiểm thử
 
@@ -157,6 +168,13 @@ Client installer tự gọi service lifecycle script với quyền Administrator
 đặt đăng ký service ở chế độ automatic, cấu hình recovery và đặt cờ bắt buộc
 restart; service bắt đầu ở lần boot tiếp theo. Uninstaller dừng agent, xóa
 service trước khi xóa file và cũng đặt cờ restart.
+
+Installer chạy `test-system-setup.ps1` để kiểm tra Windows x64, quyền
+Administrator, data root NTFS/ReFS có thể ghi, Windows Firewall, port conflict
+và cấu hình autologon. Script không bật autologon hoặc lưu credential; built-in
+Administrator autologon bị từ chối, còn dedicated standard-user autologon chỉ
+được nêu như lựa chọn. Khi upgrade server, listener thuộc đúng binary NSTU đã
+cài được cảnh báo thay vì bị nhầm với ứng dụng chiếm port khác.
 
 Kiểm thử nhanh sau build:
 
@@ -279,11 +297,12 @@ Winsock, DXGI, D3D11 và Media Foundation là thành phần của Windows SDK, k
 
 ## Trạng thái production
 
-IOCP dispatcher, persisted keyring, enrollment transport, packetizer, jitter,
-NACK, keyframe scheduling, service-agent routing, signing automation và
-device-loss recovery đã có implementation và automated test. Green CI vẫn chỉ
-chứng minh build và local correctness. Trước khi triển khai thật phải nối hoàn
-chỉnh UDP/H.264 decode vào live screen wall, chạy production signing bằng
-certificate thật, review/fuzz protocol, rồi hoàn tất 50-client soak test, switch
-multicast matrix, forced unicast fallback, Windows matrix và Intel driver matrix
-theo [PRODUCTION_VALIDATION.md](PRODUCTION_VALIDATION.md).
+IOCP dispatcher, persisted keyring, enrollment transport, snapshot routing,
+annotation/broadcast, packetizer, jitter, NACK, keyframe scheduling,
+service-agent routing, signing automation và device-loss recovery đã có
+implementation và automated test. Green CI vẫn chỉ chứng minh build và local
+correctness. Trước khi triển khai thật phải chạy production signing bằng
+certificate thật, review/fuzz protocol, rồi hoàn tất 50-client snapshot soak,
+Windows/Deep Freeze matrix và benchmark theo
+[PRODUCTION_VALIDATION.md](PRODUCTION_VALIDATION.md). Continuous H.264/UDP là
+enhancement tùy chọn và cần multicast/driver matrix riêng trước khi bật.

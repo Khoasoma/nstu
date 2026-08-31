@@ -14,6 +14,7 @@ int main() {
         .hostname = "LAB-PC-01",
         .address = "192.168.1.101",
         .status = nstu::server::ClientStatus::online,
+        .snapshot_jpeg = {},
         .last_seen = now,
     });
     assert(registry.size() == 1);

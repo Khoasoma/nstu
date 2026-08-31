@@ -8,12 +8,15 @@
 #include <windows.h>
 #include <wtsapi32.h>
 
+#include <algorithm>
 #include <atomic>
 #include <deque>
 #include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -26,13 +29,43 @@ std::filesystem::path g_agent_path;
 std::mutex g_agent_path_mutex;
 std::mutex g_agent_queue_mutex;
 std::deque<nstu::client::AgentMessage> g_agent_queue;
+std::mutex g_outbound_queue_mutex;
+std::deque<nstu::client::ClientOutboundCommand> g_outbound_queue;
 std::atomic_bool g_stop_requested = false;
 std::atomic_bool g_agent_connected = false;
 std::atomic_bool g_agent_locked = false;
 std::atomic_bool g_agent_streaming = false;
 std::atomic<std::uint8_t> g_agent_stream_fps = 0;
+std::atomic_bool g_agent_snapshotting = false;
+std::atomic<std::uint16_t> g_agent_snapshot_interval_seconds = 0;
+std::atomic_bool g_agent_viewing_broadcast = false;
 std::atomic_bool g_desired_locked = false;
 constexpr std::size_t kMaximumQueuedAgentMessages = 256;
+constexpr std::size_t kMaximumQueuedOutboundMessages = 32;
+
+void queue_outbound_message(nstu::protocol::CommandType type,
+                            std::vector<std::byte> payload) {
+    std::scoped_lock lock(g_outbound_queue_mutex);
+    if (type == nstu::protocol::CommandType::snapshot_frame) {
+        std::erase_if(g_outbound_queue, [](const auto& message) {
+            return message.type == nstu::protocol::CommandType::snapshot_frame;
+        });
+    }
+    while (g_outbound_queue.size() >= kMaximumQueuedOutboundMessages) {
+        g_outbound_queue.pop_front();
+    }
+    g_outbound_queue.push_back({type, std::move(payload)});
+}
+
+std::optional<nstu::client::ClientOutboundCommand> pop_outbound_message() {
+    std::scoped_lock lock(g_outbound_queue_mutex);
+    if (g_outbound_queue.empty()) {
+        return std::nullopt;
+    }
+    auto message = std::move(g_outbound_queue.front());
+    g_outbound_queue.pop_front();
+    return message;
+}
 
 void queue_agent_message(nstu::client::AgentMessage message) {
     std::scoped_lock lock(g_agent_queue_mutex);
@@ -120,6 +153,18 @@ void agent_pipe_loop() {
                         g_agent_locked = status->locked;
                         g_agent_streaming = status->streaming;
                         g_agent_stream_fps = status->frames_per_second;
+                        g_agent_snapshotting = status->snapshotting;
+                        g_agent_snapshot_interval_seconds =
+                            status->snapshot_interval_seconds;
+                        g_agent_viewing_broadcast =
+                            status->viewing_broadcast;
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::snapshot_frame) {
+                    if (nstu::control::decode_snapshot_frame(message->payload)) {
+                        queue_outbound_message(
+                            nstu::protocol::CommandType::snapshot_frame,
+                            std::move(message->payload));
                     }
                 }
             }
@@ -146,6 +191,11 @@ nstu::control::ClientStatusReport current_status() {
     status.hostname = hostname;
     status.locked = g_agent_locked.load();
     status.streaming = g_agent_streaming.load();
+    status.snapshotting = g_agent_snapshotting.load();
+    status.viewing_broadcast = g_agent_viewing_broadcast.load();
+    status.frames_per_second = g_agent_stream_fps.load();
+    status.snapshot_interval_seconds =
+        g_agent_snapshot_interval_seconds.load();
     status.session_id = WTSGetActiveConsoleSessionId();
     return status;
 }
@@ -183,6 +233,39 @@ void handle_server_command(
         queue_agent_message(
             {nstu::client::AgentMessageType::keyframe_request, {}});
         break;
+    case nstu::protocol::CommandType::start_snapshots:
+        if (nstu::control::decode_snapshot_schedule(command.payload)) {
+            queue_agent_message(
+                {nstu::client::AgentMessageType::start_snapshots,
+                 command.payload});
+        }
+        break;
+    case nstu::protocol::CommandType::stop_snapshots:
+        queue_agent_message(
+            {nstu::client::AgentMessageType::stop_snapshots, {}});
+        break;
+    case nstu::protocol::CommandType::overlay_stroke:
+        if (nstu::control::decode_overlay_stroke(command.payload)) {
+            queue_agent_message(
+                {nstu::client::AgentMessageType::overlay_stroke,
+                 command.payload});
+        }
+        break;
+    case nstu::protocol::CommandType::overlay_clear:
+        queue_agent_message(
+            {nstu::client::AgentMessageType::overlay_clear, {}});
+        break;
+    case nstu::protocol::CommandType::host_snapshot:
+        if (nstu::control::decode_snapshot_frame(command.payload)) {
+            queue_agent_message(
+                {nstu::client::AgentMessageType::host_snapshot,
+                 command.payload});
+        }
+        break;
+    case nstu::protocol::CommandType::host_broadcast_stop:
+        queue_agent_message(
+            {nstu::client::AgentMessageType::host_broadcast_stop, {}});
+        break;
     default:
         break;
     }
@@ -204,6 +287,7 @@ void remote_control_loop(std::stop_token stop_token) {
             std::string ignored_error;
             (void)nstu::client::run_client_control_session(
                 config, stop_token, current_status, handle_server_command,
+                pop_outbound_message,
                 &ignored_error);
             nstu::client::clear_client_runtime_config(config);
         }

@@ -1,21 +1,30 @@
 #include "nstu/agent_protocol.hpp"
+#include "nstu/control_messages.hpp"
+#include "nstu/screen_snapshot.hpp"
 
 #include <windows.h>
 #include <shellapi.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <iterator>
+#include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace {
 
 constexpr wchar_t kWindowClass[] = L"NstuAgentOverlay";
 constexpr wchar_t kChatWindowClass[] = L"NstuAgentChat";
+constexpr wchar_t kAnnotationWindowClass[] = L"NstuAgentAnnotation";
+constexpr wchar_t kBroadcastWindowClass[] = L"NstuAgentBroadcast";
 constexpr wchar_t kInstanceMutex[] = L"Local\\NSTU.Agent.Singleton";
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kAgentCommandMessage = WM_APP + 2;
+constexpr UINT kAnnotationUpdatedMessage = WM_APP + 3;
+constexpr UINT kBroadcastUpdatedMessage = WM_APP + 4;
 constexpr UINT kTrayId = 1;
 constexpr int kChatMessages = 1001;
 constexpr int kChatInput = 1002;
@@ -24,10 +33,43 @@ constexpr int kChatSend = 1003;
 HWND g_chat_window = nullptr;
 HWND g_chat_messages = nullptr;
 HWND g_chat_input = nullptr;
+HWND g_lock_window = nullptr;
+HWND g_annotation_window = nullptr;
+HWND g_broadcast_window = nullptr;
 std::atomic_bool g_agent_stopping = false;
 std::atomic_bool g_locked = false;
 std::atomic_bool g_streaming = false;
 std::atomic<std::uint8_t> g_stream_fps = 0;
+std::atomic_bool g_snapshotting = false;
+std::atomic<std::uint16_t> g_snapshot_interval_seconds = 0;
+std::atomic_bool g_viewing_broadcast = false;
+std::mutex g_annotation_mutex;
+std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
+std::mutex g_broadcast_mutex;
+nstu::screen::BgraImage g_broadcast_image;
+
+void restore_control_window_order() {
+    constexpr UINT flags =
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+    if (g_broadcast_window != nullptr &&
+        IsWindowVisible(g_broadcast_window)) {
+        SetWindowPos(g_broadcast_window, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+    if (g_annotation_window != nullptr &&
+        IsWindowVisible(g_annotation_window)) {
+        SetWindowPos(g_annotation_window, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+    if (g_lock_window != nullptr && g_locked.load() &&
+        IsWindowVisible(g_lock_window)) {
+        SetWindowPos(g_lock_window, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+}
+
+std::uint64_t unix_milliseconds_now() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+}
 
 std::wstring utf8_to_wide(std::span<const std::byte> bytes) {
     if (bytes.empty()) {
@@ -53,7 +95,11 @@ void send_agent_status(nstu::client::NamedPipe& pipe) {
     const nstu::client::AgentStatus status{
         .locked = g_locked.load(),
         .streaming = g_streaming.load(),
+        .snapshotting = g_snapshotting.load(),
+        .viewing_broadcast = g_viewing_broadcast.load(),
         .frames_per_second = g_stream_fps.load(),
+        .snapshot_interval_seconds =
+            g_snapshot_interval_seconds.load(),
         .session_id = WTSGetActiveConsoleSessionId(),
     };
     (void)nstu::client::send_agent_message(
@@ -64,6 +110,7 @@ void send_agent_status(nstu::client::NamedPipe& pipe) {
 }
 
 void pipe_control_loop(HWND overlay) {
+    auto next_snapshot = std::chrono::steady_clock::now();
     while (!g_agent_stopping.load()) {
         nstu::client::NamedPipe pipe;
         if (!pipe.connect_client(nstu::client::kControlPipeName, 1000,
@@ -76,38 +123,126 @@ void pipe_control_loop(HWND overlay) {
                 break;
             }
             if (available == 0) {
-                Sleep(25);
-                continue;
-            }
-            const auto message =
-                nstu::client::receive_agent_message(pipe, nullptr);
-            if (!message) {
-                break;
-            }
-            if (message->type == nstu::client::AgentMessageType::lock ||
-                message->type == nstu::client::AgentMessageType::unlock ||
-                message->type == nstu::client::AgentMessageType::stop_stream ||
-                message->type ==
-                    nstu::client::AgentMessageType::keyframe_request) {
-                SendMessageW(overlay, kAgentCommandMessage,
-                             static_cast<WPARAM>(message->type), 0);
-            } else if (message->type ==
-                           nstu::client::AgentMessageType::start_stream &&
-                       message->payload.size() == 1) {
-                SendMessageW(
-                    overlay, kAgentCommandMessage,
-                    static_cast<WPARAM>(message->type),
-                    std::to_integer<std::uint8_t>(message->payload[0]));
-            } else if (message->type ==
-                       nstu::client::AgentMessageType::chat) {
-                const auto chat = utf8_to_wide(message->payload);
-                if (!chat.empty()) {
-                    SendMessageW(overlay, kAgentCommandMessage,
-                                 static_cast<WPARAM>(message->type),
-                                 reinterpret_cast<LPARAM>(chat.c_str()));
+                Sleep(10);
+            } else {
+                const auto message =
+                    nstu::client::receive_agent_message(pipe, nullptr);
+                if (!message) {
+                    break;
                 }
+                if (message->type == nstu::client::AgentMessageType::lock ||
+                    message->type == nstu::client::AgentMessageType::unlock ||
+                    message->type ==
+                        nstu::client::AgentMessageType::stop_stream ||
+                    message->type ==
+                        nstu::client::AgentMessageType::keyframe_request) {
+                    SendMessageW(overlay, kAgentCommandMessage,
+                                 static_cast<WPARAM>(message->type), 0);
+                } else if (message->type ==
+                               nstu::client::AgentMessageType::start_stream &&
+                           message->payload.size() == 1) {
+                    SendMessageW(
+                        overlay, kAgentCommandMessage,
+                        static_cast<WPARAM>(message->type),
+                        std::to_integer<std::uint8_t>(message->payload[0]));
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::chat) {
+                    const auto chat = utf8_to_wide(message->payload);
+                    if (!chat.empty()) {
+                        SendMessageW(overlay, kAgentCommandMessage,
+                                     static_cast<WPARAM>(message->type),
+                                     reinterpret_cast<LPARAM>(chat.c_str()));
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::start_snapshots) {
+                    const auto interval = nstu::control::decode_snapshot_schedule(
+                        message->payload);
+                    if (interval) {
+                        g_snapshot_interval_seconds = *interval;
+                        g_snapshotting = true;
+                        next_snapshot = std::chrono::steady_clock::now();
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::stop_snapshots) {
+                    g_snapshotting = false;
+                    g_snapshot_interval_seconds = 0;
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::overlay_stroke) {
+                    const auto stroke = nstu::control::decode_overlay_stroke(
+                        message->payload);
+                    if (stroke) {
+                        {
+                            std::scoped_lock lock(g_annotation_mutex);
+                            constexpr std::size_t maximum_strokes = 4096;
+                            if (g_annotation_strokes.size() >= maximum_strokes) {
+                                g_annotation_strokes.erase(
+                                    g_annotation_strokes.begin(),
+                                    g_annotation_strokes.begin() + 512);
+                            }
+                            g_annotation_strokes.push_back(*stroke);
+                        }
+                        PostMessageW(g_annotation_window,
+                                     kAnnotationUpdatedMessage, 1, 0);
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::overlay_clear) {
+                    {
+                        std::scoped_lock lock(g_annotation_mutex);
+                        g_annotation_strokes.clear();
+                    }
+                    PostMessageW(g_annotation_window,
+                                 kAnnotationUpdatedMessage, 0, 0);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::host_snapshot) {
+                    const auto frame = nstu::control::decode_snapshot_frame(
+                        message->payload);
+                    if (frame) {
+                        nstu::screen::JpegImage jpeg{
+                            frame->width, frame->height, frame->jpeg};
+                        nstu::screen::BgraImage decoded;
+                        if (nstu::screen::decode_jpeg(jpeg, decoded, nullptr)) {
+                            {
+                                std::scoped_lock lock(g_broadcast_mutex);
+                                g_broadcast_image = std::move(decoded);
+                            }
+                            g_viewing_broadcast = true;
+                            PostMessageW(g_broadcast_window,
+                                         kBroadcastUpdatedMessage, 1, 0);
+                        }
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::host_broadcast_stop) {
+                    g_viewing_broadcast = false;
+                    PostMessageW(g_broadcast_window,
+                                 kBroadcastUpdatedMessage, 0, 0);
+                }
+                send_agent_status(pipe);
             }
-            send_agent_status(pipe);
+            const auto now = std::chrono::steady_clock::now();
+            if (g_snapshotting.load() && now >= next_snapshot) {
+                nstu::screen::JpegImage jpeg;
+                if (nstu::screen::capture_primary_screen_jpeg(
+                        jpeg, 480, 270, 52,
+                        nstu::control::kMaximumSnapshotJpegBytes, nullptr)) {
+                    nstu::control::SnapshotFrame frame;
+                    frame.width = jpeg.width;
+                    frame.height = jpeg.height;
+                    frame.captured_at_unix_milliseconds =
+                        unix_milliseconds_now();
+                    frame.jpeg = std::move(jpeg.bytes);
+                    const auto payload =
+                        nstu::control::encode_snapshot_frame(frame);
+                    if (!payload.empty()) {
+                        (void)nstu::client::send_agent_message(
+                            pipe,
+                            {nstu::client::AgentMessageType::snapshot_frame,
+                             payload},
+                            nullptr);
+                    }
+                }
+                next_snapshot = now + std::chrono::seconds(
+                    g_snapshot_interval_seconds.load());
+            }
         }
     }
 }
@@ -196,6 +331,107 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
     return DefWindowProcW(window, message, wparam, lparam);
 }
 
+COLORREF stroke_color(std::uint32_t rgba) {
+    return RGB((rgba >> 24u) & 0xffu, (rgba >> 16u) & 0xffu,
+               (rgba >> 8u) & 0xffu);
+}
+
+LRESULT CALLBACK annotation_window_proc(HWND window, UINT message,
+                                        WPARAM wparam, LPARAM lparam) {
+    (void)wparam;
+    (void)lparam;
+    if (message == kAnnotationUpdatedMessage) {
+        const bool visible = wparam != 0;
+        ShowWindow(window, visible ? SW_SHOWNOACTIVATE : SW_HIDE);
+        InvalidateRect(window, nullptr, TRUE);
+        restore_control_window_order();
+        return 0;
+    }
+    if (message == WM_ERASEBKGND) {
+        return 1;
+    }
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC context = BeginPaint(window, &paint);
+        RECT client{};
+        GetClientRect(window, &client);
+        constexpr COLORREF transparent_color = RGB(1, 2, 3);
+        HBRUSH background = CreateSolidBrush(transparent_color);
+        FillRect(context, &client, background);
+        DeleteObject(background);
+        std::vector<nstu::control::OverlayStroke> strokes;
+        {
+            std::scoped_lock lock(g_annotation_mutex);
+            strokes = g_annotation_strokes;
+        }
+        const int width = std::max(1L, client.right - client.left);
+        const int height = std::max(1L, client.bottom - client.top);
+        for (const auto& stroke : strokes) {
+            HPEN pen = CreatePen(
+                PS_SOLID, stroke.thickness, stroke_color(stroke.rgba));
+            const HGDIOBJ previous = SelectObject(context, pen);
+            const int x0 = static_cast<int>(
+                static_cast<std::uint64_t>(stroke.x0) * width / 65535u);
+            const int y0 = static_cast<int>(
+                static_cast<std::uint64_t>(stroke.y0) * height / 65535u);
+            const int x1 = static_cast<int>(
+                static_cast<std::uint64_t>(stroke.x1) * width / 65535u);
+            const int y1 = static_cast<int>(
+                static_cast<std::uint64_t>(stroke.y1) * height / 65535u);
+            MoveToEx(context, x0, y0, nullptr);
+            LineTo(context, x1, y1);
+            SelectObject(context, previous);
+            DeleteObject(pen);
+        }
+        EndPaint(window, &paint);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
+LRESULT CALLBACK broadcast_window_proc(HWND window, UINT message,
+                                       WPARAM wparam, LPARAM lparam) {
+    (void)lparam;
+    if (message == kBroadcastUpdatedMessage) {
+        ShowWindow(window, wparam != 0 ? SW_SHOWNOACTIVATE : SW_HIDE);
+        InvalidateRect(window, nullptr, FALSE);
+        restore_control_window_order();
+        return 0;
+    }
+    if (message == WM_ERASEBKGND) {
+        return 1;
+    }
+    if (message == WM_PAINT) {
+        PAINTSTRUCT paint{};
+        HDC context = BeginPaint(window, &paint);
+        RECT client{};
+        GetClientRect(window, &client);
+        FillRect(context, &client,
+                 static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        std::scoped_lock lock(g_broadcast_mutex);
+        if (!g_broadcast_image.pixels.empty()) {
+            BITMAPINFO information{};
+            information.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            information.bmiHeader.biWidth =
+                static_cast<LONG>(g_broadcast_image.width);
+            information.bmiHeader.biHeight =
+                -static_cast<LONG>(g_broadcast_image.height);
+            information.bmiHeader.biPlanes = 1;
+            information.bmiHeader.biBitCount = 32;
+            information.bmiHeader.biCompression = BI_RGB;
+            SetStretchBltMode(context, HALFTONE);
+            StretchDIBits(
+                context, 0, 0, client.right - client.left,
+                client.bottom - client.top, 0, 0, g_broadcast_image.width,
+                g_broadcast_image.height, g_broadcast_image.pixels.data(),
+                &information, DIB_RGB_COLORS, SRCCOPY);
+        }
+        EndPaint(window, &paint);
+        return 0;
+    }
+    return DefWindowProcW(window, message, wparam, lparam);
+}
+
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                              LPARAM lparam) {
     switch (message) {
@@ -219,11 +455,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         if (type == nstu::client::AgentMessageType::lock) {
             g_locked = true;
             ShowWindow(window, SW_SHOW);
-            SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+            restore_control_window_order();
         } else if (type == nstu::client::AgentMessageType::unlock) {
             g_locked = false;
             ShowWindow(window, SW_HIDE);
+            restore_control_window_order();
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
             append_chat_line(reinterpret_cast<const wchar_t*>(lparam));
             if (g_chat_window != nullptr) {
@@ -282,6 +518,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     chat_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     chat_class.hbrBackground = static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH));
     RegisterClassW(&chat_class);
+    WNDCLASSW annotation_class{};
+    annotation_class.hInstance = instance;
+    annotation_class.lpfnWndProc = annotation_window_proc;
+    annotation_class.lpszClassName = kAnnotationWindowClass;
+    annotation_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    RegisterClassW(&annotation_class);
+    WNDCLASSW broadcast_class{};
+    broadcast_class.hInstance = instance;
+    broadcast_class.lpfnWndProc = broadcast_window_proc;
+    broadcast_class.lpszClassName = kBroadcastWindowClass;
+    broadcast_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    RegisterClassW(&broadcast_class);
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -293,6 +541,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         CloseHandle(instance_mutex);
         return 1;
     }
+    g_lock_window = window;
     g_chat_window = CreateWindowExW(
         0, kChatWindowClass, L"NSTU Client Chat", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, 520, 340, nullptr, nullptr, instance,
@@ -302,6 +551,29 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         CloseHandle(instance_mutex);
         return 1;
     }
+    g_annotation_window = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED |
+            WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        kAnnotationWindowClass, L"NSTU Annotation", WS_POPUP, x, y, width,
+        height, nullptr, nullptr, instance, nullptr);
+    g_broadcast_window = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        kBroadcastWindowClass, L"NSTU Teacher Broadcast", WS_POPUP, x, y,
+        width, height, nullptr, nullptr, instance, nullptr);
+    if (g_annotation_window == nullptr || g_broadcast_window == nullptr) {
+        if (g_annotation_window != nullptr) {
+            DestroyWindow(g_annotation_window);
+        }
+        if (g_broadcast_window != nullptr) {
+            DestroyWindow(g_broadcast_window);
+        }
+        DestroyWindow(g_chat_window);
+        DestroyWindow(window);
+        CloseHandle(instance_mutex);
+        return 1;
+    }
+    SetLayeredWindowAttributes(g_annotation_window, RGB(1, 2, 3), 0,
+                               LWA_COLORKEY);
     NOTIFYICONDATAW tray{};
     tray.cbSize = sizeof(tray);
     tray.hWnd = window;
@@ -324,6 +596,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     if (control_thread.joinable()) {
         control_thread.join();
     }
+    DestroyWindow(g_broadcast_window);
+    DestroyWindow(g_annotation_window);
+    g_lock_window = nullptr;
     CloseHandle(instance_mutex);
     return static_cast<int>(message.wParam);
 }

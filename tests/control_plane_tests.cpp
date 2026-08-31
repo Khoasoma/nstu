@@ -91,6 +91,42 @@ int main() {
     assert(lock.has_value());
     assert(lock->envelope.type == nstu::protocol::CommandType::lock);
 
+    assert(control_plane.set_snapshots(registry_id, true, 7, &error));
+    const auto snapshots = channel.receive(&error);
+    assert(snapshots.has_value());
+    assert(snapshots->envelope.type ==
+           nstu::protocol::CommandType::start_snapshots);
+    assert(nstu::control::decode_snapshot_schedule(snapshots->payload) == 7);
+
+    const nstu::control::OverlayStroke stroke{
+        .x0 = 10,
+        .y0 = 20,
+        .x1 = 30,
+        .y1 = 40,
+        .thickness = 3,
+        .rgba = 0xe5484dffu,
+    };
+    assert(control_plane.send_overlay_stroke(registry_id, stroke, &error));
+    const auto overlay = channel.receive(&error);
+    assert(overlay.has_value());
+    assert(overlay->envelope.type ==
+           nstu::protocol::CommandType::overlay_stroke);
+    assert(nstu::control::decode_overlay_stroke(overlay->payload).has_value());
+
+    nstu::control::SnapshotFrame host_frame;
+    host_frame.width = 320;
+    host_frame.height = 180;
+    host_frame.captured_at_unix_milliseconds = 100;
+    host_frame.jpeg = {std::byte{0xff}, std::byte{0xd8}, std::byte{0xff},
+                       std::byte{0xd9}};
+    assert(control_plane.broadcast_host_snapshot(host_frame, &error));
+    const auto host_snapshot = channel.receive(&error);
+    assert(host_snapshot.has_value());
+    assert(host_snapshot->envelope.type ==
+           nstu::protocol::CommandType::host_snapshot);
+    assert(nstu::control::decode_snapshot_frame(host_snapshot->payload)
+               .has_value());
+
     status.locked = true;
     const auto locked_payload = nstu::control::encode_status_report(status);
     assert(channel.send(nstu::protocol::CommandType::status_report, 2,

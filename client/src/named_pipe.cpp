@@ -1,5 +1,7 @@
 #include "nstu/named_pipe.hpp"
 
+#include "nstu/protocol.hpp"
+
 #include <windows.h>
 #include <sddl.h>
 
@@ -50,7 +52,8 @@ bool NamedPipe::create_server(std::wstring_view name, std::string* error) {
         pipe_name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT |
             PIPE_REJECT_REMOTE_CLIENTS,
-        1, 4096, 4096, 0, &attributes);
+        1, static_cast<DWORD>(protocol::kMaxCommandPayload + 12),
+        static_cast<DWORD>(protocol::kMaxCommandPayload + 12), 0, &attributes);
     LocalFree(descriptor);
     if (pipe == INVALID_HANDLE_VALUE) {
         set_error(error, "CreateNamedPipeW failed");

@@ -221,6 +221,56 @@ public:
         return true;
     }
 
+    bool broadcast_command(protocol::CommandType type,
+                           std::span<const std::byte> payload,
+                           std::string* error) {
+        std::vector<std::shared_ptr<ConnectionState>> states;
+        {
+            std::scoped_lock lock(states_mutex_);
+            states.reserve(client_connections_.size());
+            for (const auto& [client_id, connection_id] :
+                 client_connections_) {
+                (void)client_id;
+                const auto found = states_.find(connection_id);
+                if (found != states_.end()) {
+                    states.push_back(found->second);
+                }
+            }
+        }
+        if (states.empty()) {
+            set_error(error, "no authenticated clients are connected");
+            return false;
+        }
+        bool succeeded = true;
+        for (const auto& state : states) {
+            std::scoped_lock lock(state->mutex);
+            if (state->stage != Stage::authenticated ||
+                state->send_sequence ==
+                    std::numeric_limits<std::uint64_t>::max()) {
+                succeeded = false;
+                continue;
+            }
+            const protocol::CommandEnvelope envelope{
+                .version = protocol::kCommandVersion,
+                .type = type,
+                .payload_bytes = static_cast<std::uint32_t>(payload.size()),
+                .request_id = next_request_id_.fetch_add(1),
+            };
+            const auto wire = control::encode_authenticated_command(
+                state->session_key, envelope, state->send_sequence, payload);
+            if (wire.empty() ||
+                !dispatcher_.send(state->connection_id, wire, nullptr)) {
+                succeeded = false;
+                continue;
+            }
+            ++state->send_sequence;
+        }
+        if (!succeeded) {
+            set_error(error, "one or more clients rejected the broadcast");
+        }
+        return succeeded;
+    }
+
     std::size_t authenticated_client_count() const noexcept {
         std::scoped_lock lock(states_mutex_);
         return client_connections_.size();
@@ -507,8 +557,25 @@ private:
             record.latency_ms = report->latency_ms;
             record.packet_loss_per_mille = report->packet_loss_per_mille;
             record.packet_loss_sample_size = report->packet_loss_sample_size;
+            record.streaming = report->streaming;
+            record.snapshotting = report->snapshotting;
+            record.viewing_broadcast = report->viewing_broadcast;
+            record.frames_per_second = report->frames_per_second;
+            record.snapshot_interval_seconds =
+                report->snapshot_interval_seconds;
             record.last_seen = std::chrono::steady_clock::now();
             registry_.upsert(std::move(record));
+            return true;
+        }
+        if (command->envelope.type ==
+            protocol::CommandType::snapshot_frame) {
+            const auto snapshot =
+                control::decode_snapshot_frame(command->payload);
+            if (!snapshot || !registry_.update_snapshot(
+                                 state.registry_id.load(), *snapshot)) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
             return true;
         }
         return true;
@@ -603,6 +670,56 @@ bool ServerControlPlane::set_streaming(std::uint64_t client_id, bool enabled,
     }
     return send_command(client_id, protocol::CommandType::start_stream,
                         payload, error);
+}
+
+bool ServerControlPlane::set_snapshots(std::uint64_t client_id, bool enabled,
+                                       std::uint16_t interval_seconds,
+                                       std::string* error) {
+    if (!enabled) {
+        return send_command(client_id,
+                            protocol::CommandType::stop_snapshots, {}, error);
+    }
+    const auto payload = control::encode_snapshot_schedule(interval_seconds);
+    if (payload.empty()) {
+        set_error(error, "snapshot interval must be between 5 and 10 seconds");
+        return false;
+    }
+    return send_command(client_id, protocol::CommandType::start_snapshots,
+                        payload, error);
+}
+
+bool ServerControlPlane::send_overlay_stroke(
+    std::uint64_t client_id, const control::OverlayStroke& stroke,
+    std::string* error) {
+    const auto payload = control::encode_overlay_stroke(stroke);
+    if (payload.empty()) {
+        set_error(error, "invalid overlay stroke");
+        return false;
+    }
+    return send_command(client_id, protocol::CommandType::overlay_stroke,
+                        payload, error);
+}
+
+bool ServerControlPlane::clear_overlay(std::uint64_t client_id,
+                                       std::string* error) {
+    return send_command(client_id, protocol::CommandType::overlay_clear, {},
+                        error);
+}
+
+bool ServerControlPlane::broadcast_host_snapshot(
+    const control::SnapshotFrame& frame, std::string* error) {
+    const auto payload = control::encode_snapshot_frame(frame);
+    if (payload.empty()) {
+        set_error(error, "invalid host snapshot");
+        return false;
+    }
+    return impl_->broadcast_command(protocol::CommandType::host_snapshot,
+                                    payload, error);
+}
+
+bool ServerControlPlane::stop_host_broadcast(std::string* error) {
+    return impl_->broadcast_command(
+        protocol::CommandType::host_broadcast_stop, {}, error);
 }
 
 bool ServerControlPlane::request_keyframe(std::uint64_t client_id,

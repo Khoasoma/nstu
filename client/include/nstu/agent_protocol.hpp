@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nstu/named_pipe.hpp"
+#include "nstu/protocol.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +21,13 @@ enum class AgentMessageType : std::uint16_t {
     start_stream = 6,
     stop_stream = 7,
     keyframe_request = 8,
+    start_snapshots = 9,
+    stop_snapshots = 10,
+    snapshot_frame = 11,
+    overlay_stroke = 12,
+    overlay_clear = 13,
+    host_snapshot = 14,
+    host_broadcast_stop = 15,
 };
 
 struct AgentMessage {
@@ -30,11 +38,15 @@ struct AgentMessage {
 struct AgentStatus {
     bool locked = false;
     bool streaming = false;
+    bool snapshotting = false;
+    bool viewing_broadcast = false;
     std::uint8_t frames_per_second = 0;
+    std::uint16_t snapshot_interval_seconds = 0;
     std::uint32_t session_id = 0;
 };
 
-inline constexpr std::size_t kMaximumAgentPayloadBytes = 4096;
+inline constexpr std::size_t kMaximumAgentPayloadBytes =
+    protocol::kMaxCommandPayload;
 
 [[nodiscard]] std::vector<std::byte> encode_agent_message(
     const AgentMessage& message);

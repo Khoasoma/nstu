@@ -57,6 +57,7 @@ int main() {
 
     std::stop_source stop_source;
     std::atomic_bool lock_received = false;
+    std::atomic_bool snapshot_sent = false;
     std::atomic_bool session_succeeded = false;
     std::thread client([&] {
         std::string client_error;
@@ -75,6 +76,20 @@ int main() {
                     stop_source.request_stop();
                 }
             },
+            [&]() -> std::optional<nstu::client::ClientOutboundCommand> {
+                if (snapshot_sent.exchange(true)) {
+                    return std::nullopt;
+                }
+                nstu::control::SnapshotFrame frame;
+                frame.width = 320;
+                frame.height = 180;
+                frame.captured_at_unix_milliseconds = 42;
+                frame.jpeg = {std::byte{0xff}, std::byte{0xd8},
+                              std::byte{0xff}, std::byte{0xd9}};
+                return nstu::client::ClientOutboundCommand{
+                    nstu::protocol::CommandType::snapshot_frame,
+                    nstu::control::encode_snapshot_frame(frame)};
+            },
             &client_error);
         session_succeeded = result;
     });
@@ -83,6 +98,11 @@ int main() {
         return clients.size() == 1 && clients[0].hostname == "SERVICE-PC";
     }));
     const auto registry_id = registry.snapshot()[0].id;
+    assert(wait_until([&] {
+        const auto clients = registry.snapshot();
+        return !clients.empty() && clients[0].snapshot_generation == 1 &&
+               clients[0].snapshot_width == 320;
+    }));
     assert(server.set_locked(registry_id, true, &error));
     assert(wait_until([&] { return lock_received.load(); }));
     client.join();

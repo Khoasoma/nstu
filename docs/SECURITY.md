@@ -5,7 +5,9 @@
 The current security layer provides live authenticated TCP control sessions,
 authenticated UDP video packet primitives, replay-resistant bootstrap
 enrollment, a persisted machine-scoped keyring, and protected client runtime
-configuration. It does not encrypt screen content.
+configuration. Periodic JPEG snapshots, teacher-screen snapshots, and overlay
+strokes travel in authenticated TCP command frames. NSTU does not currently
+encrypt screen content.
 
 ## Control handshake
 
@@ -95,6 +97,13 @@ to independently negotiated initial sequences.
 Verify the MAC before applying the sequence guard. Only advance the guard after
 successful verification. Do not execute, log as trusted, or acknowledge an
 unauthenticated command.
+
+Snapshot JPEG payloads are capped at 60 KiB before transport and decoded into a
+bounded maximum image size. The service keeps only the newest pending client
+snapshot, limiting memory growth when the network is slower than capture.
+Authentication prevents undetected modification but does not hide the JPEG
+from an observer on the LAN. The same confidentiality limitation applies to
+teacher-screen snapshot broadcast.
 
 ## UDP video authentication
 

@@ -7,14 +7,19 @@
 
 NSTU là dự án quản lý lớp học và phòng máy Windows miễn phí, mã nguồn mở. Dự
 án hướng đến một máy giáo viên quản lý tập trung, client nhẹ trên máy học sinh,
-lệnh điều khiển được xác thực, chat và truyền màn hình độ trễ thấp trong mạng
-nội bộ.
+lệnh điều khiển được xác thực, chat, snapshot màn hình tiết kiệm băng thông và
+broadcast màn hình giáo viên trong mạng nội bộ.
+
+![Dashboard NSTU Server ở chế độ sáng tiếng Anh và chế độ tối tiếng Việt](docs/assets/server-dashboard-preview.png)
+
+*Dashboard server: chế độ sáng tiếng Anh và chế độ tối tiếng Việt.*
 
 > **Trạng thái phát triển:** NSTU hiện là engineering MVP, chưa phải bản
 > production. Persisted enrollment, dispatcher nhiều client, authenticated
-> control routing, packetization và device recovery đã có implementation/test;
-> decoded live-screen end-to-end và validation matrix trên phòng máy thật chưa
-> hoàn thành.
+> control routing, JPEG snapshot định kỳ, annotation overlay, teacher-screen
+> snapshot broadcast, packetization và device recovery đã có implementation/test;
+> continuous H.264 decode end-to-end và validation matrix trên phòng máy thật
+> chưa hoàn thành.
 > Không nên dùng bản nightly hiện tại như một biện pháp bảo mật trong trường học
 > thật.
 
@@ -40,11 +45,14 @@ model và các hạng mục production chưa hoàn thành tại
 ## Năng lực hướng đến
 
 - Quản lý từ 50 máy Windows trở lên bằng một máy giáo viên.
-- Broadcast màn hình giáo viên bằng H.264 và UDP multicast để băng thông LAN
-  không tăng tuyến tính theo số client.
-- Fallback sang unicast khi chất lượng multicast liên tục không đạt yêu cầu.
-- Hiển thị screen wall responsive của toàn bộ client với target refresh điều
-  chỉnh từ 5-15 FPS, cùng telemetry, điều khiển và chat tập trung cho một máy.
+- Theo dõi phòng máy bằng JPEG snapshot có giới hạn, chụp mỗi 5-10 giây để
+  tránh tải video liên tục trên switch.
+- Lock/unlock client, vẽ lên màn hình một máy học sinh bằng click-through
+  overlay và broadcast snapshot màn hình giáo viên.
+- Giữ nền tảng H.264 multicast/unicast cho chế độ broadcast liên tục tùy chọn
+  trong tương lai, không dùng làm đường monitoring mặc định.
+- Hiển thị screen wall responsive của các snapshot mới nhất, cùng telemetry,
+  điều khiển và chat tập trung cho một máy.
 - Chạy Windows Service nhỏ và Win32 tray/chat agent native trên client.
 - Xác thực lệnh điều khiển và video mà không cần JSON, XML, Electron hay driver
   kernel tùy biến.
@@ -123,10 +131,20 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
 Dashboard không tự chèn dữ liệu demo. Registry client khởi động ở trạng thái
 trống và chỉ hiển thị record do runtime registry cung cấp. Giáo viên có thể
 chuyển giữa `Room screens`, hiển thị toàn bộ client phù hợp trong screen wall
-responsive, và `Selected client`, tập trung telemetry, điều khiển stream và chat
-cho một máy. Target refresh của screen wall điều chỉnh được từ 5-15 FPS; nên bắt
-đầu ở 5 FPS cho phòng 50 client cho đến khi hoàn tất soak test decoder và mạng.
-Control plane thật đã được nối; decoded frame vẫn đang được tích hợp.
+responsive, và `Selected client`, tập trung telemetry, điều khiển snapshot,
+annotation, lock/unlock và chat cho một máy. Khoảng chụp điều chỉnh từ 5-10
+giây. Mỗi JPEG bị giới hạn ở 60 KiB và queue chỉ giữ snapshot mới nhất để tránh
+tích tụ frame cũ. Broadcast màn hình giáo viên dùng cùng đường snapshot có giới
+hạn. Dashboard có nút chuyển English/Tiếng Việt và chế độ sáng/tối. Khi minimize
+hoặc đóng cửa sổ, server tiếp tục chạy trong notification area của Windows; dùng
+menu tray để mở lại hoặc thoát. Continuous H.264/UDP preview vẫn là hạng mục tùy
+chọn trong tương lai.
+
+Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
+
+```powershell
+& "$env:ProgramFiles\NSTU\server\nstu-server.exe" --language=vi --dark
+```
 
 ### Client
 
@@ -197,12 +215,12 @@ protected storage. Deep Freeze sẽ hủy mọi state nằm ngoài thawed space 
 ## Lưu ý bảo mật
 
 - Control session hiện tại dùng mutual HMAC authentication và replay protection.
-- Video datagram có thể được xác thực, nhưng nội dung màn hình chưa được mã hóa.
-  Không thử nghiệm màn hình nhạy cảm trên LAN không tin cậy.
+- JPEG snapshot và video datagram được xác thực, nhưng nội dung màn hình chưa
+  được mã hóa. Không thử nghiệm màn hình nhạy cảm trên LAN không tin cậy.
 - Automation Authenticode đã có, nhưng artifact nightly vẫn chưa ký; production
   release phải chạy workflow với certificate thật.
-- Decoded live screen, review/fuzz độc lập, validation từng edition Deep Freeze
-  và hardware/network matrix vẫn là production blocker.
+- Review/fuzz độc lập, validation từng edition Deep Freeze, ký bằng certificate
+  thật và hardware/network matrix vẫn là production blocker.
 - CI xanh chỉ chứng minh build và automated test đạt, không chứng minh an toàn
   hoặc độ bền trên phần cứng trường học thật.
 

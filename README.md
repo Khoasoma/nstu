@@ -7,15 +7,20 @@
 
 NSTU is a free and open-source classroom and computer-lab management project
 for Windows. It is designed around a centralized teacher server, lightweight
-student clients, authenticated control commands, chat, and low-latency screen
-broadcasting over a local network.
+student clients, authenticated control commands, chat, low-bandwidth client
+screen snapshots, and teacher-screen broadcast over a local network.
+
+![NSTU Server dashboard in English light mode and Vietnamese dark mode](docs/assets/server-dashboard-preview.png)
+
+*Server dashboard: English light mode and Vietnamese dark mode.*
 
 > **Development status:** NSTU is currently an engineering MVP, not a
 > production release. Persisted enrollment, multi-client dispatch, authenticated
-> control routing, packetization, and device recovery are implemented and tested.
-> Decoded end-to-end live-screen delivery and the physical production validation
-> matrix are not complete. Do not deploy the current nightly build as a security
-> control in a real school.
+> control routing, periodic JPEG snapshots, screen annotation, teacher-screen
+> snapshot broadcast, packetization, and device recovery are implemented and
+> tested. Continuous decoded H.264 delivery and the physical production
+> validation matrix are not complete. Do not deploy the current nightly build
+> as a security control in a real school.
 
 ## Why NSTU exists
 
@@ -39,11 +44,14 @@ its threat model and unfinished production work public in
 ## Intended capabilities
 
 - Manage 50 or more Windows clients from one teacher workstation.
-- Broadcast a teacher screen using H.264 and UDP multicast so LAN bandwidth
-  does not grow linearly with the client count.
-- Fall back to unicast when multicast health is persistently poor.
-- Show a responsive wall of all client screens with an adjustable 5-15 FPS
-  refresh target, plus focused telemetry, controls, and chat for one client.
+- Monitor a room through bounded JPEG snapshots captured every 5-10 seconds,
+  avoiding a continuous per-client video load on the classroom switch.
+- Lock or unlock clients, draw on a selected student's screen through a
+  click-through overlay, and broadcast periodic teacher-screen snapshots.
+- Retain H.264 multicast/unicast foundations for a future optional continuous
+  broadcast mode without making it the default monitoring path.
+- Show a responsive wall of the latest client snapshots, plus focused
+  telemetry, controls, and chat for one client.
 - Run a small Windows service and native Win32 tray/chat agent on each client.
 - Authenticate control and video traffic without JSON, XML, Electron, or a
   custom kernel driver.
@@ -124,11 +132,20 @@ The dashboard does not inject demonstration records. It starts with an empty
 client registry and displays only records supplied by the runtime registry.
 Teachers can switch between `Room screens`, which presents every visible client
 in a responsive screen wall, and `Selected client`, which concentrates
-telemetry, stream controls, and chat for one workstation. The room-screen
-refresh target is adjustable from 5 to 15 FPS; 5 FPS is the prudent starting
-   point for a 50-client room until full decoder and network soak testing is
-   complete. The live control plane is connected; decoded-frame routing is still
-   being integrated.
+telemetry, snapshot controls, screen annotation, lock/unlock, and chat for one
+workstation. The snapshot interval is adjustable from 5 to 10 seconds. Each
+JPEG is bounded to 60 KiB, and only the newest pending snapshot is retained to
+avoid stale queue growth. Teacher-screen broadcast uses the same bounded
+snapshot path. The dashboard includes English/Vietnamese and light/dark mode
+switches. Minimizing or closing the window keeps the server available in the
+Windows notification area; use the tray menu to reopen it or exit. Continuous
+H.264/UDP preview remains optional future work.
+
+Vietnamese and dark mode can also be selected at startup:
+
+```powershell
+& "$env:ProgramFiles\NSTU\server\nstu-server.exe" --language=vi --dark
+```
 
 ### Client
 
@@ -219,13 +236,12 @@ after a reboot.
 
 - Current control sessions use mutual HMAC authentication and replay
   protection.
-- Video datagrams can be authenticated, but screen content is not yet
-  encrypted. Do not test real sensitive screens on an untrusted LAN.
+- JPEG snapshots and video datagrams are authenticated, but screen content is
+  not encrypted. Do not test real sensitive screens on an untrusted LAN.
 - Authenticode automation is available, but nightly artifacts remain unsigned;
   a production release requires the real certificate-backed workflow.
-- Independent review, fuzzing, decoded live-screen integration, Deep Freeze
-  edition validation, and the hardware/network evidence matrix remain production
-  blockers.
+- Independent review, fuzzing, Deep Freeze edition validation, real certificate
+  signing, and the hardware/network evidence matrix remain production blockers.
 - A green CI build proves compilation and automated tests, not security or
   reliability on real school hardware.
 
