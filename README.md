@@ -135,6 +135,53 @@ count, or workload details, so they are preliminary rather than definitive.
 | RAM | Approximately similar to the NSTU Ryzen run | Results were similar across machines, but no definitive i5 memory figure was recorded. |
 | Integrated GPU | 11% | The other application used 34% on the integrated GPU. NSTU was 23 percentage points lower, a 67.6% relative reduction, using about 32.4% of the comparison application's GPU load. |
 
+### Reported client measurements at Vung Tau Junior High School
+
+Teachers at Vung Tau Junior High School conducted and permitted the following
+client-side checks on three devices with the same Intel Core i5-6400
+configuration. These are approximate averages from three tests, not a
+definitive production benchmark; the workload, capture scene, drivers, and
+network can change the result.
+
+| Client state | Approx. RAM | CPU | GPU / capture detail |
+| --- | ---: | ---: | --- |
+| Snapshot capture and running service | 44 MB | no more than 7% | 11% iGPU / 6% CPU in the paired GPU/CPU sample |
+| Watching a server stream with overlay (1080p/60 fps) | 96 MB | 11% | 27% iGPU / 19% CPU |
+| Drawing directly on the student machine | 72 MB | not recorded | Overlay drawing workload |
+| Streaming the student screen to the server (720p/30 fps) | 65 MB | not recorded | 25% iGPU / 16% CPU |
+
+The client results complement the server measurements above. They do not claim
+that every i5-6400 machine or every classroom workload will match these values.
+
+### Deep Freeze removal observation
+
+The NSTU client removal test at Vung Tau indicates that normal Deep Freeze
+administration is required. The machine must be booted Thawed, the Deep Freeze
+console opened normally, protection disabled, and Windows restarted before the
+client can be completely removed; the uninstaller then requires its own restart
+to finish stopping the service and deleting files. Without opening Deep Freeze
+and disabling protection, removal is effectively blocked. This remains an
+observational field report, not a claim that every Deep Freeze edition behaves
+identically.
+
+### Cooperation and test sites
+
+The following schools have agreed to cooperate with NSTU and participate as
+project partners. Additional test results are still being collected. Ben Cat
+High School remains under review, so its partnership is not yet confirmed.
+
+| School | Role / status | Logo |
+| --- | --- | --- |
+| Vung Tau Junior High School | Testing completed; teacher-conducted and permitted | <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Vung Tau Junior High School logo" width="96"> |
+| Vo Truong Toan Junior High School | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Vo Truong Toan Junior High School logo" width="96"> |
+| Dinh Tien Hoang High School | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="96"> |
+| Le Quy Don High School for the Gifted | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="96"> |
+| VNU-HCM High School for the Gifted (PTNK) | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="96"> |
+| Ben Cat High School | Under review; partnership not confirmed | <img src="docs/assets/partners/ben-cat-high-school.png" alt="Ben Cat High School logo" width="96"> |
+
+The logo files in `docs/assets/partners/` are background-cleaned copies of the
+marks supplied for this report.
+
 Use `tools/production/collect-benchmarks.ps1` for longer runs. Results with 5,
 7, and 10 second snapshot intervals, real clients, network traffic, raw CSV,
 and a documented workload on the target i5-6400 hardware are still required

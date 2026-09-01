@@ -136,6 +136,53 @@ workload, vì vậy đây là số liệu sơ bộ chứ chưa phải kết lu�
 | RAM | Xấp xỉ tương tự lần chạy NSTU trên Ryzen | Kết quả giữa các máy tương tự nhau, nhưng chưa ghi nhận số RAM i5 đủ chính xác để kết luận. |
 | GPU tích hợp | 11% | Phần mềm khác dùng 34% iGPU. NSTU thấp hơn 23 điểm phần trăm, tương đương giảm 67,6%, và dùng khoảng 32,4% mức tải GPU của phần mềm so sánh. |
 
+### Số liệu client được báo cáo tại Trường THCS Vũng Tàu
+
+Giáo viên tại Trường THCS Vũng Tàu đã thực hiện và cho phép ghi nhận các kiểm
+tra phía client dưới đây trên ba thiết bị cùng cấu hình Intel Core i5-6400.
+Đây là số liệu trung bình gần đúng từ ba lần thử, chưa phải benchmark
+production chính thức; workload, cảnh chụp, driver và network có thể làm kết
+quả thay đổi.
+
+| Trạng thái client | RAM gần đúng | CPU | GPU / chi tiết capture |
+| --- | ---: | ---: | --- |
+| Chụp snapshot và service đang chạy | 44 MB | không quá 7% | 11% iGPU / 6% CPU trong mẫu GPU/CPU tương ứng |
+| Xem stream từ server có overlay (1080p/60 fps) | 96 MB | 11% | 27% iGPU / 19% CPU |
+| Vẽ trực tiếp trên máy học sinh | 72 MB | chưa ghi nhận | Workload vẽ overlay |
+| Stream màn hình học sinh về server (720p/30 fps) | 65 MB | chưa ghi nhận | 25% iGPU / 16% CPU |
+
+Kết quả phía client bổ sung cho các phép đo server ở trên. Không nên hiểu đây là
+cam kết mọi máy i5-6400 hoặc mọi workload trong phòng học sẽ có đúng các giá trị
+này.
+
+### Quan sát về gỡ cài đặt với Deep Freeze
+
+Kiểm tra gỡ client NSTU tại Vũng Tàu cho thấy cần thực hiện đúng quy trình quản
+trị Deep Freeze. Phải boot máy ở trạng thái Thawed, mở console Deep Freeze theo
+cách thông thường, tắt protection và restart Windows trước khi gỡ hoàn toàn
+client; sau đó uninstaller vẫn yêu cầu thêm một lần restart để dừng service và
+xóa file. Nếu không mở Deep Freeze và tắt protection, việc gỡ gần như bị chặn
+hoàn toàn. Đây là báo cáo quan sát thực địa, không phải khẳng định mọi edition
+Deep Freeze đều hoạt động giống nhau.
+
+### Trường phối hợp và địa điểm kiểm thử
+
+Các trường dưới đây đã đồng ý phối hợp với NSTU và tham gia với vai trò đối tác
+dự án. Kết quả kiểm thử bổ sung vẫn đang được thu thập. Trường THPT Bến Cát
+vẫn đang được xem xét, nên quan hệ đối tác chưa được xác nhận.
+
+| Trường | Vai trò / trạng thái | Logo |
+| --- | --- | --- |
+| Trường THCS Vũng Tàu | Đã hoàn thành kiểm thử; giáo viên thực hiện và cho phép | <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Logo Trường THCS Vũng Tàu" width="96"> |
+| Trường THCS Võ Trường Toản | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Logo Trường THCS Võ Trường Toản" width="96"> |
+| Trường THPT Đinh Tiên Hoàng | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="96"> |
+| Trường THPT Chuyên Lê Quý Đôn | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="96"> |
+| Trường Phổ thông Năng khiếu, ĐHQG-HCM (PTNK) | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo PTNK ĐHQG-HCM" width="96"> |
+| Trường THPT Bến Cát | Đang xem xét; chưa xác nhận đối tác | <img src="docs/assets/partners/ben-cat-high-school.png" alt="Logo Trường THPT Bến Cát" width="96"> |
+
+Các file logo trong `docs/assets/partners/` là bản đã làm sạch nền từ các hình
+ảnh được cung cấp cho báo cáo này.
+
 Dùng `tools/production/collect-benchmarks.ps1` cho các lần đo dài hơn. Vẫn cần
 kết quả ở chu kỳ snapshot 5, 7 và 10 giây, với client thật, network traffic,
 raw CSV và workload được mô tả rõ trên phần cứng i5-6400 mục tiêu trước khi đưa
