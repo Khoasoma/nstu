@@ -361,6 +361,8 @@ thích license permissive; dự án không chấp nhận GPL dependency.
 
 - **Bùi Hồng Hải Đăng (`yanij`)**: đóng góp ý tưởng, hỗ trợ thiết bị test và
   tham gia xây dựng Project NSTU.
+- **Lê Anh Tuấn (`ssdarealest`)**: chịu trách nhiệm quản lý dự án, hỗ trợ pháp
+  lý, xây dựng ý tưởng, quản lý tiến trình và phát triển dự án.
 
 ## Bản quyền
 
