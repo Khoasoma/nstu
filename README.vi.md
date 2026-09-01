@@ -167,18 +167,31 @@ Deep Freeze đều hoạt động giống nhau.
 
 ### Trường phối hợp và địa điểm kiểm thử
 
-Các trường dưới đây đã đồng ý phối hợp với NSTU và tham gia với vai trò đối tác
-dự án. Kết quả kiểm thử bổ sung vẫn đang được thu thập. Trường THPT Bến Cát
-vẫn đang được xem xét, nên quan hệ đối tác chưa được xác nhận.
+Các trường dưới đây đang phối hợp với NSTU với vai trò đối tác dự án hoặc đang
+được đánh giá để phối hợp. Kết quả kiểm thử bổ sung vẫn đang được thu thập.
 
-| Trường | Vai trò / trạng thái | Logo |
-| --- | --- | --- |
-| Trường THCS Vũng Tàu | Đã hoàn thành kiểm thử; giáo viên thực hiện và cho phép | <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Logo Trường THCS Vũng Tàu" width="96"> |
-| Trường THCS Võ Trường Toản | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Logo Trường THCS Võ Trường Toản" width="96"> |
-| Trường THPT Đinh Tiên Hoàng | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="96"> |
-| Trường THPT Chuyên Lê Quý Đôn | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="96"> |
-| Trường Phổ thông Năng khiếu, ĐHQG-HCM (PTNK) | Đã đồng ý phối hợp; chờ kiểm thử/kết quả | <img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo PTNK ĐHQG-HCM" width="96"> |
-| Trường THPT Bến Cát | Đang xem xét; chưa xác nhận đối tác | <img src="docs/assets/partners/ben-cat-high-school.png" alt="Logo Trường THPT Bến Cát" width="96"> |
+#### Đối tác đã xác minh (hiện tại)
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="180">
+      <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Logo Trường THCS Vũng Tàu" width="112"><br>
+      <sub><b>Trường THCS Vũng Tàu</b><br>Đã hoàn thành kiểm thử; giáo viên thực hiện và cho phép</sub>
+    </td>
+  </tr>
+</table>
+
+#### Đối tác đang chờ xác minh
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Logo Trường THCS Võ Trường Toản" width="112"><br><sub><b>Trường THCS Võ Trường Toản</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Logo Trường THPT Đinh Tiên Hoàng" width="112"><br><sub><b>Trường THPT Đinh Tiên Hoàng</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Logo Trường THPT Chuyên Lê Quý Đôn" width="112"><br><sub><b>Trường THPT Chuyên Lê Quý Đôn</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="Logo PTNK ĐHQG-HCM" width="112"><br><sub><b>PTNK, ĐHQG-HCM</b><br>Đã đồng ý phối hợp; chờ kiểm thử</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ben-cat-high-school.png" alt="Logo Trường THPT Bến Cát" width="112"><br><sub><b>Trường THPT Bến Cát</b><br>Đang xem xét; chưa xác nhận đối tác</sub></td>
+  </tr>
+</table>
 
 Các file logo trong `docs/assets/partners/` là bản đã làm sạch nền từ các hình
 ảnh được cung cấp cho báo cáo này.

@@ -166,18 +166,31 @@ identically.
 
 ### Cooperation and test sites
 
-The following schools have agreed to cooperate with NSTU and participate as
-project partners. Additional test results are still being collected. Ben Cat
-High School remains under review, so its partnership is not yet confirmed.
+The following schools are cooperating with NSTU as project partners or are being
+evaluated for cooperation. Additional test results are still being collected.
 
-| School | Role / status | Logo |
-| --- | --- | --- |
-| Vung Tau Junior High School | Testing completed; teacher-conducted and permitted | <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Vung Tau Junior High School logo" width="96"> |
-| Vo Truong Toan Junior High School | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Vo Truong Toan Junior High School logo" width="96"> |
-| Dinh Tien Hoang High School | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="96"> |
-| Le Quy Don High School for the Gifted | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="96"> |
-| VNU-HCM High School for the Gifted (PTNK) | Cooperation agreed; testing/results pending | <img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="96"> |
-| Ben Cat High School | Under review; partnership not confirmed | <img src="docs/assets/partners/ben-cat-high-school.png" alt="Ben Cat High School logo" width="96"> |
+#### Verified partner (current)
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="180">
+      <img src="docs/assets/partners/vung-tau-junior-high.png" alt="Vung Tau Junior High School logo" width="112"><br>
+      <sub><b>Vung Tau Junior High School</b><br>Testing completed; teacher-conducted and permitted</sub>
+    </td>
+  </tr>
+</table>
+
+#### Pending verified partners
+
+<table>
+  <tr>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/vo-truong-toan-junior-high.png" alt="Vo Truong Toan Junior High School logo" width="112"><br><sub><b>Vo Truong Toan Junior High School</b><br>Cooperation agreed; testing pending</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="112"><br><sub><b>Dinh Tien Hoang High School</b><br>Cooperation agreed; testing pending</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="112"><br><sub><b>Le Quy Don High School for the Gifted</b><br>Cooperation agreed; testing pending</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="112"><br><sub><b>VNU-HCM High School for the Gifted (PTNK)</b><br>Cooperation agreed; testing pending</sub></td>
+    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ben-cat-high-school.png" alt="Ben Cat High School logo" width="112"><br><sub><b>Ben Cat High School</b><br>Under review; partnership not confirmed</sub></td>
+  </tr>
+</table>
 
 The logo files in `docs/assets/partners/` are background-cleaned copies of the
 marks supplied for this report.
