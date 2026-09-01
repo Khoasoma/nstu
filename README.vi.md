@@ -74,6 +74,73 @@ cho đến khi mục tiêu 8 GB vượt qua kiểm thử phần cứng dài hạ
 530 là baseline cho hardware acceleration, không phải cam kết hoạt động với mọi
 phiên bản driver.
 
+## Benchmark tài nguyên cục bộ
+
+Các số liệu dưới đây chỉ là phép đo tham khảo trên máy phát triển, không thay
+thế benchmark production với 50 client. Phép đo được thực hiện ngày 1 tháng 9
+năm 2026 từ commit `f183e42`, dùng
+`build-verify/server/nstu-server.exe`, registry client trống và không có traffic
+snapshot hoặc broadcast.
+
+Máy thử nghiệm: AMD Ryzen 7 5700X (8 core/16 logical processor), RAM 15,9 GiB,
+ổ SSD, NVIDIA GeForce RTX 2060 SUPER và Windows 11 Pro build 26200.
+
+| Tình huống | CPU trên tổng năng lực máy | Working set | Private memory | Phương pháp |
+| --- | ---: | ---: | ---: | --- |
+| Dashboard hiển thị, idle | trung bình 0,725%, p95 2,336% | trung bình 53,54 MiB, tối đa 54,50 MiB | trung bình 117,95 MiB, tối đa 118,83 MiB | 120 mẫu, mỗi mẫu cách 1 giây, sau warm-up 10 giây |
+| Đóng cửa sổ xuống tray, idle | trung bình 0,023%, tối đa 0,289% | trung bình 52,48 MiB, tối đa 53,00 MiB | trung bình 120,60 MiB, tối đa 121,06 MiB | 60 mẫu, mỗi mẫu cách 1 giây, sau warm-up 5 giây |
+
+Lần đo phòng trống không tạo snapshot payload của ứng dụng, vì vậy đây không
+phải benchmark băng thông trực tiếp. Bảng dưới là mô hình payload JPEG trường
+hợp xấu nhất từ giới hạn 60 KiB/frame đã được triển khai. Mô hình giả định mọi
+frame đều đạt giới hạn và chưa tính overhead của authenticated command, TCP/IP,
+Ethernet, retransmission và control traffic khác.
+
+| Snapshot traffic | Chu kỳ 5 giây | Chu kỳ 7 giây | Chu kỳ 10 giây |
+| --- | ---: | ---: | ---: |
+| Một client, một chiều | 0,098 Mbps | 0,070 Mbps | 0,049 Mbps |
+| Theo dõi phòng 50 client, chiều vào server | 4,92 Mbps | 3,51 Mbps | 2,46 Mbps |
+| Broadcast màn hình giáo viên tới 50 client qua TCP riêng cho từng client hiện tại | 4,92 Mbps | 3,51 Mbps | 2,46 Mbps |
+| Theo dõi và broadcast giáo viên cùng lúc | 9,83 Mbps | 7,02 Mbps | 4,92 Mbps |
+
+Các giá trị này là trần payload của chế độ snapshot định kỳ hiện tại, không
+phải throughput đo trực tiếp trên switch. JPEG thực tế có thể nhỏ hơn, trong khi
+wire overhead làm mỗi lần truyền lớn hơn một chút. Đường continuous H.264 trong
+tương lai cần benchmark rate control và multicast/unicast riêng.
+
+Mười lần khởi chạy trong cùng một phiên Windows đạt trạng thái cửa sổ phản hồi
+với median 191,8 ms và trung bình 215,4 ms. Giá trị thấp nhất là 187,4 ms, cao
+nhất là 435,1 ms, và lần chạy đầu tiên đo được là 435,1 ms. Đây là độ trễ mở ứng
+dụng khi Windows đã chạy, không phải thời gian từ lúc reboot Windows đến khi
+manager sẵn sàng.
+
+Để tham khảo, số liệu do chủ dự án cung cấp cho các phần mềm quản lý lớp học
+khác trên cùng cấu hình Ryzen 7 5700X là CPU trung bình 11-12%, peak có thể đạt
+20%, RAM khoảng 820 MB-1,1 GB với peak 1,3 GB, 30-40 Mbps khi streaming và
+khoảng 32 giây cho quá trình boot và mở manager. Các số liệu này không được tái
+kiểm chứng độc lập trong lần đo hiện tại; khác biệt về workload và phương pháp
+đo vẫn khiến đây chưa phải phép so sánh hoàn toàn cùng điều kiện. Các hệ thống
+tham khảo cũng được mô tả là học sinh có thể gỡ cài đặt. Khả năng gỡ NSTU không
+được kiểm thử trong benchmark tài nguyên này; nội dung đó vẫn thuộc validation
+matrix về policy quản trị, reboot và triển khai Windows.
+
+### Kết quả bổ sung được báo cáo trên i5-6400
+
+Chủ dự án cũng báo cáo một lần chạy NSTU gần đúng trên hệ thống Intel Core
+i5-6400 mục tiêu. Kết quả không kèm raw sample, thời lượng, số client hoặc mô tả
+workload, vì vậy đây là số liệu sơ bộ chứ chưa phải kết luận chính thức.
+
+| Chỉ số | NSTU trên i5-6400 | So sánh và mức giảm |
+| --- | ---: | --- |
+| CPU | 4-12% | Chưa có baseline CPU của phần mềm khác trên cùng máy i5. Nếu chỉ dùng mức trung bình 11-12% trên Ryzen trước đó làm tham khảo, mức thấp 4% của NSTU thấp hơn 7-8 điểm phần trăm, tương đương 63,6-66,7%; mức cao 12% trùng với baseline, nên chưa thể khẳng định CPU luôn giảm. |
+| RAM | Xấp xỉ tương tự lần chạy NSTU trên Ryzen | Kết quả giữa các máy tương tự nhau, nhưng chưa ghi nhận số RAM i5 đủ chính xác để kết luận. |
+| GPU tích hợp | 11% | Phần mềm khác dùng 34% iGPU. NSTU thấp hơn 23 điểm phần trăm, tương đương giảm 67,6%, và dùng khoảng 32,4% mức tải GPU của phần mềm so sánh. |
+
+Dùng `tools/production/collect-benchmarks.ps1` cho các lần đo dài hơn. Vẫn cần
+kết quả ở chu kỳ snapshot 5, 7 và 10 giây, với client thật, network traffic,
+raw CSV và workload được mô tả rõ trên phần cứng i5-6400 mục tiêu trước khi đưa
+ra tuyên bố tài nguyên production.
+
 ## Sơ đồ mạng khuyến nghị
 
 ```text

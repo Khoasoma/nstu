@@ -73,6 +73,73 @@ until the 8 GB target has passed long-duration hardware testing. Intel HD
 Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
 all driver versions.
 
+## Local resource benchmark
+
+The following measurements are an indicative developer-machine check, not the
+required 50-client production benchmark. They were recorded on September 1,
+2026 from commit `f183e42`, using `build-verify/server/nstu-server.exe` with an
+empty client registry and no snapshot or broadcast traffic.
+
+Test machine: AMD Ryzen 7 5700X (8 cores/16 logical processors), 15.9 GiB RAM,
+SSD storage, NVIDIA GeForce RTX 2060 SUPER, and Windows 11 Pro build 26200.
+
+| Scenario | CPU, total machine capacity | Working set | Private memory | Method |
+| --- | ---: | ---: | ---: | --- |
+| Dashboard visible, idle | 0.725% average, 2.336% p95 | 53.54 MiB average, 54.50 MiB maximum | 117.95 MiB average, 118.83 MiB maximum | 120 one-second samples after a 10-second warm-up |
+| Window closed to tray, idle | 0.023% average, 0.289% maximum | 52.48 MiB average, 53.00 MiB maximum | 120.60 MiB average, 121.06 MiB maximum | 60 one-second samples after a 5-second warm-up |
+
+The empty-room run produced no application snapshot payload, so it is not a
+live bandwidth benchmark. The table below is the worst-case JPEG payload model
+from the implemented 60 KiB frame cap. It assumes every frame reaches that cap
+and excludes authenticated-command, TCP/IP, Ethernet, retransmission, and other
+control-traffic overhead.
+
+| Snapshot traffic | 5 second interval | 7 second interval | 10 second interval |
+| --- | ---: | ---: | ---: |
+| One client, one direction | 0.098 Mbps | 0.070 Mbps | 0.049 Mbps |
+| 50-client room monitoring, inbound | 4.92 Mbps | 3.51 Mbps | 2.46 Mbps |
+| Teacher broadcast to 50 clients, current per-client TCP path | 4.92 Mbps | 3.51 Mbps | 2.46 Mbps |
+| Monitoring and teacher broadcast together | 9.83 Mbps | 7.02 Mbps | 4.92 Mbps |
+
+These values are ceilings for the current periodic snapshot mode, not measured
+switch throughput. Actual JPEGs can be smaller, while wire overhead makes each
+transmission slightly larger. The future continuous H.264 path requires its own
+measured rate-control and multicast/unicast benchmark.
+
+Ten launches in the same Windows session reached a responsive top-level window
+in 191.8 ms median and 215.4 ms average. The minimum was 187.4 ms, the maximum
+was 435.1 ms, and the first measured launch was 435.1 ms. This is application
+launch latency with the OS already running; it is not a Windows reboot-to-ready
+measurement.
+
+For context, project-owner-supplied figures for other classroom-management
+applications on the same Ryzen 7 5700X configuration are 11-12% average CPU
+with peaks up to 20%, approximately 820 MB-1.1 GB RAM with peaks up to 1.3 GB,
+30-40 Mbps while streaming, and about 32 seconds for boot and manager startup.
+Those figures were not independently reproduced during this run, so differences
+in workload and measurement method still prevent a strict apples-to-apples
+comparison. The supplied systems were also described as removable by students.
+NSTU's removal behavior was not tested in this resource benchmark; it remains
+part of the administrator-policy, reboot, and Windows deployment validation
+matrix.
+
+### Reported i5-6400 follow-up
+
+The project owner also reported an approximate NSTU run on the target Intel
+Core i5-6400 system. These values did not include raw samples, duration, client
+count, or workload details, so they are preliminary rather than definitive.
+
+| Metric | NSTU on i5-6400 | Comparison and reduction |
+| --- | ---: | --- |
+| CPU | 4-12% | No same-i5 CPU baseline for the other application was supplied. Against its earlier 11-12% Ryzen average only as context, NSTU's 4% low end is 7-8 percentage points, or 63.6-66.7%, lower; the 12% high end overlaps the reference, so no guaranteed CPU reduction can be claimed. |
+| RAM | Approximately similar to the NSTU Ryzen run | Results were similar across machines, but no definitive i5 memory figure was recorded. |
+| Integrated GPU | 11% | The other application used 34% on the integrated GPU. NSTU was 23 percentage points lower, a 67.6% relative reduction, using about 32.4% of the comparison application's GPU load. |
+
+Use `tools/production/collect-benchmarks.ps1` for longer runs. Results with 5,
+7, and 10 second snapshot intervals, real clients, network traffic, raw CSV,
+and a documented workload on the target i5-6400 hardware are still required
+before making production resource claims.
+
 ## Recommended network layout
 
 ```text
