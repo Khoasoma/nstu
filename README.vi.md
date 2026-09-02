@@ -132,7 +132,7 @@ matrix về policy quản trị, reboot và triển khai Windows.
 
 ### Kết quả bổ sung được báo cáo trên i5-6400
 
-Chủ dự án cũng báo cáo một lần chạy NSTU gần đúng trên hệ thống Intel Core
+Báo cáo một lần chạy NSTU gần đúng trên hệ thống Intel Core
 i5-6400 mục tiêu. Kết quả không kèm raw sample, thời lượng, số client hoặc mô tả
 workload, vì vậy đây là số liệu sơ bộ chứ chưa phải kết luận chính thức.
 
@@ -379,7 +379,7 @@ thích license permissive; dự án không chấp nhận GPL dependency.
 
 ## Người đóng góp
 
-- **Bùi Hồng Hải Đăng (`yanij`)**: đóng góp ý tưởng, hỗ trợ thiết bị test và
+- **Bùi Hồ Hải Đăng (`yanij`)**: đóng góp ý tưởng, hỗ trợ thiết bị test và
   tham gia xây dựng Project NSTU.
 - **Lê Anh Tuấn (`ssdarealest`)**: chịu trách nhiệm quản lý dự án, hỗ trợ pháp
   lý, xây dựng ý tưởng, quản lý tiến trình và phát triển dự án.
