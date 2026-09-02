@@ -131,7 +131,7 @@ matrix.
 
 ### Reported i5-6400 follow-up
 
-The project owner also reported an approximate NSTU run on the target Intel
+Reported an approximate NSTU run on the target Intel
 Core i5-6400 system. These values did not include raw samples, duration, client
 count, or workload details, so they are preliminary rather than definitive.
 
