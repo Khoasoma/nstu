@@ -401,7 +401,7 @@ remain compatible with permissive licensing; GPL dependencies are not accepted.
 
 ## Contributors
 
-- **Bùi Hồng Hải Đăng (`yanij`)**: project ideation, test-hardware support, and
+- **Bùi Hồ Hải Đăng (`yanji`)**: project ideation, test-hardware support, and
   contributions to building NSTU.
 
 ## License
