@@ -401,8 +401,7 @@ remain compatible with permissive licensing; GPL dependencies are not accepted.
 
 ## Contributors
 
-- **Bùi Hồ Hải Đăng (`yanji`)**: project ideation, test-hardware support, and
-  contributions to building NSTU.
+- **Lê Anh Tuấn (`ssdarealest`)**: Responsible for project management, legal support, conceptualization, progress management, and project development.
 
 ## License
 
