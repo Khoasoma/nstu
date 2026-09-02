@@ -3,6 +3,7 @@ add_library(nstu_video STATIC
     src/desktop_duplication.cpp
     src/hardware_encoder.cpp
     src/recovering_pipeline.cpp
+    src/video_publisher.cpp
 )
 
 target_include_directories(nstu_video PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

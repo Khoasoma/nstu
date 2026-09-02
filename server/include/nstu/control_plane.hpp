@@ -3,6 +3,7 @@
 #include "nstu/client_registry.hpp"
 #include "nstu/iocp_dispatcher.hpp"
 #include "nstu/key_store.hpp"
+#include "nstu/protocol_headers.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -60,6 +61,13 @@ public:
     [[nodiscard]] bool send_chat(std::uint64_t client_id,
                                  std::string_view utf8_message,
                                  std::string* error = nullptr);
+    [[nodiscard]] bool start_remote_control(std::uint64_t client_id,
+                                            std::string* error = nullptr);
+    [[nodiscard]] bool send_remote_input(
+        std::uint64_t client_id, const wire::RemoteInputPacket& packet,
+        std::string* error = nullptr);
+    [[nodiscard]] bool stop_remote_control(std::uint64_t client_id,
+                                           std::string* error = nullptr);
 
     [[nodiscard]] bool running() const noexcept;
     [[nodiscard]] std::uint16_t local_port() const noexcept;

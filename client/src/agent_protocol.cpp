@@ -1,6 +1,7 @@
 #include "nstu/agent_protocol.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <type_traits>
 
@@ -42,7 +43,7 @@ bool read_le(std::span<const std::byte> input, std::size_t& offset, T& value) {
 
 bool valid_type(AgentMessageType type) noexcept {
     return type >= AgentMessageType::lock &&
-           type <= AgentMessageType::keyframe_request;
+           type <= AgentMessageType::remote_end;
 }
 
 bool read_exact(const NamedPipe& pipe, std::span<std::byte> output,
@@ -189,6 +190,36 @@ std::optional<AgentStatus> decode_agent_status(
         return std::nullopt;
     }
     return status;
+}
+
+std::vector<std::byte> encode_remote_input(
+    const wire::RemoteInputPacket& packet) {
+    if ((packet.input_type !=
+             static_cast<std::uint8_t>(wire::RemoteInputType::mouse) &&
+         packet.input_type !=
+             static_cast<std::uint8_t>(wire::RemoteInputType::keyboard)) ||
+        packet.reserved != 0) {
+        return {};
+    }
+    const auto* bytes = reinterpret_cast<const std::byte*>(&packet);
+    return {bytes, bytes + sizeof(packet)};
+}
+
+std::optional<wire::RemoteInputPacket> decode_remote_input(
+    std::span<const std::byte> payload) {
+    if (payload.size() != sizeof(wire::RemoteInputPacket)) {
+        return std::nullopt;
+    }
+    wire::RemoteInputPacket packet{};
+    std::memcpy(&packet, payload.data(), sizeof(packet));
+    if ((packet.input_type !=
+             static_cast<std::uint8_t>(wire::RemoteInputType::mouse) &&
+         packet.input_type !=
+             static_cast<std::uint8_t>(wire::RemoteInputType::keyboard)) ||
+        packet.reserved != 0) {
+        return std::nullopt;
+    }
+    return packet;
 }
 
 } // namespace nstu::client

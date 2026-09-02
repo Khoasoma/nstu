@@ -33,6 +33,7 @@ constexpr int kChatSend = 1003;
 HWND g_chat_window = nullptr;
 HWND g_chat_messages = nullptr;
 HWND g_chat_input = nullptr;
+WNDPROC g_chat_input_original_proc = nullptr;
 HWND g_lock_window = nullptr;
 HWND g_annotation_window = nullptr;
 HWND g_broadcast_window = nullptr;
@@ -43,6 +44,7 @@ std::atomic<std::uint8_t> g_stream_fps = 0;
 std::atomic_bool g_snapshotting = false;
 std::atomic<std::uint16_t> g_snapshot_interval_seconds = 0;
 std::atomic_bool g_viewing_broadcast = false;
+std::atomic_bool g_remote_control_active = false;
 std::mutex g_annotation_mutex;
 std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
@@ -109,6 +111,79 @@ void send_agent_status(nstu::client::NamedPipe& pipe) {
         nullptr);
 }
 
+void stop_remote_control() noexcept {
+    if (g_remote_control_active.exchange(false)) {
+        (void)BlockInput(FALSE);
+    }
+}
+
+bool apply_remote_input(const nstu::wire::RemoteInputPacket& packet) {
+    if (packet.input_type == static_cast<std::uint8_t>(
+                                nstu::wire::RemoteInputType::keyboard)) {
+        INPUT input{};
+        input.type = INPUT_KEYBOARD;
+        input.ki.wVk = packet.virtual_key;
+        input.ki.dwFlags =
+            (packet.flags & static_cast<std::uint8_t>(
+                                nstu::wire::RemoteInputFlags::key_up))
+                ? KEYEVENTF_KEYUP
+                : 0;
+        return SendInput(1, &input, sizeof(input)) == 1;
+    }
+    if (packet.input_type != static_cast<std::uint8_t>(
+                                nstu::wire::RemoteInputType::mouse)) {
+        return false;
+    }
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    const auto normalized = static_cast<std::uint8_t>(
+        nstu::wire::RemoteInputFlags::mouse_normalized);
+    if ((packet.flags & normalized) != 0) {
+        if (packet.x < 0 || packet.x > 65535 || packet.y < 0 ||
+            packet.y > 65535) {
+            return false;
+        }
+        input.mi.dx = packet.x;
+        input.mi.dy = packet.y;
+    } else {
+        const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        const int origin_x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        const int origin_y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        if (width <= 1 || height <= 1 || packet.x < origin_x ||
+            packet.y < origin_y || packet.x >= origin_x + width ||
+            packet.y >= origin_y + height) {
+            return false;
+        }
+        input.mi.dx = static_cast<LONG>(
+            (static_cast<std::int64_t>(packet.x - origin_x) * 65535) /
+            (width - 1));
+        input.mi.dy = static_cast<LONG>(
+            (static_cast<std::int64_t>(packet.y - origin_y) * 65535) /
+            (height - 1));
+    }
+    input.mi.mouseData = packet.mouse_data;
+    input.mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    const auto flags = packet.flags;
+    if ((flags & static_cast<std::uint8_t>(
+                     nstu::wire::RemoteInputFlags::mouse_left_down)) != 0) {
+        input.mi.dwFlags |= MOUSEEVENTF_LEFTDOWN;
+    }
+    if ((flags & static_cast<std::uint8_t>(
+                     nstu::wire::RemoteInputFlags::mouse_left_up)) != 0) {
+        input.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
+    }
+    if ((flags & static_cast<std::uint8_t>(
+                     nstu::wire::RemoteInputFlags::mouse_right_down)) != 0) {
+        input.mi.dwFlags |= MOUSEEVENTF_RIGHTDOWN;
+    }
+    if ((flags & static_cast<std::uint8_t>(
+                     nstu::wire::RemoteInputFlags::mouse_right_up)) != 0) {
+        input.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
+    }
+    return SendInput(1, &input, sizeof(input)) == 1;
+}
+
 void pipe_control_loop(HWND overlay) {
     auto next_snapshot = std::chrono::steady_clock::now();
     while (!g_agent_stopping.load()) {
@@ -153,6 +228,21 @@ void pipe_control_loop(HWND overlay) {
                                      static_cast<WPARAM>(message->type),
                                      reinterpret_cast<LPARAM>(chat.c_str()));
                     }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::remote_start) {
+                    if (BlockInput(TRUE) != FALSE) {
+                        g_remote_control_active = true;
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::remote_input) {
+                    const auto packet = nstu::client::decode_remote_input(
+                        message->payload);
+                    if (packet && g_remote_control_active.load()) {
+                        (void)apply_remote_input(*packet);
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::remote_end) {
+                    stop_remote_control();
                 } else if (message->type ==
                            nstu::client::AgentMessageType::start_snapshots) {
                     const auto interval = nstu::control::decode_snapshot_schedule(
@@ -244,6 +334,7 @@ void pipe_control_loop(HWND overlay) {
                     g_snapshot_interval_seconds.load());
             }
         }
+        stop_remote_control();
     }
 }
 
@@ -257,6 +348,39 @@ void append_chat_line(const wchar_t* message) {
     if (count > 0) {
         SendMessageW(g_chat_messages, LB_SETCURSEL, count - 1, 0);
     }
+}
+
+void submit_chat_message() {
+    if (g_chat_input == nullptr) {
+        return;
+    }
+    wchar_t message_text[512]{};
+    GetWindowTextW(g_chat_input, message_text,
+                   static_cast<int>(std::size(message_text)));
+    if (message_text[0] == L'\0') {
+        return;
+    }
+    wchar_t line[540]{};
+    swprintf_s(line, L"You: %s", message_text);
+    append_chat_line(line);
+    SetWindowTextW(g_chat_input, L"");
+}
+
+LRESULT CALLBACK chat_input_window_proc(HWND control, UINT message,
+                                        WPARAM wparam, LPARAM lparam) {
+    if (message == WM_KEYDOWN && wparam == VK_RETURN) {
+        if (g_chat_window != nullptr) {
+            SendMessageW(g_chat_window, WM_COMMAND,
+                         MAKEWPARAM(kChatSend, BN_CLICKED),
+                         reinterpret_cast<LPARAM>(control));
+        }
+        return 0;
+    }
+    if (g_chat_input_original_proc != nullptr) {
+        return CallWindowProcW(g_chat_input_original_proc, control, message,
+                               wparam, lparam);
+    }
+    return DefWindowProcW(control, message, wparam, lparam);
 }
 
 LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
@@ -275,6 +399,12 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
             8, 240, 360, 26, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatInput)),
             GetModuleHandleW(nullptr), nullptr);
+        if (g_chat_input != nullptr) {
+            g_chat_input_original_proc = reinterpret_cast<WNDPROC>(
+                SetWindowLongPtrW(g_chat_input, GWLP_WNDPROC,
+                                  reinterpret_cast<LONG_PTR>(
+                                      chat_input_window_proc)));
+        }
         CreateWindowExW(
             0, L"BUTTON", L"Send",
             WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
@@ -305,15 +435,7 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
     case WM_COMMAND:
         if (LOWORD(wparam) == kChatSend && HIWORD(wparam) == BN_CLICKED &&
             g_chat_input != nullptr) {
-            wchar_t message_text[512]{};
-            GetWindowTextW(g_chat_input, message_text,
-                           static_cast<int>(std::size(message_text)));
-            if (message_text[0] != L'\0') {
-                wchar_t line[540]{};
-                swprintf_s(line, L"You: %s", message_text);
-                append_chat_line(line);
-                SetWindowTextW(g_chat_input, L"");
-            }
+            submit_chat_message();
             return 0;
         }
         break;
@@ -321,6 +443,12 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
         ShowWindow(window, SW_HIDE);
         return 0;
     case WM_DESTROY:
+        if (g_chat_input != nullptr && g_chat_input_original_proc != nullptr) {
+            SetWindowLongPtrW(
+                g_chat_input, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(g_chat_input_original_proc));
+            g_chat_input_original_proc = nullptr;
+        }
         g_chat_window = nullptr;
         g_chat_messages = nullptr;
         g_chat_input = nullptr;
@@ -439,6 +567,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         ShowWindow(window, SW_HIDE);
         return 0;
     case WM_DESTROY:
+        stop_remote_control();
         PostQuitMessage(0);
         return 0;
     case kTrayMessage:

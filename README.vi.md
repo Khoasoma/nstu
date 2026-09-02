@@ -49,6 +49,12 @@ model và các hạng mục production chưa hoàn thành tại
   tránh tải video liên tục trên switch.
 - Lock/unlock client, vẽ lên màn hình một máy học sinh bằng click-through
   overlay và broadcast snapshot màn hình giáo viên.
+- Có thể bật/tắt điều khiển từ xa cho một client đã chọn. Chuột được gửi từ
+  preview bằng tọa độ chuẩn hóa; ô bàn phím riêng gửi văn bản ASCII khi nhấn
+  Enter.
+- Có thể áp dụng allowlist website IPv4 do quản trị viên nhập qua Windows
+  Filtering Platform (WFP), chặn TCP 80/443 ngoại trừ các địa chỉ được phép.
+  Đây là thao tác opt-in và có nút xóa policy trong setup tool.
 - Giữ nền tảng H.264 multicast/unicast cho chế độ broadcast liên tục tùy chọn
   trong tương lai, không dùng làm đường monitoring mặc định.
 - Hiển thị screen wall responsive của các snapshot mới nhất, cùng telemetry,
@@ -267,6 +273,17 @@ hoặc đóng cửa sổ, server tiếp tục chạy trong notification area c�
 menu tray để mở lại hoặc thoát. Continuous H.264/UDP preview vẫn là hạng mục tùy
 chọn trong tương lai.
 
+Trong `Selected client`, chỉ bấm `Start remote` khi quản trị viên thực sự cần
+điều khiển máy. Preview gửi chuyển động và click chuột trái; ô bàn phím bên
+cạnh gửi văn bản ASCII khi nhấn Enter. Remote control tự dừng khi đổi client,
+client offline, đổi view hoặc server thoát.
+
+Setup tool có panel `Website allowlist (IPv4)` với danh sách địa chỉ phân tách
+bởi dấu phẩy. Nhập danh sách rồi bấm `Apply website allowlist`; bấm
+`Clear website allowlist` để xóa các đối tượng WFP do NSTU sở hữu. WFP làm việc
+với IP đích và port nên quản trị viên phải tự duy trì việc phân giải domain.
+NSTU không giải mã HTTPS và không dùng MITM.
+
 Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
 
 ```powershell
@@ -344,6 +361,9 @@ protected storage. Deep Freeze sẽ hủy mọi state nằm ngoài thawed space 
 - Control session hiện tại dùng mutual HMAC authentication và replay protection.
 - JPEG snapshot và video datagram được xác thực, nhưng nội dung màn hình chưa
   được mã hóa. Không thử nghiệm màn hình nhạy cảm trên LAN không tin cậy.
+- Remote control bị tắt cho đến khi giáo viên bấm `Start remote`; chỉ dùng với
+  client đã enroll trong mạng tin cậy. Website policy hiện chỉ hỗ trợ IPv4 và
+  TCP port 80/443.
 - Automation Authenticode đã có, nhưng artifact nightly vẫn chưa ký; production
   release phải chạy workflow với certificate thật.
 - Review/fuzz độc lập, validation từng edition Deep Freeze, ký bằng certificate

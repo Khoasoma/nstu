@@ -16,6 +16,7 @@ add_library(nstu_common STATIC
     src/screen_snapshot.cpp
     src/secret_store.cpp
     src/video_transport.cpp
+    src/wfp_allowlist.cpp
 )
 
 target_include_directories(nstu_common
@@ -28,5 +29,5 @@ nstu_enable_warnings(nstu_common)
 
 if(WIN32)
     target_link_libraries(nstu_common PUBLIC
-        advapi32 bcrypt crypt32 gdi32 ole32 windowscodecs ws2_32)
+        advapi32 bcrypt crypt32 fwpuclnt gdi32 ole32 windowscodecs ws2_32)
 endif()

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cassert>
+#include <cstring>
 #include <string>
 #include <thread>
 #include <filesystem>
@@ -66,6 +67,26 @@ int main() {
     auto corrupt = status_wire;
     corrupt[0] ^= std::byte{1};
     assert(!nstu::client::decode_agent_message(corrupt).has_value());
+
+    const nstu::wire::RemoteInputPacket remote_input{
+        .input_type = static_cast<std::uint8_t>(nstu::wire::RemoteInputType::mouse),
+        .flags = static_cast<std::uint8_t>(nstu::wire::RemoteInputFlags::mouse_absolute),
+        .x = 640,
+        .y = 360,
+        .virtual_key = 0,
+        .reserved = 0,
+        .mouse_data = 0,
+    };
+    const auto remote_payload = nstu::client::encode_remote_input(remote_input);
+    assert(remote_payload.size() == sizeof(remote_input));
+    const auto decoded_remote =
+        nstu::client::decode_remote_input(remote_payload);
+    assert(decoded_remote.has_value());
+    assert(std::memcmp(&*decoded_remote, &remote_input,
+                       sizeof(remote_input)) == 0);
+    const auto remote_message = nstu::client::encode_agent_message(
+        {nstu::client::AgentMessageType::remote_input, remote_payload});
+    assert(nstu::client::decode_agent_message(remote_message).has_value());
 
     nstu::client::ClientRuntimeConfig runtime;
     runtime.server_address = "127.0.0.1";

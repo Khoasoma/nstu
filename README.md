@@ -48,6 +48,12 @@ its threat model and unfinished production work public in
   avoiding a continuous per-client video load on the classroom switch.
 - Lock or unlock clients, draw on a selected student's screen through a
   click-through overlay, and broadcast periodic teacher-screen snapshots.
+- Explicitly start and stop remote control for one selected client. Mouse
+  movement/clicks are sent from the preview using normalized coordinates, and
+  typed ASCII text can be dispatched from the focused remote-keyboard field.
+- Apply an administrator-managed IPv4 website allowlist through Windows
+  Filtering Platform (WFP), blocking outbound TCP 80/443 except for permitted
+  addresses. The policy is opt-in and can be cleared from the setup tool.
 - Retain H.264 multicast/unicast foundations for a future optional continuous
   broadcast mode without making it the default monitoring path.
 - Show a responsive wall of the latest client snapshots, plus focused
@@ -268,6 +274,18 @@ switches. Minimizing or closing the window keeps the server available in the
 Windows notification area; use the tray menu to reopen it or exit. Continuous
 H.264/UDP preview remains optional future work.
 
+In `Selected client`, use `Start remote` only when an administrator explicitly
+needs input control. The preview forwards mouse movement and left-click events;
+the adjacent keyboard field sends ASCII text when Enter is pressed. Remote
+control is stopped automatically when the selected client changes, goes offline,
+the view changes, or the server exits.
+
+The setup tool's `Website allowlist (IPv4)` panel is also opt-in. Enter
+comma-separated IPv4 addresses, then click `Apply website allowlist`; click
+`Clear website allowlist` to remove only NSTU-owned WFP objects. WFP operates on
+destination IPs and ports, so domain names must be resolved and maintained by
+the administrator. No HTTPS interception or MITM decryption is used.
+
 Vietnamese and dark mode can also be selected at startup:
 
 ```powershell
@@ -365,6 +383,9 @@ after a reboot.
   protection.
 - JPEG snapshots and video datagrams are authenticated, but screen content is
   not encrypted. Do not test real sensitive screens on an untrusted LAN.
+- Remote control is deliberately disabled until the teacher clicks `Start
+  remote`; use it only on enrolled, trusted clients. The WFP website policy is
+  IPv4-only and covers TCP ports 80 and 443.
 - Authenticode automation is available, but nightly artifacts remain unsigned;
   a production release requires the real certificate-backed workflow.
 - Independent review, fuzzing, Deep Freeze edition validation, real certificate

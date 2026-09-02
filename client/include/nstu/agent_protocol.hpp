@@ -2,6 +2,7 @@
 
 #include "nstu/named_pipe.hpp"
 #include "nstu/protocol.hpp"
+#include "nstu/protocol_headers.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -28,6 +29,9 @@ enum class AgentMessageType : std::uint16_t {
     overlay_clear = 13,
     host_snapshot = 14,
     host_broadcast_stop = 15,
+    remote_start = 16,
+    remote_input = 17,
+    remote_end = 18,
 };
 
 struct AgentMessage {
@@ -61,6 +65,11 @@ inline constexpr std::size_t kMaximumAgentPayloadBytes =
 [[nodiscard]] std::vector<std::byte> encode_agent_status(
     const AgentStatus& status);
 [[nodiscard]] std::optional<AgentStatus> decode_agent_status(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_remote_input(
+    const wire::RemoteInputPacket& packet);
+[[nodiscard]] std::optional<wire::RemoteInputPacket> decode_remote_input(
     std::span<const std::byte> payload);
 
 } // namespace nstu::client

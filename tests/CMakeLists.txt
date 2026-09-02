@@ -12,6 +12,12 @@ nstu_enable_warnings(nstu_protocol_tests)
 nstu_enable_test_assertions(nstu_protocol_tests)
 add_test(NAME nstu.protocol COMMAND nstu_protocol_tests)
 
+add_executable(nstu_protocol_headers_tests protocol_headers_tests.cpp)
+target_link_libraries(nstu_protocol_headers_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_protocol_headers_tests)
+nstu_enable_test_assertions(nstu_protocol_headers_tests)
+add_test(NAME nstu.protocol_headers COMMAND nstu_protocol_headers_tests)
+
 add_executable(nstu_packet_loss_tests packet_loss_tests.cpp)
 target_link_libraries(nstu_packet_loss_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_packet_loss_tests)

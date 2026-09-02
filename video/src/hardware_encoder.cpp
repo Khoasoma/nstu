@@ -164,22 +164,33 @@ bool HardwareH264Encoder::initialize(ID3D11Device* device, std::uint32_t width,
 
     Microsoft::WRL::ComPtr<IMFMediaType> output_type;
     Microsoft::WRL::ComPtr<IMFMediaType> input_type;
-    MFCreateMediaType(&output_type);
-    MFCreateMediaType(&input_type);
-    output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
-    output_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-    output_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE, width, height);
-    MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, fps, 1);
-    MFSetAttributeRatio(output_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-
-    input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-    input_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-    input_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, width, height);
-    MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE, fps, 1);
-    MFSetAttributeRatio(input_type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    if (FAILED(MFCreateMediaType(&output_type)) ||
+        FAILED(MFCreateMediaType(&input_type)) ||
+        FAILED(output_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
+        FAILED(output_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264)) ||
+        FAILED(output_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate)) ||
+        FAILED(output_type->SetUINT32(MF_MT_INTERLACE_MODE,
+                                      MFVideoInterlace_Progressive)) ||
+        FAILED(MFSetAttributeSize(output_type.Get(), MF_MT_FRAME_SIZE, width,
+                                  height)) ||
+        FAILED(MFSetAttributeRatio(output_type.Get(), MF_MT_FRAME_RATE, fps,
+                                   1)) ||
+        FAILED(MFSetAttributeRatio(output_type.Get(),
+                                   MF_MT_PIXEL_ASPECT_RATIO, 1, 1)) ||
+        FAILED(input_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video)) ||
+        FAILED(input_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12)) ||
+        FAILED(input_type->SetUINT32(MF_MT_INTERLACE_MODE,
+                                     MFVideoInterlace_Progressive)) ||
+        FAILED(MFSetAttributeSize(input_type.Get(), MF_MT_FRAME_SIZE, width,
+                                  height)) ||
+        FAILED(MFSetAttributeRatio(input_type.Get(), MF_MT_FRAME_RATE, fps,
+                                   1)) ||
+        FAILED(MFSetAttributeRatio(input_type.Get(),
+                                   MF_MT_PIXEL_ASPECT_RATIO, 1, 1))) {
+        set_error(error, "encoder media type construction failed");
+        reset();
+        return false;
+    }
 
     if (FAILED(impl_->transform->SetOutputType(output_id, output_type.Get(), 0)) ||
         FAILED(impl_->transform->SetInputType(input_id, input_type.Get(), 0))) {
@@ -188,8 +199,14 @@ bool HardwareH264Encoder::initialize(ID3D11Device* device, std::uint32_t width,
         return false;
     }
     impl_->fps = fps;
-    impl_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-    impl_->transform->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if (FAILED(impl_->transform->ProcessMessage(
+            MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)) ||
+        FAILED(impl_->transform->ProcessMessage(
+            MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0))) {
+        set_error(error, "encoder stream start failed");
+        reset();
+        return false;
+    }
     return true;
 }
 
@@ -216,8 +233,11 @@ bool HardwareH264Encoder::encode_nv12_texture(
         set_error(error, "DXGI input sample creation failed");
         return false;
     }
-    input_sample->SetSampleTime(timestamp_100ns);
-    input_sample->SetSampleDuration(10'000'000LL / impl_->fps);
+    if (FAILED(input_sample->SetSampleTime(timestamp_100ns)) ||
+        FAILED(input_sample->SetSampleDuration(10'000'000LL / impl_->fps))) {
+        set_error(error, "encoder input timestamp setup failed");
+        return false;
+    }
     if (impl_->asynchronous && impl_->event_generator) {
         while (true) {
             Microsoft::WRL::ComPtr<IMFMediaEvent> event;
@@ -248,11 +268,17 @@ bool HardwareH264Encoder::encode_nv12_texture(
     Microsoft::WRL::ComPtr<IMFSample> output_sample;
     if ((stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
         Microsoft::WRL::ComPtr<IMFMediaBuffer> output_buffer;
-        MFCreateSample(&output_sample);
+        if (FAILED(MFCreateSample(&output_sample))) {
+            set_error(error, "encoder output sample creation failed");
+            return false;
+        }
         const DWORD buffer_size =
             std::max<DWORD>(stream_info.cbSize, 1024u * 1024u);
-        MFCreateMemoryBuffer(buffer_size, &output_buffer);
-        output_sample->AddBuffer(output_buffer.Get());
+        if (FAILED(MFCreateMemoryBuffer(buffer_size, &output_buffer)) ||
+            FAILED(output_sample->AddBuffer(output_buffer.Get()))) {
+            set_error(error, "encoder output buffer creation failed");
+            return false;
+        }
     }
     if (impl_->asynchronous && impl_->event_generator) {
         while (true) {

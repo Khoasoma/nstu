@@ -741,6 +741,35 @@ bool ServerControlPlane::send_chat(std::uint64_t client_id,
     return send_command(client_id, protocol::CommandType::chat, payload, error);
 }
 
+bool ServerControlPlane::start_remote_control(std::uint64_t client_id,
+                                              std::string* error) {
+    return send_command(client_id, protocol::CommandType::remote_start, {},
+                        error);
+}
+
+bool ServerControlPlane::send_remote_input(
+    std::uint64_t client_id, const wire::RemoteInputPacket& packet,
+    std::string* error) {
+    if ((packet.input_type !=
+             static_cast<std::uint8_t>(wire::RemoteInputType::mouse) &&
+         packet.input_type !=
+             static_cast<std::uint8_t>(wire::RemoteInputType::keyboard)) ||
+        packet.reserved != 0) {
+        set_error(error, "invalid remote input packet");
+        return false;
+    }
+    std::vector<std::byte> payload(sizeof(packet));
+    std::memcpy(payload.data(), &packet, sizeof(packet));
+    return send_command(client_id, protocol::CommandType::remote_input,
+                        payload, error);
+}
+
+bool ServerControlPlane::stop_remote_control(std::uint64_t client_id,
+                                             std::string* error) {
+    return send_command(client_id, protocol::CommandType::remote_end, {},
+                        error);
+}
+
 bool ServerControlPlane::running() const noexcept {
     return impl_->dispatcher_.running();
 }

@@ -4,6 +4,7 @@
 #include "nstu/key_store.hpp"
 #include "nstu/screen_snapshot.hpp"
 #include "nstu/secret_store.hpp"
+#include "nstu/protocol_headers.h"
 
 #include <d3d11.h>
 #include <dxgi.h>
@@ -88,6 +89,11 @@ struct DashboardState {
     bool dark_mode = false;
     bool show_offline = true;
     bool broadcast_enabled = false;
+    bool remote_control_enabled = false;
+    std::uint64_t remote_control_client_id = 0;
+    bool remote_pointer_down = false;
+    ImVec2 remote_pointer_last{};
+    std::array<char, 64> remote_keyboard_input{};
     bool annotation_enabled = false;
     bool annotation_dragging = false;
     ImVec2 previous_annotation_point{};
@@ -968,6 +974,59 @@ void draw_selected_client(
         std::max(220.0f, ImGui::GetContentRegionAvail().y - 210.0f));
     const auto surface = draw_screen_surface(
         *selected_client, preview_height, "##focus-screen", state);
+    if (state.remote_control_enabled && surface.has_frame) {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        const bool inside = mouse.x >= surface.image_min.x &&
+                            mouse.x <= surface.image_max.x &&
+                            mouse.y >= surface.image_min.y &&
+                            mouse.y <= surface.image_max.y;
+        const auto send_mouse = [&](ImVec2 point, std::uint8_t flags,
+                                    bool require_inside) {
+            if (require_inside && !inside) {
+                return;
+            }
+            const float x_ratio = std::clamp(
+                (point.x - surface.image_min.x) /
+                    (surface.image_max.x - surface.image_min.x),
+                0.0f, 1.0f);
+            const float y_ratio = std::clamp(
+                (point.y - surface.image_min.y) /
+                    (surface.image_max.y - surface.image_min.y),
+                0.0f, 1.0f);
+            nstu::wire::RemoteInputPacket packet{};
+            packet.input_type = static_cast<std::uint8_t>(
+                nstu::wire::RemoteInputType::mouse);
+            packet.flags = flags | static_cast<std::uint8_t>(
+                nstu::wire::RemoteInputFlags::mouse_absolute) |
+                static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::mouse_normalized);
+            packet.x = static_cast<std::int32_t>(x_ratio * 65535.0f);
+            packet.y = static_cast<std::int32_t>(y_ratio * 65535.0f);
+            std::string ignored_error;
+            (void)control_plane.send_remote_input(
+                selected_client->id, packet, &ignored_error);
+        };
+        if (inside && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            state.remote_pointer_down = true;
+            state.remote_pointer_last = mouse;
+            send_mouse(mouse, static_cast<std::uint8_t>(
+                nstu::wire::RemoteInputFlags::mouse_left_down), true);
+        }
+        if (state.remote_pointer_down && inside &&
+            ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            state.remote_pointer_last = mouse;
+            send_mouse(mouse, 0, true);
+        }
+        if (state.remote_pointer_down &&
+            ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            send_mouse(inside ? mouse : state.remote_pointer_last,
+                       static_cast<std::uint8_t>(
+                           nstu::wire::RemoteInputFlags::mouse_left_up), false);
+            state.remote_pointer_down = false;
+        }
+    } else {
+        state.remote_pointer_down = false;
+    }
     if (state.annotation_enabled && surface.has_frame) {
         const ImVec2 mouse = ImGui::GetIO().MousePos;
         const bool inside = mouse.x >= surface.image_min.x &&
@@ -1051,6 +1110,74 @@ void draw_selected_client(
         ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(4);
+    ImGui::SameLine();
+    const bool remote_available = selected_client->status !=
+        nstu::server::ClientStatus::offline;
+    if (ImGui::Button(state.remote_control_enabled
+                          ? tr(state, "Stop remote", "Dừng điều khiển")
+                          : tr(state, "Start remote", "Bắt đầu điều khiển"))) {
+        std::string error;
+        if (state.remote_control_enabled) {
+            const bool ok = control_plane.stop_remote_control(
+                selected_client->id, &error);
+            state.control_status = ok
+                ? tr(state, "Remote control stopped.",
+                     "Đã dừng điều khiển từ xa.")
+                : error;
+            state.remote_control_enabled = false;
+            state.remote_control_client_id = 0;
+            state.remote_pointer_down = false;
+        } else if (remote_available) {
+            const bool ok = control_plane.start_remote_control(
+                selected_client->id, &error);
+            state.control_status = ok
+                ? tr(state, "Remote control enabled.",
+                     "Đã bật điều khiển từ xa.")
+                : error;
+            state.remote_control_enabled = ok;
+            state.remote_control_client_id = ok ? selected_client->id : 0;
+        }
+        ImGui::OpenPopup("control-status");
+    }
+    if (!remote_available && state.remote_control_enabled) {
+        (void)control_plane.stop_remote_control(selected_client->id, nullptr);
+        state.remote_control_enabled = false;
+        state.remote_control_client_id = 0;
+        state.remote_pointer_down = false;
+    }
+    if (state.remote_control_enabled) {
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(220.0f);
+        const bool submit_key = ImGui::InputText(
+            "##remote-key", state.remote_keyboard_input.data(),
+            state.remote_keyboard_input.size(),
+            ImGuiInputTextFlags_EnterReturnsTrue);
+        if (submit_key && state.remote_keyboard_input[0] != '\0') {
+            for (const unsigned char character : std::string_view(
+                     state.remote_keyboard_input.data())) {
+                const SHORT key = VkKeyScanA(character);
+                if (key == -1) {
+                    continue;
+                }
+                nstu::wire::RemoteInputPacket down{};
+                down.input_type = static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputType::keyboard);
+                down.virtual_key = LOBYTE(key);
+                nstu::wire::RemoteInputPacket up = down;
+                up.flags = static_cast<std::uint8_t>(
+                    nstu::wire::RemoteInputFlags::key_up);
+                std::string ignored_error;
+                (void)control_plane.send_remote_input(
+                    selected_client->id, down, &ignored_error);
+                (void)control_plane.send_remote_input(
+                    selected_client->id, up, &ignored_error);
+            }
+            state.remote_keyboard_input[0] = '\0';
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Type ASCII text and press Enter to send it");
+        }
+    }
     ImGui::SameLine();
     if (ImGui::Button(state.annotation_enabled
                           ? tr(state, "Finish drawing", "Kết thúc vẽ")
@@ -1751,6 +1878,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         const nstu::server::ClientRecord* selected =
             selected_client == clients.end() ? nullptr : &*selected_client;
 
+        if (dashboard.remote_control_enabled &&
+            (selected == nullptr || dashboard.view != DashboardView::selected_client ||
+             dashboard.remote_control_client_id != selected->id)) {
+            (void)control_plane.stop_remote_control(
+                dashboard.remote_control_client_id, nullptr);
+            dashboard.remote_control_enabled = false;
+            dashboard.remote_control_client_id = 0;
+            dashboard.remote_pointer_down = false;
+        }
+
         draw_dashboard_shell(clients, selected, dashboard, control_plane);
         ImGui::End();
 
@@ -1765,6 +1902,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         g_swap_chain->Present(1, 0);
     }
 
+    if (dashboard.remote_control_enabled) {
+        (void)control_plane.stop_remote_control(
+            dashboard.remote_control_client_id, nullptr);
+    }
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);
     g_snapshot_textures.clear();

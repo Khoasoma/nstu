@@ -50,6 +50,9 @@ enum class CommandType : std::uint16_t {
     overlay_clear = 26,
     host_snapshot = 27,
     host_broadcast_stop = 28,
+    remote_start = 29,
+    remote_input = 30,
+    remote_end = 31,
 };
 
 enum class ConnectionRole : std::uint8_t {

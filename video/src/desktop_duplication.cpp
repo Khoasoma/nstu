@@ -27,7 +27,10 @@ bool DesktopDuplicator::initialize(std::uint32_t adapter_index,
         return false;
     }
     Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
-    if (factory->EnumAdapters1(adapter_index, &adapter) == DXGI_ERROR_NOT_FOUND) {
+    const HRESULT adapter_result =
+        factory->EnumAdapters1(adapter_index, &adapter);
+    if (adapter_result == DXGI_ERROR_NOT_FOUND || FAILED(adapter_result) ||
+        adapter == nullptr) {
         set_error(error, "DXGI adapter not found");
         return false;
     }
@@ -48,7 +51,9 @@ bool DesktopDuplicator::initialize(std::uint32_t adapter_index,
     }
 
     Microsoft::WRL::ComPtr<IDXGIOutput> output;
-    if (adapter->EnumOutputs(output_index, &output) == DXGI_ERROR_NOT_FOUND) {
+    const HRESULT output_result = adapter->EnumOutputs(output_index, &output);
+    if (output_result == DXGI_ERROR_NOT_FOUND || FAILED(output_result) ||
+        output == nullptr) {
         set_error(error, "DXGI output not found");
         reset();
         return false;
@@ -83,8 +88,13 @@ bool DesktopDuplicator::acquire_next_frame(std::uint32_t timeout_ms,
         reset();
         return false;
     }
-    if (FAILED(result) || FAILED(resource.As(&texture_))) {
+    if (FAILED(result)) {
         set_error(error, "AcquireNextFrame failed");
+        return false;
+    }
+    if (FAILED(resource.As(&texture_))) {
+        duplication_->ReleaseFrame();
+        set_error(error, "captured resource is not a D3D11 texture");
         return false;
     }
     frame_acquired_ = true;

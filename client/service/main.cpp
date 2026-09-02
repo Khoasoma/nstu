@@ -266,6 +266,18 @@ void handle_server_command(
         queue_agent_message(
             {nstu::client::AgentMessageType::host_broadcast_stop, {}});
         break;
+    case nstu::protocol::CommandType::remote_start:
+        queue_agent_message({nstu::client::AgentMessageType::remote_start, {}});
+        break;
+    case nstu::protocol::CommandType::remote_input:
+        if (nstu::client::decode_remote_input(command.payload)) {
+            queue_agent_message({nstu::client::AgentMessageType::remote_input,
+                                 command.payload});
+        }
+        break;
+    case nstu::protocol::CommandType::remote_end:
+        queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
+        break;
     default:
         break;
     }
@@ -289,6 +301,7 @@ void remote_control_loop(std::stop_token stop_token) {
                 config, stop_token, current_status, handle_server_command,
                 pop_outbound_message,
                 &ignored_error);
+            queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
             nstu::client::clear_client_runtime_config(config);
         }
         for (int tick = 0; tick < 50 && !stop_token.stop_requested(); ++tick) {
@@ -376,6 +389,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     report_status(SERVICE_RUNNING);
     WaitForSingleObject(g_stop_event, INFINITE);
     g_stop_requested = true;
+    queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
     control_thread.request_stop();
     wake_pipe_listener();
     if (pipe_thread.joinable()) {

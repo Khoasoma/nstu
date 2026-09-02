@@ -113,6 +113,32 @@ int main() {
            nstu::protocol::CommandType::overlay_stroke);
     assert(nstu::control::decode_overlay_stroke(overlay->payload).has_value());
 
+    assert(control_plane.start_remote_control(registry_id, &error));
+    const auto remote_start = channel.receive(&error);
+    assert(remote_start.has_value());
+    assert(remote_start->envelope.type ==
+           nstu::protocol::CommandType::remote_start);
+    const nstu::wire::RemoteInputPacket remote_input{
+        .input_type = static_cast<std::uint8_t>(nstu::wire::RemoteInputType::keyboard),
+        .flags = 0,
+        .x = 0,
+        .y = 0,
+        .virtual_key = 0x74,
+        .reserved = 0,
+        .mouse_data = 0,
+    };
+    assert(control_plane.send_remote_input(registry_id, remote_input, &error));
+    const auto remote_event = channel.receive(&error);
+    assert(remote_event.has_value());
+    assert(remote_event->envelope.type ==
+           nstu::protocol::CommandType::remote_input);
+    assert(remote_event->payload.size() == sizeof(remote_input));
+    assert(control_plane.stop_remote_control(registry_id, &error));
+    const auto remote_end = channel.receive(&error);
+    assert(remote_end.has_value());
+    assert(remote_end->envelope.type ==
+           nstu::protocol::CommandType::remote_end);
+
     nstu::control::SnapshotFrame host_frame;
     host_frame.width = 320;
     host_frame.height = 180;
