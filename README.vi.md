@@ -80,6 +80,50 @@ cho đến khi mục tiêu 8 GB vượt qua kiểm thử phần cứng dài hạ
 530 là baseline cho hardware acceleration, không phải cam kết hoạt động với mọi
 phiên bản driver.
 
+## Cờ build và setup
+
+Preset Windows có cấu hình Debug và Release. Debug giữ symbol và build test;
+Release là cấu hình pre-release dùng để đóng gói.
+
+```powershell
+cmake --preset windows-debug
+cmake --build --preset windows-debug
+ctest --preset windows-debug
+
+cmake -S . -B build-release -G "MinGW Makefiles" `
+  -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON `
+  -DNSTU_BUILD_CLIENT=ON -DNSTU_BUILD_SERVER=ON `
+  -DNSTU_BUILD_SETUP=ON -DNSTU_BUILD_VIDEO=ON -DNSTU_BUILD_TESTS=ON
+cmake --build build-release --parallel 4
+```
+
+| Cờ | Mặc định | Mục đích |
+| --- | --- | --- |
+| `CMAKE_BUILD_TYPE=Debug\|Release` | tùy generator | Chọn symbol debug hoặc binary release tối ưu |
+| `NSTU_BUILD_CLIENT=ON\|OFF` | `ON` | Build `nstu-service`, `nstu-agent` và tool provision |
+| `NSTU_BUILD_SERVER=ON\|OFF` | `ON` | Build server và giao diện giáo viên |
+| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` trên Windows | Build bootstrapper và kiểm tra phần cứng/policy |
+| `NSTU_BUILD_VIDEO=ON\|OFF` | `ON` | Build DXGI, Media Foundation và video transport |
+| `NSTU_BUILD_TESTS=ON\|OFF` | `ON` | Build các bài test unit/integration |
+| `NSTU_SERVER_USE_IMGUI=ON\|OFF` | `ON` | Bật/tắt executable UI Dear ImGui |
+| `NSTU_ENABLE_WERROR=ON\|OFF` | `OFF` | Coi warning là error; nên bật khi kiểm tra release |
+| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Bật target đóng gói CPack/NSIS |
+
+Để chỉ build setup tool cho kỹ thuật viên:
+
+```powershell
+cmake -S . -B build-setup -G "MinGW Makefiles" `
+  -DCMAKE_BUILD_TYPE=Release -DNSTU_BUILD_SETUP=ON `
+  -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF `
+  -DNSTU_BUILD_VIDEO=OFF -DNSTU_BUILD_TESTS=OFF `
+  -DNSTU_ENABLE_WERROR=ON
+cmake --build build-setup --target nstu-setup
+```
+
+Server nhận các cờ runtime `--language=en`, `--language=vi` và `--dark`.
+Trong giao diện, Language, Appearance và Screen refresh nằm trong phần
+`Settings`; Screen refresh là chu kỳ snapshot, giới hạn từ 5 đến 10 giây.
+
 ## Benchmark tài nguyên cục bộ
 
 Các số liệu dưới đây chỉ là phép đo tham khảo trên máy phát triển, không thay
@@ -261,6 +305,11 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
+Server không được đăng ký thành Windows service và mặc định không tự chạy khi
+Windows khởi động; kỹ thuật viên mở thủ công hoặc tạo shortcut/task do trường
+quản lý trên máy giáo viên. `nstu-setup.exe` cũng chỉ chạy thủ công bằng quyền
+Administrator khi máy đang ở trạng thái thawed.
+
 Dashboard không tự chèn dữ liệu demo. Registry client khởi động ở trạng thái
 trống và chỉ hiển thị record do runtime registry cung cấp. Giáo viên có thể
 chuyển giữa `Room screens`, hiển thị toàn bộ client phù hợp trong screen wall
@@ -272,6 +321,9 @@ hạn. Dashboard có nút chuyển English/Tiếng Việt và chế độ sáng/
 hoặc đóng cửa sổ, server tiếp tục chạy trong notification area của Windows; dùng
 menu tray để mở lại hoặc thoát. Continuous H.264/UDP preview vẫn là hạng mục tùy
 chọn trong tương lai.
+
+Các lựa chọn Language, Appearance và Screen refresh được gom trong phần
+`Settings` trên thanh điều hướng. Screen refresh là chu kỳ snapshot 5-10 giây.
 
 Trong `Selected client`, chỉ bấm `Start remote` khi quản trị viên thực sự cần
 điều khiển máy. Preview gửi chuyển động và click chuột trái; ô bàn phím bên
@@ -303,6 +355,10 @@ Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
    ```powershell
    Get-Service nstu-service
    ```
+
+Thành phần tự khởi động là client service: installer đăng ký service với
+`start= auto`; lần restart bắt buộc sẽ kích hoạt service, sau đó service mở
+`nstu-agent.exe` trong user session đã đăng nhập.
 
 Để gỡ client, dùng **Installed apps** của Windows hoặc NSTU uninstaller. Trình
 gỡ cài đặt sẽ dừng agent, xóa service, xóa file package và yêu cầu restart thêm

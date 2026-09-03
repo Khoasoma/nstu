@@ -79,6 +79,54 @@ until the 8 GB target has passed long-duration hardware testing. Intel HD
 Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
 all driver versions.
 
+## Build And Setup Flags
+
+The Windows presets build either a Debug or Release configuration. Debug keeps
+symbols and enables the default test targets; Release is the pre-release
+configuration used for packaging.
+
+```powershell
+cmake --preset windows-debug
+cmake --build --preset windows-debug
+ctest --preset windows-debug
+
+cmake -S . -B build-release -G "MinGW Makefiles" `
+  -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON `
+  -DNSTU_BUILD_CLIENT=ON -DNSTU_BUILD_SERVER=ON `
+  -DNSTU_BUILD_SETUP=ON -DNSTU_BUILD_VIDEO=ON -DNSTU_BUILD_TESTS=ON
+cmake --build build-release --parallel 4
+```
+
+The main CMake switches are:
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `CMAKE_BUILD_TYPE=Debug\|Release` | generator-dependent | Select debug symbols or optimized release binaries |
+| `NSTU_BUILD_CLIENT=ON\|OFF` | `ON` | Build `nstu-service`, `nstu-agent`, and provisioning tools |
+| `NSTU_BUILD_SERVER=ON\|OFF` | `ON` | Build the teacher server and its UI |
+| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` on Windows | Build the administrator bootstrapper and hardware/policy checks |
+| `NSTU_BUILD_VIDEO=ON\|OFF` | `ON` | Build DXGI, Media Foundation, and video transport components |
+| `NSTU_BUILD_TESTS=ON\|OFF` | `ON` | Build the unit/integration test executables |
+| `NSTU_SERVER_USE_IMGUI=ON\|OFF` | `ON` | Enable or disable the Dear ImGui server executable |
+| `NSTU_ENABLE_WERROR=ON\|OFF` | `OFF` | Treat compiler warnings as errors; recommended for release validation |
+| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Enable CPack/NSIS packaging targets |
+
+For technician setup validation without building the client or server:
+
+```powershell
+cmake -S . -B build-setup -G "MinGW Makefiles" `
+  -DCMAKE_BUILD_TYPE=Release -DNSTU_BUILD_SETUP=ON `
+  -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF `
+  -DNSTU_BUILD_VIDEO=OFF -DNSTU_BUILD_TESTS=OFF `
+  -DNSTU_ENABLE_WERROR=ON
+cmake --build build-setup --target nstu-setup
+```
+
+The server runtime accepts `--language=en`, `--language=vi`, and `--dark`.
+These select the initial language and theme; the Language, Appearance, and
+Screen refresh controls are also available from the dashboard `Settings`
+section. Screen refresh is the bounded snapshot interval, from 5 to 10 seconds.
+
 ## Local resource benchmark
 
 The following measurements are an indicative developer-machine check, not the
@@ -261,6 +309,12 @@ Get-FileHash .\nstu-client-*.exe -Algorithm SHA256
    & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
    ```
 
+The server executable is not registered as a Windows service and does not
+launch automatically by default; technicians start it manually or create an
+organization-managed shortcut/task for the teacher workstation. The
+`nstu-setup.exe` bootstrapper is also manual-only and should be run by an
+administrator while the machine is thawed.
+
 The dashboard does not inject demonstration records. It starts with an empty
 client registry and displays only records supplied by the runtime registry.
 Teachers can switch between `Room screens`, which presents every visible client
@@ -306,6 +360,11 @@ Vietnamese and dark mode can also be selected at startup:
    ```powershell
    Get-Service nstu-service
    ```
+
+The client service is the component that starts automatically. The installer
+registers it with Windows `start= auto`; the required restart activates the
+service, and the service launches the interactive agent in the logged-on user
+session.
 
 Use Windows **Installed apps** or the NSTU uninstaller to remove the client.
 The uninstaller stops the agent, deletes the service, removes package files,

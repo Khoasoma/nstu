@@ -1301,33 +1301,54 @@ bool draw_segment_option(const char* label, bool selected, float width) {
 }
 
 void draw_preferences(DashboardState& state) {
-    constexpr float preference_width = 242.0f;
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - preference_width);
+    constexpr float settings_width = 108.0f;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - settings_width);
+    if (ImGui::Button(tr(state, "Settings", "Cài đặt"),
+                      {settings_width, 28.0f})) {
+        ImGui::OpenPopup("settings-popup");
+    }
+    if (!ImGui::BeginPopup("settings-popup")) {
+        return;
+    }
+    ImGui::TextUnformatted(tr(state, "Settings", "Cài đặt"));
+    ImGui::Separator();
+    ImGui::TextDisabled("%s", tr(state, "Language", "Ngôn ngữ"));
     if (draw_segment_option("EN", state.language == Language::english,
-                            38.0f)) {
+                            42.0f)) {
         state.language = Language::english;
         g_language = state.language;
         state.control_status.clear();
     }
     ImGui::SameLine();
     if (draw_segment_option("VI", state.language == Language::vietnamese,
-                            38.0f)) {
+                            42.0f)) {
         state.language = Language::vietnamese;
         g_language = state.language;
         state.control_status.clear();
     }
-    ImGui::SameLine();
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", tr(state, "Appearance", "Giao diện"));
     if (draw_segment_option(tr(state, "Light", "Sáng"), !state.dark_mode,
-                            64.0f)) {
+                            68.0f)) {
         state.dark_mode = false;
         apply_dashboard_style(false);
     }
     ImGui::SameLine();
     if (draw_segment_option(tr(state, "Dark", "Tối"), state.dark_mode,
-                            64.0f)) {
+                            68.0f)) {
         state.dark_mode = true;
         apply_dashboard_style(true);
     }
+    ImGui::Spacing();
+    ImGui::TextDisabled("%s", tr(state, "Screen refresh", "Chu kỳ làm mới"));
+    ImGui::SetNextItemWidth(184.0f);
+    ImGui::SliderInt("##settings-refresh", &state.snapshot_interval_seconds,
+                     kMinimumSnapshotInterval, kMaximumSnapshotInterval,
+                     tr(state, "%d seconds", "%d giây"));
+    ImGui::TextWrapped("%s", tr(state,
+        "Snapshot commands use this interval for room monitoring and teacher broadcast.",
+        "Chu kỳ này được dùng cho snapshot phòng máy và phát màn hình giáo viên."));
+    ImGui::EndPopup();
 }
 
 void set_room_snapshots(
@@ -1684,24 +1705,11 @@ void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
     const char* show_offline_label =
         tr(state, "Show offline", "Hiện ngoại tuyến");
     const float controls_width =
-        ImGui::CalcTextSize(show_offline_label).x + 190.0f;
+        ImGui::CalcTextSize(show_offline_label).x + 72.0f;
     ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 8.0f,
                              ImGui::GetContentRegionMax().x - controls_width));
     ImGui::Checkbox(show_offline_label, &state.show_offline);
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", tr(state, "Refresh", "Chu kỳ"));
-    ImGui::SameLine();
-    if (ImGui::SmallButton("-##interval")) {
-        state.snapshot_interval_seconds = std::max(
-            kMinimumSnapshotInterval, state.snapshot_interval_seconds - 1);
-    }
-    ImGui::SameLine();
-    ImGui::Text("%d s", state.snapshot_interval_seconds);
-    ImGui::SameLine();
-    if (ImGui::SmallButton("+##interval")) {
-        state.snapshot_interval_seconds = std::min(
-            kMaximumSnapshotInterval, state.snapshot_interval_seconds + 1);
-    }
+    /* Refresh interval is configured from Settings. */
     ImGui::EndChild();
 }
 

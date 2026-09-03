@@ -116,10 +116,12 @@ Release dùng `windows-release` thay cho `windows-debug`.
 
 - `NSTU_BUILD_CLIENT=ON|OFF`: build service và agent client.
 - `NSTU_BUILD_SERVER=ON|OFF`: build server UI.
+- `NSTU_BUILD_SETUP=ON|OFF`: build administrator bootstrapper trên Windows.
 - `NSTU_BUILD_VIDEO=ON|OFF`: build DXGI/Media Foundation trên Windows.
 - `NSTU_BUILD_TESTS=ON|OFF`: build test suite.
 - `NSTU_SERVER_USE_IMGUI=ON|OFF`: bật/tắt server UI Dear ImGui.
 - `NSTU_ENABLE_WERROR=ON|OFF`: coi warning là error.
+- `NSTU_ENABLE_PACKAGING=ON|OFF`: bật/tắt target CPack/NSIS.
 
 Ví dụ chỉ build core protocol/test:
 
