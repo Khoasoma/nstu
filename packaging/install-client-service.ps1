@@ -59,3 +59,4 @@ try {
 }
 
 Write-Host "NSTU client service registered. Restart Windows to activate it."
+Write-Host "The service will not be started by this script; restart Windows before using the client."

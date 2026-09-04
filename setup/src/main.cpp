@@ -343,7 +343,7 @@ const char* target_name(SetupTarget target) {
     switch (target) {
     case SetupTarget::client: return "Client setup";
     case SetupTarget::server: return "Server setup";
-    case SetupTarget::both: return "Client + Server setup";
+    case SetupTarget::both: return "Client + Server audit";
     default: return "Choose setup target";
     }
 }
@@ -475,7 +475,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int show) {
                 setup_target = SetupTarget::server;
             }
             ImGui::SameLine();
-            if (ImGui::Button("Set up Both", {180.0f, 42.0f})) {
+            if (ImGui::Button("Audit Both Roles", {180.0f, 42.0f})) {
                 setup_target = SetupTarget::both;
             }
             ImGui::End();

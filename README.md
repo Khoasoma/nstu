@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -52,6 +52,19 @@ commercial purposes, as long as the copyright and license notice is retained.
 Open source does not automatically make software secure. NSTU therefore keeps
 its threat model and unfinished production work public in
 [SECURITY.md](docs/SECURITY.md) and [ROADMAP.md](docs/ROADMAP.md).
+
+## Documentation map
+
+- [Setup guide](docs/SETUP_GUIDE.md): installer contents, `nstu-setup.exe`,
+  enrollment scripts, role targets, and runtime/build flags.
+- [Architecture](docs/ARCHITECTURE.md): process model, client/server data
+  paths, video pipeline, control channel, and known limitations.
+- [Security](docs/SECURITY.md): authentication, enrollment, secrets, and
+  deployment boundaries.
+- [Development guide](docs/DEVELOPMENT.md): build options, tests, packaging,
+  and CI workflow.
+- [Production validation](docs/PRODUCTION_VALIDATION.md): hardware, network,
+  Deep Freeze, and long-duration test checklist.
 
 ## Intended capabilities
 
@@ -368,6 +381,11 @@ organization-managed shortcut/task for the teacher workstation. The
 `nstu-setup.exe` bootstrapper is also manual-only and should be run by an
 administrator while the machine is thawed.
 
+To remove the server, use Windows **Installed apps** or the server uninstaller.
+It force-terminates the installed `nstu-server.exe`, removes server/setup files,
+and schedules any locked files for deletion at the next Windows boot. Complete
+the requested restart before installing the client role on that machine.
+
 The dashboard does not inject demonstration records. It starts with an empty
 client registry and displays only records supplied by the runtime registry.
 Teachers can switch between `Room screens`, which presents every visible client
@@ -392,6 +410,18 @@ comma-separated IPv4 addresses, then click `Apply website allowlist`; click
 `Clear website allowlist` to remove only NSTU-owned WFP objects. WFP operates on
 destination IPs and ports, so domain names must be resolved and maintained by
 the administrator. No HTTPS interception or MITM decryption is used.
+
+For the complete setup-tool feature list, installer contents, script locations,
+and the distinction between the CMake build option `NSTU_BUILD_SETUP` and
+runtime arguments, see the [Setup Guide](docs/SETUP_GUIDE.md). In particular,
+there is no `--setup` runtime flag: run `nstu-setup.exe` directly, optionally
+with `--target=client|server|both` and `--graphics-debug`.
+
+Server and client are mutually exclusive installation roles on one Windows
+machine. The full installers check for the other role before copying files and
+abort with an explanatory message if it is already installed. There is no
+supported `Both` installer deployment; use separate machines for the teacher
+server and student clients.
 
 Vietnamese and dark mode can also be selected at startup:
 
@@ -420,9 +450,11 @@ service, and the service launches the interactive agent in the logged-on user
 session.
 
 Use Windows **Installed apps** or the NSTU uninstaller to remove the client.
-The uninstaller stops the agent, deletes the service, removes package files,
-and requires another restart. Direct manual service removal is not a supported
-deployment workflow.
+The uninstaller force-terminates NSTU-owned agent/service processes, deletes the
+service, removes package files, and schedules any locked files for deletion at
+the next Windows boot. The installer marks the operation as requiring a
+restart; complete that restart before installing the opposite role. Direct
+manual service removal is not a supported deployment workflow.
 
 ## Connecting a computer room
 
@@ -553,6 +585,7 @@ remain compatible with permissive licensing; GPL dependencies are not accepted.
 ## Contributors
 
 - **Lê Anh Tuấn (`ssdarealest`)**: Responsible for project management, legal support, conceptualization, progress management, and project development.
+- **Bùi Hồ Hải Đăng (`yanji`)**: Contributor of ideas, participant in building NSTU, provider of testing equipment, and quality assurance reviewer for the final output.
 
 ## License
 

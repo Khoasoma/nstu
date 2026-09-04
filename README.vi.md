@@ -4,7 +4,7 @@
 
 # Project NSTU
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md)
+[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
 [![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
@@ -53,6 +53,19 @@ miễn là giữ lại thông báo bản quyền và nội dung giấy phép.
 Mã nguồn mở không tự động đồng nghĩa với an toàn. Vì vậy NSTU công khai threat
 model và các hạng mục production chưa hoàn thành tại
 [SECURITY.md](docs/SECURITY.md) và [ROADMAP.md](docs/ROADMAP.md).
+
+## Bản đồ tài liệu
+
+- [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md): nội dung installer,
+  `nstu-setup.exe`, script enrollment, target và cờ build/runtime.
+- [Kiến trúc](docs/ARCHITECTURE.md): process model, đường dữ liệu client/server,
+  video pipeline, control channel và giới hạn hiện tại.
+- [Bảo mật](docs/SECURITY.md): authentication, enrollment, secret và ranh giới
+  triển khai.
+- [Development guide](docs/DEVELOPMENT.md): tùy chọn build, test, đóng gói và
+  quy trình CI.
+- [Production validation](docs/PRODUCTION_VALIDATION.md): checklist kiểm thử
+  phần cứng, mạng, Deep Freeze và thời gian dài.
 
 ## Năng lực hướng đến
 
@@ -361,6 +374,11 @@ Windows khởi động; kỹ thuật viên mở thủ công hoặc tạo shortcu
 quản lý trên máy giáo viên. `nstu-setup.exe` cũng chỉ chạy thủ công bằng quyền
 Administrator khi máy đang ở trạng thái thawed.
 
+Để gỡ server, dùng **Installed apps** của Windows hoặc server uninstaller.
+Trình gỡ sẽ buộc dừng `nstu-server.exe` đã cài, xóa file server/setup và lên
+lịch xóa các file bị khóa ở lần Windows boot tiếp theo. Hãy hoàn tất restart
+được yêu cầu trước khi cài vai trò client trên máy đó.
+
 Dashboard không tự chèn dữ liệu demo. Registry client khởi động ở trạng thái
 trống và chỉ hiển thị record do runtime registry cung cấp. Giáo viên có thể
 chuyển giữa `Room screens`, hiển thị toàn bộ client phù hợp trong screen wall
@@ -387,6 +405,17 @@ bởi dấu phẩy. Nhập danh sách rồi bấm `Apply website allowlist`; b�
 với IP đích và port nên quản trị viên phải tự duy trì việc phân giải domain.
 NSTU không giải mã HTTPS và không dùng MITM.
 
+Xem [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) để biết đầy đủ tính năng
+setup tool, nội dung installer, vị trí script và sự khác nhau giữa tùy chọn
+build CMake `NSTU_BUILD_SETUP` với tham số runtime. Cụ thể, không có cờ runtime
+`--setup`: chạy trực tiếp `nstu-setup.exe`, có thể thêm
+`--target=client|server|both` và `--graphics-debug`.
+
+Server và client là hai vai trò cài đặt loại trừ lẫn nhau trên cùng một máy
+Windows. Full installer kiểm tra vai trò còn lại trước khi chép file và dừng
+với thông báo rõ ràng nếu vai trò đó đã được cài. Không có triển khai installer
+`Both` được hỗ trợ; hãy dùng máy riêng cho server giáo viên và client học sinh.
+
 Cũng có thể chọn sẵn Tiếng Việt và dark mode khi khởi động:
 
 ```powershell
@@ -412,8 +441,10 @@ Thành phần tự khởi động là client service: installer đăng ký servi
 `nstu-agent.exe` trong user session đã đăng nhập.
 
 Để gỡ client, dùng **Installed apps** của Windows hoặc NSTU uninstaller. Trình
-gỡ cài đặt sẽ dừng agent, xóa service, xóa file package và yêu cầu restart thêm
-một lần. Gỡ service thủ công không phải quy trình triển khai được hỗ trợ.
+gỡ cài đặt sẽ buộc dừng các process agent/service của NSTU, xóa service, xóa
+file package và lên lịch xóa các file đang bị khóa ở lần Windows boot tiếp theo.
+Installer đánh dấu thao tác cần restart; hãy hoàn tất restart trước khi cài vai
+trò đối lập. Gỡ service thủ công không phải quy trình triển khai được hỗ trợ.
 
 ## Kết nối một phòng máy
 
@@ -535,8 +566,8 @@ thích license permissive; dự án không chấp nhận GPL dependency.
 
 ## Người đóng góp
 
-- **Bùi Hồ Hải Đăng (`yanij`)**: đóng góp ý tưởng, hỗ trợ thiết bị test và
-  tham gia xây dựng Project NSTU.
+- **Bùi Hồ Hải Đăng (`yanji`)**: đóng góp ý tưởng, tham gia xây dựng NSTU,
+  cung cấp thiết bị kiểm thử và review đảm bảo chất lượng cho output cuối.
 - **Lê Anh Tuấn (`ssdarealest`)**: chịu trách nhiệm quản lý dự án, hỗ trợ pháp
   lý, xây dựng ý tưởng, quản lý tiến trình và phát triển dự án.
 
