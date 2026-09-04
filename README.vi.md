@@ -417,9 +417,56 @@ một lần. Gỡ service thủ công không phải quy trình triển khai đư
 
 ## Kết nối một phòng máy
 
-Quy trình enrollment engineering hiện dùng command line. Trên server, chạy
-`configure-data-root.ps1` và `new-enrollment-secret.ps1` bằng quyền Administrator,
-sau đó restart `nstu-server.exe`. Trên từng client, dùng identity 128-bit riêng:
+Quy trình enrollment hiện dùng command line và phải thực hiện khi máy đang
+thawed, trong PowerShell chạy bằng quyền Administrator. Trước tiên cài
+installer NSTU server trên máy giáo viên và installer NSTU client trên từng máy
+học sinh. Đặt các máy trong cùng VLAN tin cậy và cho phép TCP port `47001` giữa
+client với server.
+
+Các lệnh dưới đây dùng script được đóng gói cùng installer. Installer đầy đủ
+đặt script tại `C:\Program Files\NSTU\docs\deployment`; file tải riêng
+`nstu-server.exe` hoặc `nstu-client.exe` không chứa PowerShell script. Nếu chỉ
+có binary riêng, hãy tải installer server/client tương ứng hoặc checkout source
+đúng phiên bản trước khi tiếp tục. Trong source checkout, các file tương ứng
+nằm trong thư mục `packaging\`.
+
+Nếu dùng source checkout, thay `$deployment` trong ví dụ bằng thư mục
+`packaging` của checkout, ví dụ:
+
+```powershell
+$deployment = Join-Path (Get-Location) "packaging"
+& (Join-Path $deployment "configure-data-root.ps1") -DataRoot "D:\NSTUData"
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+### 1. Chuẩn bị server
+
+Chạy các lệnh sau trên máy giáo viên bằng quyền Administrator. Lệnh đầu tạo
+data root được bảo vệ; lệnh thứ hai cài enrollment secret đã mã hóa cho server
+và xuất secret dùng một lần để provision client:
+
+```powershell
+$deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
+if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
+  throw "Thiếu script triển khai NSTU; hãy cài đầy đủ server installer."
+}
+New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
+& (Join-Path $deployment "configure-data-root.ps1") `
+  -DataRoot "$env:ProgramData\NSTU"
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+Restart `nstu-server.exe` để nạp enrollment secret đã bảo vệ. Giữ file export
+trong vị trí removable/thawed được bảo vệ cho đến khi provision xong toàn bộ
+client. `new-enrollment-secret.ps1` chỉ chạy trên server, không cần chạy trên
+máy học sinh.
+
+### 2. Provision từng client
+
+Trên từng máy học sinh, khi server đang chạy, dùng identity 128-bit và key ID
+riêng. `nstu-provision.exe` được cài cùng client installer:
 
 ```powershell
 $clientId = [guid]::NewGuid().ToString("N")
@@ -428,8 +475,9 @@ $clientId = [guid]::NewGuid().ToString("N")
 ```
 
 Tool xác thực enrollment transcript, derive PSK mà không truyền PSK trên mạng,
-và lưu cấu hình client bằng machine-scope DPAPI. Xóa mọi bản copy enrollment
-secret sau khi enroll, rồi restart service hoặc Windows.
+và lưu cấu hình client bằng machine-scope DPAPI. Sau khi lệnh thành công, restart
+client service hoặc Windows. Khi đã enroll toàn bộ client, xóa mọi bản copy của
+file export dùng một lần. Quy trình client tin cậy:
 
 ```text
 Cài client
@@ -441,8 +489,9 @@ Cài client
 ```
 
 Connection preamble chỉ giúp loại nhanh peer sai rõ ràng. Danh tính máy chỉ
-được chấp nhận sau khi cryptographic handshake thành công. Enrollment UI cho
-giáo viên và workflow multicast/group-key cuối cùng vẫn là release work.
+được chấp nhận sau khi cryptographic handshake thành công. Installer là cách
+phân phối được hỗ trợ cho các script này; chỉ chép riêng file EXE là không đủ
+để thiết lập enrollment.
 
 ## Triển khai cùng Deep Freeze
 

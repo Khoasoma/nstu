@@ -426,19 +426,56 @@ deployment workflow.
 
 ## Connecting a computer room
 
-The current engineering enrollment flow is command-line based. Run the server
-installer, configure a protected data root, and create a one-time enrollment
-secret from an elevated PowerShell prompt:
+The current enrollment flow is command-line based and must be performed while
+the machines are thawed, from an elevated PowerShell prompt. Install the NSTU
+server installer on the teacher machine and the NSTU client installer on each
+student machine first. Put them on the same trusted VLAN and allow TCP port
+`47001` between clients and the server.
+
+The commands below use scripts shipped by the installer. A complete installer
+places them under `C:\Program Files\NSTU\docs\deployment`; a standalone
+`nstu-server.exe` or `nstu-client.exe` download does not contain PowerShell
+scripts. If only standalone binaries were downloaded, obtain the matching
+server/client installer or a source checkout before continuing. From a source
+checkout, the equivalent files are under `packaging\`.
+
+For a source checkout, replace `$deployment` in the example with the checkout's
+packaging directory, for example:
 
 ```powershell
-& "$env:ProgramFiles\NSTU\docs\deployment\configure-data-root.ps1" `
-  -DataRoot "$env:ProgramData\NSTU"
-& "$env:ProgramFiles\NSTU\docs\deployment\new-enrollment-secret.ps1" `
+$deployment = Join-Path (Get-Location) "packaging"
+& (Join-Path $deployment "configure-data-root.ps1") -DataRoot "D:\NSTUData"
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
   -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
 ```
 
-Restart `nstu-server.exe` so it loads the protected enrollment secret. On each
-client, while the server is running, use a unique 128-bit identity and key ID:
+### 1. Prepare the server
+
+Run these commands on the teacher machine as Administrator. The first command
+creates the protected data root; the second installs the server's encrypted
+enrollment secret and exports a one-time secret for client provisioning:
+
+```powershell
+$deployment = Join-Path $env:ProgramFiles "NSTU\docs\deployment"
+if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
+  throw "NSTU deployment scripts are missing; install the complete NSTU server package."
+}
+New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
+& (Join-Path $deployment "configure-data-root.ps1") `
+  -DataRoot "$env:ProgramData\NSTU"
+& (Join-Path $deployment "new-enrollment-secret.ps1") `
+  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
+```
+
+Restart `nstu-server.exe` so it loads the protected enrollment secret. Keep the
+exported file in a protected removable/thawed location until all clients have
+been provisioned. `new-enrollment-secret.ps1` is server-only; it is not needed
+on student machines.
+
+### 2. Provision each client
+
+On each student machine, while the server is running, use a unique 128-bit
+identity and key ID. `nstu-provision.exe` is included in the client installer:
 
 ```powershell
 $clientId = [guid]::NewGuid().ToString("N")
@@ -448,8 +485,9 @@ $clientId = [guid]::NewGuid().ToString("N")
 
 The tool authenticates the enrollment transcript, derives the installed PSK
 without sending it, and stores the client configuration with machine-scope
-DPAPI. Delete every copy of the one-time export after enrollment, then restart
-the service or Windows. A trusted client follows this path:
+DPAPI. After the command succeeds, restart the client service or Windows. Once
+all clients are enrolled, delete every copy of the one-time export. A trusted
+client follows this path:
 
 ```text
 Install client
@@ -461,8 +499,9 @@ Install client
 ```
 
 Connection preambles only reject obviously invalid peers quickly. Device
-identity is accepted only after the cryptographic handshake succeeds. A teacher
-enrollment UI and the final multicast/group-key workflow remain release work.
+identity is accepted only after the cryptographic handshake succeeds. The
+installer is the supported distribution for these scripts; copying only an EXE
+is insufficient for enrollment setup.
 
 ## Deep Freeze deployments
 
