@@ -134,10 +134,51 @@ cmake -S . -B build-setup -G "MinGW Makefiles" `
 cmake --build build-setup --target nstu-setup
 ```
 
-The server runtime accepts `--language=en`, `--language=vi`, and `--dark`.
-These select the initial language and theme; the Language, Appearance, and
-Screen refresh controls are also available from the dashboard `Settings`
-section. Screen refresh is the bounded snapshot interval, from 5 to 10 seconds.
+The server runtime accepts `--language=en`, `--language=vi`, `--dark`, and
+`--graphics-debug`. These select the initial language/theme and request the
+Direct3D 11 debug layer, respectively. Language, Appearance, and Screen
+refresh controls are also available from the dashboard `Settings` section.
+Screen refresh is the bounded snapshot interval, from 5 to 10 seconds.
+
+The administrator bootstrapper opens with an explicit target choice: `Client`,
+`Server`, or `Both`. This keeps role-specific prerequisites visible and avoids
+technicians applying server-only checks to a client workstation. The same
+selection can be supplied for unattended launch with `--target=client`,
+`--target=server`, or `--target=both`; `--graphics-debug` enables the D3D11
+debug-layer request and records fallback details. The setup window's
+`Diagnostics` popup reports DXGI adapters and vendors, feature level, Desktop
+Duplication support, WARP fallback state, and bounded recent HRESULT events.
+If graphics initialization fails before the UI can open, a native Windows
+diagnostics message box displays the recorded failure.
+
+#### Server graphics diagnostics
+
+Open `Diagnostics` in the server navigation bar to inspect the graphics
+environment without starting a client stream. The popup reports every DXGI
+adapter (including NVIDIA, AMD, Intel, Microsoft/software adapters), selected
+adapter and feature level, Desktop Duplication availability, and the number of
+hardware H.264 Media Foundation encoders registered by Windows. It also keeps
+a bounded timestamped event log containing device-creation, swap-chain resize,
+and `Present`/device-removal HRESULTs. `Refresh` reruns the probes; it does not
+change system policy or install drivers.
+
+Server D3D11 initialization explicitly tries non-software adapters and then
+falls back to WARP if hardware creation fails. This keeps the diagnostics UI
+usable on machines with a missing or incompatible display driver. When
+`--graphics-debug` is supplied, NSTU requests the D3D11 debug layer and records
+if Windows does not provide it before retrying without the layer. If a driver
+resets or removes the device, the failure HRESULT and
+`ID3D11Device::GetDeviceRemovedReason()` value are recorded and the status bar
+directs the operator to `Diagnostics`.
+
+The Intel Core i5-11400F is an F-series processor and has no integrated GPU.
+The server therefore requires a working discrete adapter (or WARP as a slow
+diagnostic fallback). NVIDIA and AMD acceleration is supported through the
+native DXGI/D3D11 and Windows Media Foundation hardware paths when the vendor
+driver exposes them; CUDA, NVENC SDK, and AMD AMF are not required runtime
+dependencies. Encoder availability depends on the installed driver and Media
+Foundation registration, so capture the diagnostics popup before reporting a
+streaming crash.
 
 ## Local resource benchmark
 

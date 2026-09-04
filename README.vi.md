@@ -132,9 +132,48 @@ cmake -S . -B build-setup -G "MinGW Makefiles" `
 cmake --build build-setup --target nstu-setup
 ```
 
-Server nhận các cờ runtime `--language=en`, `--language=vi` và `--dark`.
-Trong giao diện, Language, Appearance và Screen refresh nằm trong phần
-`Settings`; Screen refresh là chu kỳ snapshot, giới hạn từ 5 đến 10 giây.
+Server nhận các cờ runtime `--language=en`, `--language=vi`, `--dark` và
+`--graphics-debug`. Các cờ này chọn ngôn ngữ/giao diện ban đầu và yêu cầu lớp
+debug Direct3D 11. Trong giao diện, Language, Appearance và Screen refresh nằm
+trong phần `Settings`; Screen refresh là chu kỳ snapshot, giới hạn từ 5 đến
+10 giây.
+
+Bootstrapper quản trị mở đầu bằng lựa chọn rõ ràng: `Client`, `Server` hoặc
+`Both`. Nhờ đó kỹ thuật viên chỉ thấy các điều kiện phù hợp với vai trò và
+không áp dụng kiểm tra dành cho server lên máy client. Có thể truyền lựa chọn
+khi chạy không tương tác bằng `--target=client`, `--target=server` hoặc
+`--target=both`; `--graphics-debug` yêu cầu lớp debug D3D11 và ghi lại thông
+tin fallback. Popup `Diagnostics` của setup hiển thị adapter và hãng DXGI,
+feature level, khả dụng Desktop Duplication, trạng thái dự phòng WARP và các
+HRESULT gần đây có giới hạn. Nếu khởi tạo đồ họa thất bại trước khi giao diện
+mở, Windows sẽ hiển thị hộp thoại chẩn đoán gốc với lỗi đã ghi nhận.
+
+#### Chẩn đoán đồ họa của server
+
+Mở `Diagnostics` trên thanh điều hướng server để kiểm tra môi trường đồ họa
+mà không cần bắt đầu stream từ client. Popup hiển thị mọi bộ điều hợp DXGI
+(bao gồm NVIDIA, AMD, Intel và bộ điều hợp phần mềm Microsoft), adapter đang
+chọn, feature level, khả dụng của Desktop Duplication và số bộ mã hóa H.264
+phần cứng Media Foundation mà Windows đã đăng ký. Popup cũng giữ nhật ký có
+giới hạn, kèm thời gian, cho các HRESULT khi tạo thiết bị, đổi kích thước
+swap-chain và lỗi `Present`/mất thiết bị. Nút `Refresh` chạy lại việc kiểm tra;
+không thay đổi policy hệ thống và không cài driver.
+
+Server thử lần lượt các adapter phần cứng không phải phần mềm rồi dùng WARP
+làm dự phòng nếu tạo thiết bị phần cứng thất bại. Nhờ vậy popup chẩn đoán vẫn
+có thể mở trên máy thiếu driver hoặc driver không tương thích. Khi truyền
+`--graphics-debug`, NSTU yêu cầu lớp debug D3D11 và ghi lại trường hợp Windows
+không cung cấp lớp này trước khi thử lại mà không có debug layer. Nếu driver
+reset hoặc loại bỏ thiết bị, HRESULT lỗi và giá trị
+`ID3D11Device::GetDeviceRemovedReason()` được ghi vào nhật ký, đồng thời thanh
+trạng thái hướng kỹ thuật viên đến `Diagnostics`.
+
+Intel Core i5-11400F là CPU dòng F nên không có GPU tích hợp. Server cần một
+GPU rời có driver hoạt động (hoặc WARP, chỉ nên dùng để chẩn đoán và chậm hơn).
+Tăng tốc NVIDIA và AMD sử dụng đường dẫn DXGI/D3D11 và Windows Media
+Foundation nguyên bản khi driver cung cấp; không cần phụ thuộc runtime CUDA,
+NVENC SDK hay AMD AMF. Khả năng mã hóa phụ thuộc driver và đăng ký Media
+Foundation, vì vậy hãy chụp popup Diagnostics trước khi báo cáo lỗi stream.
 
 ## Benchmark tài nguyên cục bộ
 

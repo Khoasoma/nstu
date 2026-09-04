@@ -8,6 +8,11 @@
 
 #include <d3d11.h>
 #include <dxgi.h>
+#include <dxgi1_2.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mferror.h>
+#include <mftransform.h>
 #include <shellapi.h>
 #include <windows.h>
 #include <wrl/client.h>
@@ -22,9 +27,13 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <deque>
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
     HWND window, UINT message, WPARAM wparam, LPARAM lparam);
@@ -37,6 +46,185 @@ Microsoft::WRL::ComPtr<IDXGISwapChain> g_swap_chain;
 Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
 ImFont* g_heading_font = nullptr;
 bool g_dark_mode = false;
+bool g_graphics_debug = false;
+
+struct DiagnosticEvent {
+    std::string timestamp;
+    std::string severity;
+    std::string source;
+    std::string message;
+};
+
+struct GraphicsReport {
+    std::vector<std::string> adapters;
+    std::string selected_adapter;
+    std::string selected_vendor;
+    std::string feature_level;
+    std::string device_mode;
+    std::string desktop_duplication;
+    std::string h264_encoders;
+};
+
+std::deque<DiagnosticEvent> g_diagnostics;
+GraphicsReport g_graphics_report;
+
+std::string hresult_text(HRESULT result) {
+    std::ostringstream stream;
+    stream << "0x" << std::uppercase << std::hex
+           << static_cast<unsigned long>(result);
+    return stream.str();
+}
+
+void record_diagnostic(const char* severity, const char* source,
+                       const std::string& message) {
+    SYSTEMTIME time{};
+    GetLocalTime(&time);
+    std::ostringstream timestamp;
+    timestamp << std::setfill('0') << std::setw(2) << time.wHour << ':'
+              << std::setw(2) << time.wMinute << ':' << std::setw(2)
+              << time.wSecond;
+    g_diagnostics.push_back({timestamp.str(), severity, source, message});
+    while (g_diagnostics.size() > 128) {
+        g_diagnostics.pop_front();
+    }
+}
+
+std::wstring diagnostics_text() {
+    std::wstring text = L"NSTU graphics initialization failed.\n\n";
+    for (const auto& event : g_diagnostics) {
+        const int length = MultiByteToWideChar(
+            CP_UTF8, 0, event.message.c_str(), -1, nullptr, 0);
+        std::wstring message;
+        if (length > 1) {
+            message.resize(static_cast<std::size_t>(length));
+            MultiByteToWideChar(CP_UTF8, 0, event.message.c_str(), -1,
+                                message.data(), length);
+            message.resize(static_cast<std::size_t>(length - 1));
+        }
+        text += L"[" + std::wstring(event.severity.begin(),
+                                     event.severity.end()) + L"] " +
+                std::wstring(event.source.begin(), event.source.end()) +
+                L": " + message + L"\n";
+    }
+    return text;
+}
+
+const char* vendor_name(UINT vendor_id) {
+    switch (vendor_id) {
+    case 0x10DE: return "NVIDIA";
+    case 0x1002: return "AMD";
+    case 0x8086: return "Intel";
+    case 0x1414: return "Microsoft";
+    default: return "Unknown";
+    }
+}
+
+std::string wide_to_utf8(const wchar_t* text) {
+    if (text == nullptr || *text == L'\0') return {};
+    const int length = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0,
+                                           nullptr, nullptr);
+    if (length <= 1) return {};
+    std::string result(static_cast<std::size_t>(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text, -1, result.data(), length,
+                        nullptr, nullptr);
+    result.resize(static_cast<std::size_t>(length - 1));
+    return result;
+}
+
+void refresh_graphics_report() {
+    g_graphics_report = {};
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    HRESULT result = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(result)) {
+        record_diagnostic("error", "DXGI", "CreateDXGIFactory1 failed " +
+            hresult_text(result));
+        return;
+    }
+    for (UINT index = 0;; ++index) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        result = factory->EnumAdapters1(index, &adapter);
+        if (result == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(result)) {
+            record_diagnostic("warning", "DXGI", "EnumAdapters1 failed " +
+                hresult_text(result));
+            break;
+        }
+        DXGI_ADAPTER_DESC1 description{};
+        if (FAILED(adapter->GetDesc1(&description))) continue;
+        std::ostringstream line;
+        line << wide_to_utf8(description.Description) << " | "
+             << vendor_name(description.VendorId) << " | "
+             << (description.DedicatedVideoMemory / (1024u * 1024u))
+             << " MB VRAM";
+        if ((description.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+            line << " | software";
+        }
+        g_graphics_report.adapters.push_back(line.str());
+    }
+    if (!g_graphics_report.adapters.empty()) {
+        record_diagnostic("info", "DXGI", "Enumerated " +
+            std::to_string(g_graphics_report.adapters.size()) + " adapter(s)");
+    }
+
+    if (g_device) {
+        D3D_FEATURE_LEVEL level = g_device->GetFeatureLevel();
+        std::ostringstream feature;
+        switch (level) {
+        case D3D_FEATURE_LEVEL_11_1: feature << "11.1"; break;
+        case D3D_FEATURE_LEVEL_11_0: feature << "11.0"; break;
+        case D3D_FEATURE_LEVEL_10_1: feature << "10.1"; break;
+        case D3D_FEATURE_LEVEL_10_0: feature << "10.0"; break;
+        default: feature << "unknown"; break;
+        }
+        g_graphics_report.feature_level = feature.str();
+        Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device;
+        if (SUCCEEDED(g_device.As(&dxgi_device))) {
+            Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+            if (SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+                DXGI_ADAPTER_DESC description{};
+                if (SUCCEEDED(adapter->GetDesc(&description))) {
+                    g_graphics_report.selected_adapter =
+                        wide_to_utf8(description.Description);
+                    g_graphics_report.selected_vendor =
+                        vendor_name(description.VendorId);
+                    g_graphics_report.device_mode =
+                        g_graphics_report.device_mode.empty()
+                            ? "Hardware" : g_graphics_report.device_mode;
+                }
+                Microsoft::WRL::ComPtr<IDXGIOutput> output;
+                if (SUCCEEDED(adapter->EnumOutputs(0, &output))) {
+                    Microsoft::WRL::ComPtr<IDXGIOutput1> output1;
+                    if (SUCCEEDED(output.As(&output1))) {
+                        Microsoft::WRL::ComPtr<IDXGIOutputDuplication> duplication;
+                        const HRESULT duplicate_result =
+                            output1->DuplicateOutput(g_device.Get(), &duplication);
+                        g_graphics_report.desktop_duplication =
+                            SUCCEEDED(duplicate_result) ? "Available"
+                                                        : "Unavailable (" +
+                            hresult_text(duplicate_result) + ")";
+                    }
+                }
+            }
+        }
+    }
+    HRESULT mf_result = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+    UINT32 encoder_count = 0;
+    if (SUCCEEDED(mf_result)) {
+        IMFActivate** activates = nullptr;
+        MFT_REGISTER_TYPE_INFO output_type{MFMediaType_Video,
+                                           MFVideoFormat_H264};
+        const HRESULT enum_result = MFTEnumEx(
+            MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG_HARDWARE,
+            nullptr, &output_type, &activates, &encoder_count);
+        if (FAILED(enum_result)) encoder_count = 0;
+        if (activates != nullptr) {
+            for (UINT32 i = 0; i < encoder_count; ++i) activates[i]->Release();
+            CoTaskMemFree(activates);
+        }
+        MFShutdown();
+    }
+    g_graphics_report.h264_encoders = std::to_string(encoder_count);
+}
 
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kTrayToggleWindow = 2001;
@@ -177,8 +365,15 @@ struct RoomCounts {
 void create_render_target() {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
     if (SUCCEEDED(g_swap_chain->GetBuffer(0, IID_PPV_ARGS(&back_buffer)))) {
-        g_device->CreateRenderTargetView(back_buffer.Get(), nullptr,
-                                         &g_render_target);
+        const HRESULT result = g_device->CreateRenderTargetView(
+            back_buffer.Get(), nullptr, &g_render_target);
+        if (FAILED(result)) {
+            record_diagnostic("error", "D3D11",
+                              "CreateRenderTargetView failed " +
+                                  hresult_text(result));
+        }
+    } else {
+        record_diagnostic("error", "DXGI", "Swap-chain back-buffer unavailable");
     }
 }
 
@@ -191,15 +386,76 @@ bool create_device(HWND window) {
     description.SampleDesc.Count = 1;
     description.Windowed = TRUE;
     description.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
-    constexpr D3D_FEATURE_LEVEL requested[] = {D3D_FEATURE_LEVEL_11_0};
-    D3D_FEATURE_LEVEL selected{};
-    if (FAILED(D3D11CreateDeviceAndSwapChain(
-            nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, requested, 1,
-            D3D11_SDK_VERSION, &description, &g_swap_chain, &g_device,
-            &selected, &g_context))) {
+    constexpr D3D_FEATURE_LEVEL requested[] = {
+        D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0,
+        D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0};
+    UINT flags = g_graphics_debug
+        ? static_cast<UINT>(D3D11_CREATE_DEVICE_DEBUG) : 0u;
+    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
+    HRESULT result = CreateDXGIFactory1(IID_PPV_ARGS(&factory));
+    if (FAILED(result)) {
+        record_diagnostic("error", "DXGI", "CreateDXGIFactory1 failed " +
+            hresult_text(result));
         return false;
     }
+    bool created = false;
+    for (UINT index = 0; !created; ++index) {
+        Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
+        result = factory->EnumAdapters1(index, &adapter);
+        if (result == DXGI_ERROR_NOT_FOUND) break;
+        if (FAILED(result)) break;
+        DXGI_ADAPTER_DESC1 adapter_desc{};
+        if (FAILED(adapter->GetDesc1(&adapter_desc)) ||
+            (adapter_desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+            continue;
+        }
+        result = D3D11CreateDeviceAndSwapChain(
+            adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+            requested, ARRAYSIZE(requested), D3D11_SDK_VERSION, &description,
+            &g_swap_chain, &g_device, nullptr, &g_context);
+        if (FAILED(result) && flags != 0u) {
+            record_diagnostic("warning", "D3D11",
+                              "Debug layer unavailable; retrying without it (" +
+                                  hresult_text(result) + ")");
+            flags = 0u;
+            result = D3D11CreateDeviceAndSwapChain(
+                adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, flags,
+                requested, ARRAYSIZE(requested), D3D11_SDK_VERSION,
+                &description, &g_swap_chain, &g_device, nullptr, &g_context);
+        }
+        if (SUCCEEDED(result)) {
+            created = true;
+            g_graphics_report.device_mode = "Hardware";
+            record_diagnostic("info", "D3D11", "Hardware device created on " +
+                wide_to_utf8(adapter_desc.Description));
+        } else {
+            record_diagnostic("warning", "D3D11",
+                              "Hardware adapter failed " +
+                                  wide_to_utf8(adapter_desc.Description) +
+                                  " (" + hresult_text(result) + ")");
+            g_swap_chain.Reset();
+            g_device.Reset();
+            g_context.Reset();
+        }
+    }
+    if (!created) {
+        result = D3D11CreateDeviceAndSwapChain(
+            nullptr, D3D_DRIVER_TYPE_WARP, nullptr, flags, requested,
+            ARRAYSIZE(requested), D3D11_SDK_VERSION, &description,
+            &g_swap_chain, &g_device, nullptr, &g_context);
+        if (SUCCEEDED(result)) {
+            created = true;
+            g_graphics_report.device_mode = "WARP fallback";
+            record_diagnostic("warning", "D3D11",
+                              "Hardware initialization failed; using WARP fallback");
+        } else {
+            record_diagnostic("error", "D3D11",
+                              "WARP device creation failed " + hresult_text(result));
+        }
+    }
+    if (!created) return false;
     create_render_target();
+    refresh_graphics_report();
     return g_render_target != nullptr;
 }
 
@@ -253,8 +509,12 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
     }
     if (message == WM_SIZE && g_swap_chain && wparam != SIZE_MINIMIZED) {
         g_render_target.Reset();
-        g_swap_chain->ResizeBuffers(0, LOWORD(lparam), HIWORD(lparam),
-                                    DXGI_FORMAT_UNKNOWN, 0);
+        const HRESULT resize_result = g_swap_chain->ResizeBuffers(
+            0, LOWORD(lparam), HIWORD(lparam), DXGI_FORMAT_UNKNOWN, 0);
+        if (FAILED(resize_result)) {
+            record_diagnostic("error", "DXGI", "ResizeBuffers failed " +
+                hresult_text(resize_result));
+        }
         create_render_target();
         return 0;
     }
@@ -1421,6 +1681,65 @@ void toggle_teacher_broadcast(DashboardState& state,
                               "Đã bắt đầu phát màn hình giáo viên.");
 }
 
+void draw_diagnostics_popup(DashboardState& state) {
+    constexpr float button_width = 118.0f;
+    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - 116.0f);
+    if (ImGui::Button(tr(state, "Diagnostics", "Chẩn đoán"),
+                      {button_width, 28.0f})) {
+        refresh_graphics_report();
+        ImGui::OpenPopup("diagnostics-popup");
+    }
+    if (!ImGui::BeginPopupModal("diagnostics-popup", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+    ImGui::TextUnformatted(tr(state, "Graphics diagnostics",
+                              "Chẩn đoán đồ họa"));
+    ImGui::Separator();
+    ImGui::Text("Device: %s", g_graphics_report.device_mode.empty()
+        ? "Not initialized" : g_graphics_report.device_mode.c_str());
+    ImGui::Text("Adapter: %s (%s)",
+                g_graphics_report.selected_adapter.empty()
+                    ? "Unknown" : g_graphics_report.selected_adapter.c_str(),
+                g_graphics_report.selected_vendor.empty()
+                    ? "Unknown" : g_graphics_report.selected_vendor.c_str());
+    ImGui::Text("Feature level: %s",
+                g_graphics_report.feature_level.empty()
+                    ? "Unknown" : g_graphics_report.feature_level.c_str());
+    ImGui::Text("Desktop Duplication: %s",
+                g_graphics_report.desktop_duplication.empty()
+                    ? "Unknown" : g_graphics_report.desktop_duplication.c_str());
+    ImGui::Text("Hardware H.264 encoders: %s",
+                g_graphics_report.h264_encoders.empty()
+                    ? "Unknown" : g_graphics_report.h264_encoders.c_str());
+    ImGui::Spacing();
+    ImGui::TextUnformatted(tr(state, "Adapters", "Bộ điều hợp"));
+    if (ImGui::BeginChild("diagnostic-adapters", {620.0f, 80.0f}, true)) {
+        for (const auto& adapter : g_graphics_report.adapters) {
+            ImGui::BulletText("%s", adapter.c_str());
+        }
+    }
+    ImGui::EndChild();
+    ImGui::Spacing();
+    ImGui::TextUnformatted(tr(state, "Recent events", "Sự kiện gần đây"));
+    if (ImGui::BeginChild("diagnostic-events", {620.0f, 180.0f}, true)) {
+        for (const auto& event : g_diagnostics) {
+            ImGui::TextWrapped("[%s] [%s] %s: %s", event.timestamp.c_str(),
+                               event.severity.c_str(), event.source.c_str(),
+                               event.message.c_str());
+        }
+    }
+    ImGui::EndChild();
+    if (ImGui::Button(tr(state, "Refresh", "Làm mới"), {90.0f, 0.0f})) {
+        refresh_graphics_report();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Close", "Đóng"), {90.0f, 0.0f})) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void draw_menu_strip(DashboardState& state, bool has_clients) {
     if (!ImGui::BeginChild("menu-strip", {0, 31.0f}, false,
                            ImGuiWindowFlags_NoScrollbar)) {
@@ -1447,6 +1766,7 @@ void draw_menu_strip(DashboardState& state, bool has_clients) {
         state.view = DashboardView::selected_client;
     }
     ImGui::EndDisabled();
+    draw_diagnostics_popup(state);
     draw_preferences(state);
     ImGui::EndChild();
 }
@@ -1746,6 +2066,15 @@ void draw_dashboard_shell(
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    const wchar_t* command_line = GetCommandLineW();
+    const std::wstring_view arguments =
+        command_line == nullptr ? std::wstring_view{} : command_line;
+    g_graphics_debug = arguments.find(L"--graphics-debug") !=
+                        std::wstring_view::npos;
+    if (g_graphics_debug) {
+        record_diagnostic("info", "D3D11",
+                          "Graphics debug layer requested by command line");
+    }
     g_taskbar_created_message = RegisterWindowMessageW(L"TaskbarCreated");
     WNDCLASSW window_class{};
     window_class.lpfnWndProc = window_proc;
@@ -1760,6 +2089,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                                 CW_USEDEFAULT, 1280, 820, nullptr, nullptr,
                                 instance, nullptr);
     if (window == nullptr || !create_device(window)) {
+        MessageBoxW(window, diagnostics_text().c_str(), L"NSTU graphics diagnostics",
+                    MB_OK | MB_ICONERROR);
         return 1;
     }
     ShowWindow(window, SW_SHOWDEFAULT);
@@ -1769,9 +2100,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     if (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_VIETNAMESE) {
         dashboard.language = Language::vietnamese;
     }
-    const wchar_t* command_line = GetCommandLineW();
-    const std::wstring_view arguments =
-        command_line == nullptr ? std::wstring_view{} : command_line;
     if (arguments.find(L"--language=vi") != std::wstring_view::npos) {
         dashboard.language = Language::vietnamese;
     } else if (arguments.find(L"--language=en") != std::wstring_view::npos) {
@@ -1904,10 +2232,27 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
         const float clear_color[4] = {
             background.x, background.y, background.z, background.w};
-        g_context->OMSetRenderTargets(1, g_render_target.GetAddressOf(), nullptr);
-        g_context->ClearRenderTargetView(g_render_target.Get(), clear_color);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        g_swap_chain->Present(1, 0);
+        if (g_context && g_render_target && g_swap_chain) {
+            g_context->OMSetRenderTargets(1, g_render_target.GetAddressOf(),
+                                           nullptr);
+            g_context->ClearRenderTargetView(g_render_target.Get(), clear_color);
+            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+            const HRESULT present_result = g_swap_chain->Present(1, 0);
+            if (FAILED(present_result)) {
+                const HRESULT removal_reason = g_device
+                    ? g_device->GetDeviceRemovedReason() : E_FAIL;
+                record_diagnostic("error", "DXGI", "Present failed " +
+                    hresult_text(present_result) + "; device reason " +
+                    hresult_text(removal_reason));
+                if (present_result == DXGI_ERROR_DEVICE_REMOVED ||
+                    present_result == DXGI_ERROR_DEVICE_RESET ||
+                    present_result == DXGI_ERROR_DRIVER_INTERNAL_ERROR) {
+                    dashboard.control_status = tr(
+                        dashboard, "Graphics device lost. Open Diagnostics.",
+                        "Mất thiết bị đồ họa. Hãy mở Chẩn đoán.");
+                }
+            }
+        }
     }
 
     if (dashboard.remote_control_enabled) {
