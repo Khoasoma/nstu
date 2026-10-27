@@ -6,6 +6,7 @@
 
 #include <windows.h>
 
+#include <chrono>
 #include <filesystem>
 #include <cstdint>
 #include <functional>
@@ -145,17 +146,41 @@ inline constexpr std::uint64_t kMaximumExamCollectorId = (1ULL << 53) - 1;
 // document generation. Zero means allocation unavailable; never wrap or reuse.
 [[nodiscard]] std::uint64_t allocate_exam_telemetry_collector_id() noexcept;
 
+// Local WebView JSON only; the existing wire and IPC codecs are unchanged.
+[[nodiscard]] std::string make_exam_telemetry_enable_json(
+    const exam::TelemetryEnable& enable, std::uint64_t collector_id,
+    std::uint64_t collector_elapsed_milliseconds, bool startup_retry = false);
+
 class ExamHostTelemetryState {
 public:
+    using Clock = std::chrono::steady_clock;
     // Explicit IDs allow deterministic state tests. Production uses the native
     // allocator. A valid context still starts if its ID is unavailable, with
     // collection disabled, so telemetry cannot block an otherwise valid exam.
     [[nodiscard]] bool start(exam::StateRequest context,
-        std::uint64_t collector_id = allocate_exam_telemetry_collector_id()) noexcept;
+        std::uint64_t collector_id = allocate_exam_telemetry_collector_id(),
+        Clock::time_point origin = Clock::now()) noexcept;
     void stop() noexcept;
     [[nodiscard]] bool apply_enable(const exam::TelemetryEnable& enable) noexcept;
     void advance_collector(
-        std::uint64_t collector_id = allocate_exam_telemetry_collector_id()) noexcept;
+        std::uint64_t collector_id = allocate_exam_telemetry_collector_id(),
+        Clock::time_point origin = Clock::now()) noexcept;
+    // The posting callback is the real WebView publication boundary. Only a
+    // successful post establishes a generation-bound pending anchor.
+    [[nodiscard]] bool post_browser_enable(
+        const std::function<bool(std::string_view)>& post,
+        Clock::time_point now = Clock::now());
+    // UI maintenance retries the original pending startup at most once/second,
+    // with three attempts. Successful mapping ends retry scheduling.
+    [[nodiscard]] bool maintain_browser_startup(
+        const std::function<bool(std::string_view)>& post,
+        Clock::time_point now = Clock::now());
+    [[nodiscard]] std::optional<std::uint64_t> native_elapsed(
+        Clock::time_point now = Clock::now()) noexcept;
+    [[nodiscard]] bool forward_browser_samples(
+        std::string_view json, const std::set<std::string>& allowed_question_ids,
+        Clock::time_point receipt, std::vector<exam::TelemetrySample>& samples,
+        std::string* error = nullptr);
     void record_blocked_shortcuts(std::uint32_t count = 1) noexcept;
     [[nodiscard]] std::optional<exam::TelemetrySample> drain_blocked_shortcuts(
         std::uint64_t monotonic_elapsed_ms, std::uint64_t client_time_unix_ms) noexcept;
@@ -171,6 +196,17 @@ private:
     std::uint64_t collector_id_ = 0;
     std::optional<exam::TelemetryEnable> active_enable_;
     ExamShortcutCounter shortcuts_;
+    Clock::time_point generation_origin_{};
+    std::optional<Clock::time_point> last_native_observation_;
+    std::optional<std::uint64_t> pending_browser_anchor_;
+    std::optional<std::uint64_t> last_browser_elapsed_;
+    bool browser_clock_bound_ = false;
+    std::optional<Clock::time_point> last_startup_attempt_;
+    unsigned startup_retry_attempts_ = 0;
+    // Quota belongs to the host lifetime, so document reload never resets it.
+    std::optional<Clock::time_point> browser_rate_window_start_;
+    std::uint32_t browser_rate_samples_ = 0;
+    void clear_browser_clock() noexcept;
 };
 
 class ExamHost {

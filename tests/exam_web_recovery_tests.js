@@ -270,7 +270,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
   let timerId = 0;
   const timers = new Map();
   let now = Number.isSafeInteger(options.now) ? options.now : 1_700_000_000_000;
-  let perfNow = 1000;
+  let perfNow = Object.prototype.hasOwnProperty.call(options, "perfNow") ? options.perfNow : 1000;
   const intervalCallbacks = [];
   const windowListeners = Object.create(null);
   const window = {
@@ -295,6 +295,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
       return id;
     },
     clearTimeout: (id) => { timers.delete(id); },
+    clearInterval: (id) => { if (intervalCallbacks[id - 1]) intervalCallbacks[id - 1].callback = () => {}; },
     setInterval: (callback, delay) => {
       intervalCallbacks.push({ callback, delay });
       return intervalCallbacks.length;
@@ -313,6 +314,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
     URL: options.urlConstructor ? BrowserURL :
       { createObjectURL: () => "blob:test", revokeObjectURL: () => {} },
     Date: class extends Date {
+      constructor(...args) { super(...(args.length ? args : [now])); }
       static now() { return now; }
     },
     console
@@ -1024,7 +1026,7 @@ function testTelemetryDisabledByDefaultAndEnableLifecycle() {
       sessionIdHex: context.sessionIdHex,
       candidateId: context.candidateId,
       enabled: true,
-      collectorId: 42,
+      collectorId: 42, collectorElapsedMilliseconds: 0,
       samplingIntervalMs: 30000,
       maxBatchSamples: 32
     }
@@ -1052,7 +1054,7 @@ function testTelemetryNavigationAndDwell() {
       sessionIdHex: context.sessionIdHex,
       candidateId: context.candidateId,
       enabled: true,
-      collectorId: 101,
+      collectorId: 101, collectorElapsedMilliseconds: 0,
       samplingIntervalMs: 30000,
       maxBatchSamples: 32
     }
@@ -1125,7 +1127,7 @@ function testTelemetryLateEnableAndSilentlyBaselines() {
       sessionIdHex: context.sessionIdHex,
       candidateId: context.candidateId,
       enabled: true,
-      collectorId: 55,
+      collectorId: 55, collectorElapsedMilliseconds: 0,
       samplingIntervalMs: 30000,
       maxBatchSamples: 32
     }
@@ -1159,7 +1161,7 @@ function testTelemetryFocusAndVisibility() {
       sessionIdHex: context.sessionIdHex,
       candidateId: context.candidateId,
       enabled: true,
-      collectorId: 77,
+      collectorId: 77, collectorElapsedMilliseconds: 0,
       samplingIntervalMs: 30000,
       maxBatchSamples: 32
     }
@@ -1233,7 +1235,7 @@ function testTelemetryImeAndInputNormalization() {
       sessionIdHex: context.sessionIdHex,
       candidateId: context.candidateId,
       enabled: true,
-      collectorId: 88,
+      collectorId: 88, collectorElapsedMilliseconds: 0,
       samplingIntervalMs: 30000,
       maxBatchSamples: 32
     }
@@ -1298,7 +1300,7 @@ function testTelemetryClockDiscontinuityAndSubmission() {
       sessionIdHex: context.sessionIdHex,
       candidateId: context.candidateId,
       enabled: true,
-      collectorId: 99,
+      collectorId: 99, collectorElapsedMilliseconds: 0,
       samplingIntervalMs: 30000,
       maxBatchSamples: 32
     }
@@ -1335,7 +1337,7 @@ function testTelemetryClockDiscontinuityAndSubmission() {
 function testTelemetryEnableBeforeBeginStartsKnownDwell() {
   const c = contextFor("begin-dwell", HEX16, HEX16_B, true);
   const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
-  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42, collectorElapsedMilliseconds: 0 } });
   h.webview.emit({ type: "exam_begin", begin: { ...c, serverStartUnixMilliseconds: h.now(), durationSeconds: 1800 } });
   h.webview.messages.length = 0;
   h.advancePerf(5000);
@@ -1350,7 +1352,7 @@ function testTelemetryRecoveryAfterEnableIsSilentlyBaselined() {
     serverHighestSequence: 1, nextSequence: 2, previousEventHashHex: HEX32_A,
     serverLastEventHashHex: HEX32_A, serverStateHashHex: HEX32_B
   }), new FakeStorage(), { manifest: MULTI_MANIFEST });
-  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42, collectorElapsedMilliseconds: 0 } });
   h.webview.emit(stateResponse(c, 1, HEX32_A, HEX32_B, false, [{
     questionId: "q1", questionRevision: 1, sequence: 1,
     clientTimeUnixMilliseconds: 1700000000000, kind: "upsert", answer: "restored", eventHashHex: HEX32_A
@@ -1367,7 +1369,7 @@ function testTelemetryRecoveryAfterEnableIsSilentlyBaselined() {
 function testTelemetryPeriodicDiscontinuityResumesKnownDwell() {
   const c = contextFor("periodic-dwell", HEX16, HEX16_B);
   const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
-  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42, collectorElapsedMilliseconds: 0 } });
   h.setNow(h.now() + 60000);
   h.setPerfNow(h.perfNow() + 1000);
   h.intervalCallbacks.find(timer => timer.delay === 30000).callback();
@@ -1376,6 +1378,259 @@ function testTelemetryPeriodicDiscontinuityResumesKnownDwell() {
   h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
   const samples = h.webview.messages.filter(m => m.type === "exam_telemetry_samples").flatMap(m => m.samples);
   assert.ok(samples.some(s => s.kind === "question_dwell" && s.durationMilliseconds === 5000));
+}
+
+
+function clockEnable(h, c, anchor = 0, collectorId = 42) {
+  h.webview.emit({ type: "exam_telemetry_enable", enable: {
+    ...c, enabled: true, collectorId, collectorElapsedMilliseconds: anchor
+  } });
+}
+function clockSamples(h) {
+  return h.webview.messages.filter(m => m.type === "exam_telemetry_samples").flatMap(m => m.samples);
+}
+function clockNavigate(h) {
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+}
+function testTelemetrySlowLoadUsesGenerationAnchor() {
+  const c = contextFor("slow-load-clock");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST, perfNow: 12000 });
+  clockEnable(h, c);
+  assert.equal(clockSamples(h)[0].monotonicElapsedMilliseconds, 0, "slow page load must not become collector elapsed");
+  h.advancePerf(3000);
+  clockNavigate(h);
+  const samples = clockSamples(h);
+  assert.ok(samples.some(s => s.kind === "question_dwell" && s.durationMilliseconds === 3000 && s.monotonicElapsedMilliseconds === 3000));
+}
+function testTelemetryLateEnableUsesNativeAnchorAndDuplicatePreservesBaseline() {
+  const c = contextFor("late-clock");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+  clockNavigate(h);
+  h.advancePerf(11000);
+  clockEnable(h, c, 40);
+  assert.equal(clockSamples(h)[0].monotonicElapsedMilliseconds, 40);
+  h.advancePerf(500);
+  clockEnable(h, c, 999);
+  clockEnable(h, c, 0, 41);
+  h.advancePerf(500);
+  h.document.querySelector('[data-action="previous"]').dispatchEvent({ type: "click" });
+  assert.equal(clockSamples(h).filter(s => s.kind === "collector_started").length, 1);
+  assert.ok(clockSamples(h).some(s => s.kind === "question_dwell" && s.monotonicElapsedMilliseconds === 1040 && s.durationMilliseconds === 1000));
+}
+function testTelemetryReloadAndZeroRawClockHaveIndependentOrigins() {
+  const c = contextFor("reload-clock");
+  const storage = new FakeStorage();
+  for (const [raw, id] of [[12000, 42], [0, 43]]) {
+    const h = createHarness(c, null, storage, { manifest: MULTI_MANIFEST, perfNow: raw });
+    clockEnable(h, c, 0, id);
+    assert.equal(clockSamples(h)[0].monotonicElapsedMilliseconds, 0);
+    h.advancePerf(3000);
+    clockNavigate(h);
+    assert.ok(clockSamples(h).some(s => s.kind === "question_dwell" && s.monotonicElapsedMilliseconds === 3000));
+    assert.ok(clockSamples(h).every(s => s.collectorId === id));
+  }
+}
+function testTelemetryFractionalIntervalsRoundAfterSubtracting() {
+  const c = contextFor("fractional-clock");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST, perfNow: 12000.25 });
+  clockEnable(h, c);
+  h.advancePerf(0.6);
+  clockNavigate(h);
+  assert.ok(clockSamples(h).some(s => s.kind === "question_first_view" && s.monotonicElapsedMilliseconds === 1));
+  assert.ok(clockSamples(h).some(s => s.kind === "question_dwell" && s.durationMilliseconds === 1));
+}
+function testTelemetryInvalidAnchorsAndMissingClockLeaveAnswersUsable() {
+  const invalid = [undefined, null, -1, 0.5, "0", NaN, Infinity, Number.MAX_SAFE_INTEGER + 1];
+  for (const anchor of invalid) {
+    const c = contextFor("invalid-anchor");
+    const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+    h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42, collectorElapsedMilliseconds: anchor } });
+    // Explicitly omit the field too; JSON-style undefined is not a valid anchor.
+    if (anchor === undefined) h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+    clockNavigate(h);
+    assert.equal(clockSamples(h).length, 0, `invalid anchor ${String(anchor)} refuses collection`);
+    const input = latestAnswerInput(h.document);
+    input.value = "answer-clock-canary";
+    input.dispatchEvent({ type: "input" });
+    assert.equal(input.value, "answer-clock-canary");
+  }
+  for (const raw of [-1, NaN, Infinity]) {
+    const c = contextFor("invalid-clock");
+    const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST, perfNow: raw });
+    clockEnable(h, c);
+    assert.equal(clockSamples(h).length, 0);
+  }
+  const c = contextFor("absent-clock");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+  h.window.performance = undefined;
+  clockEnable(h, c);
+  assert.equal(clockSamples(h).length, 0, "wall time cannot substitute for absent performance clock");
+}
+function testTelemetryRegressionFromZeroAndUnsafeAdditionEndCollection() {
+  for (const [raw, anchor, next] of [[0, 0, -0.1], [12000.25, 0, 12000.2], [0, Number.MAX_SAFE_INTEGER, 1], [0, 0, NaN]]) {
+    const c = contextFor("clock-failure");
+    const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST, perfNow: raw });
+    clockEnable(h, c, anchor);
+    h.setPerfNow(next);
+    clockNavigate(h);
+    const after = clockSamples(h).slice(1);
+    assert.ok(!after.some(s => s.kind === "question_dwell" || s.kind === "question_first_view"), "unknown clock cannot produce dwell or subsequent timing");
+    assert.ok(after.every(s => Number.isSafeInteger(s.monotonicElapsedMilliseconds) && s.monotonicElapsedMilliseconds >= 0));
+    h.setPerfNow(20000);
+    clockNavigate(h);
+    assert.equal(clockSamples(h).length, after.length + 1, "clock failure stays disabled until a new generation");
+  }
+}
+
+
+function testTelemetryRecoveryFinalizeMatchesCollectionOff() {
+  const c = contextFor("answer-equivalence");
+  const run = (collect) => {
+    const storage = new FakeStorage();
+    const h = createHarness(c, target => seedDurable(target, c, {
+      serverHighestSequence: 1, nextSequence: 2, previousEventHashHex: HEX32_A,
+      serverLastEventHashHex: HEX32_A, serverStateHashHex: HEX32_B
+    }), storage, { manifest: MULTI_MANIFEST, perfNow: 12000 });
+    if (collect) clockEnable(h, c, 40);
+    h.webview.emit(stateResponse(c, 1, HEX32_A, HEX32_B, false, [{
+      questionId: "q1", questionRevision: 1, sequence: 1,
+      clientTimeUnixMilliseconds: h.now(), kind: "upsert",
+      answer: "secret answer text clock canary", eventHashHex: HEX32_A
+    }]));
+    h.document.getElementById("notes").value = "private note clock canary";
+    h.document.getElementById("notes").dispatchEvent({ type: "input" });
+    h.advancePerf(3000);
+    clockNavigate(h);
+    h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    // Answer events retain their existing priority and checkpoint sequencing. Retire
+    // the recovered-answer upsert before expecting the queued finalize event.
+    const first = h.webview.messages.find(m => m.type === "exam_answer_event");
+    assert.ok(first, "submission sends the existing answer sequence first");
+    if (first.event.kind !== "finalize") {
+      h.webview.emit(stateResponse(c, first.event.sequence, first.event.eventHashHex,
+        HEX32_D, false, [{ questionId: first.event.questionId,
+          questionRevision: first.event.questionRevision, sequence: first.event.sequence,
+          clientTimeUnixMilliseconds: first.event.clientTimeUnixMilliseconds,
+          kind: first.event.kind, answer: first.event.answer, eventHashHex: first.event.eventHashHex }]));
+    }
+    const final = h.webview.messages.find(m => m.type === "exam_answer_event" && m.event.kind === "finalize");
+    assert.ok(final, "same recovered exam must finalize with telemetry on or off");
+    h.webview.emit(stateResponse(c, final.event.sequence, final.event.eventHashHex, HEX32_C, true));
+    h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    assertTelemetryPrivacy(clockSamples(h));
+    return {
+      messages: h.webview.messages.filter(m => m.type !== "exam_telemetry_samples"),
+      storage: [...storage.values],
+      response: JSON.parse(JSON.stringify(h.window.NSTU_EXAM_RESPONSE))
+    };
+  };
+  assert.deepEqual(run(true), run(false), "collection must preserve all non-telemetry messages, storage and finalize response");
+}
+function testTelemetryRawClockFailuresAndZeroWallHistory() {
+  const c = contextFor("raw-history");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST, perfNow: 0 });
+  clockEnable(h, c);
+  h.setNow(h.now() + 60000);
+  clockNavigate(h);
+  assert.ok(clockSamples(h).some(s => s.kind === "clock_discontinuity" && s.reason === "discontinuity_wall_clock"), "raw zero is real clock history");
+  assert.ok(!clockSamples(h).some(s => s.kind === "question_dwell"));
+  for (const failure of [undefined, { now() { throw new Error("clock unavailable"); } }, { now: () => Infinity }]) {
+    const live = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+    clockEnable(live, c);
+    live.window.performance = failure;
+    clockNavigate(live);
+    assert.equal(clockSamples(live).filter(s => s.kind === "clock_discontinuity").length, 1);
+    assert.ok(!clockSamples(live).some(s => s.kind === "question_dwell" || s.kind === "question_first_view"));
+    live.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    assert.ok(live.webview.messages.some(m => m.type === "exam_submit"), "broken telemetry clock cannot prevent submission");
+  }
+  for (const id of [0, -1, 0.1, "42", Number.MAX_SAFE_INTEGER + 1]) {
+    const live = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+    clockEnable(live, c, 0, id);
+    assert.equal(clockSamples(live).length, 0);
+  }
+}
+
+
+function assertRepairFinalizeAndAnswer(h, c) {
+  const submitted = h.webview.messages.find(m => m.type === "exam_submit");
+  assert.ok(submitted, "telemetry closure leaves submission usable");
+  assert.equal(submitted.response.answers.q1, "secret closure answer canary");
+  let final = h.webview.messages.find(m => m.type === "exam_answer_event" && m.event.kind === "finalize");
+  if (!final) {
+    const first = h.webview.messages.find(m => m.type === "exam_answer_event");
+    assert.ok(first);
+    h.webview.emit(stateResponse(c, first.event.sequence, first.event.eventHashHex, HEX32_D,
+      false, [{ questionId: first.event.questionId, questionRevision: first.event.questionRevision,
+        sequence: first.event.sequence, clientTimeUnixMilliseconds: first.event.clientTimeUnixMilliseconds,
+        kind: first.event.kind, answer: first.event.answer, eventHashHex: first.event.eventHashHex }]));
+    final = h.webview.messages.find(m => m.type === "exam_answer_event" && m.event.kind === "finalize");
+  }
+  assert.ok(final, "existing answer checkpoint still permits finalization");
+}
+function runRepairDirectClosure(disable, rawAdvance = 1000) {
+  const c = contextFor(disable ? "direct-disable-clock" : "direct-submit-clock");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+  h.webview.emit(stateResponse(c, 0, "", ""));
+  const input = latestAnswerInput(h.document);
+  input.value = "secret closure answer canary";
+  input.dispatchEvent({ type: "input" });
+  clockEnable(h, c);
+  h.setNow(h.now() + 60000);
+  h.setPerfNow(h.perfNow() + rawAdvance);
+  if (disable) {
+    h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: false,
+      collectorId: 42, collectorElapsedMilliseconds: 0 } });
+  } else {
+    h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+  }
+  const samples = clockSamples(h);
+  assert.ok(samples.some(s => s.kind === "clock_discontinuity" && s.reason === "discontinuity_wall_clock"), "direct closure must check wall/raw history");
+  assert.ok(!samples.some(s => s.kind === "question_dwell"), "direct closure cannot infer dwell across the clock discontinuity");
+  assert.ok(samples.every(s => Number.isSafeInteger(s.numericValue)), "fractional raw intervals must still emit valid integer numeric fields");
+  assertTelemetryPrivacy(samples);
+  if (disable) h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+  assertRepairFinalizeAndAnswer(h, c);
+}
+function testTelemetryDirectSubmitChecksClockDiscontinuity() { runRepairDirectClosure(false); runRepairDirectClosure(false, 1000.25); }
+function testTelemetryDirectDisableChecksClockDiscontinuity() { runRepairDirectClosure(true); runRepairDirectClosure(true, 1000.25); }
+function testTelemetryExplicitStartupRetryPreservesAnchorAndRawBaseline() {
+  const c = contextFor("startup-retry-clock");
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST, perfNow: 12000.25 });
+  clockEnable(h, c, 40);
+  const original = clockSamples(h)[0];
+  h.webview.messages.length = 0; // Native full-window drop of the original startup.
+  const input = latestAnswerInput(h.document);
+  input.value = "secret pending retry answer canary";
+  input.dispatchEvent({ type: "input" }); // Ordinary observations are pending independently.
+  h.advancePerf(1000);
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true,
+    collectorId: 42, collectorElapsedMilliseconds: 40, collectorStartupRetry: true } });
+  assert.deepEqual(clockSamples(h), [original], "explicit local retry resends the original startup only");
+  h.advancePerf(1000);
+  clockNavigate(h);
+  assert.ok(clockSamples(h).some(s => s.kind === "question_first_view" && s.monotonicElapsedMilliseconds === 2040));
+  assert.ok(clockSamples(h).some(s => s.kind === "question_dwell" && s.durationMilliseconds === 2000));
+  assert.ok(clockSamples(h).some(s => s.kind === "question_first_answer"), "retry must retain pending ordinary observations for their own flush");
+  assertTelemetryPrivacy(clockSamples(h));
+  h.webview.messages.length = 0;
+  for (const [id, anchor, retry] of [[41, 40, true], [42, 41, true], [42, 40, "true"], [42, 40, false]]) {
+    h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true,
+      collectorId: id, collectorElapsedMilliseconds: anchor, collectorStartupRetry: retry } });
+  }
+  assert.equal(clockSamples(h).length, 0, "ordinary or nonmatching requests cannot replay startup");
+  const retry = () => h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true,
+    collectorId: 42, collectorElapsedMilliseconds: 40, collectorStartupRetry: true } });
+  retry(); // Last successful retry was one second ago.
+  assert.deepEqual(clockSamples(h), [original]);
+  retry();
+  assert.equal(clockSamples(h).length, 1, "retry replies are throttled in raw browser time too");
+  h.advancePerf(1000);
+  retry();
+  assert.equal(clockSamples(h).length, 2);
+  h.advancePerf(1000);
+  retry();
+  assert.equal(clockSamples(h).length, 2, "browser retries also have a finite three-attempt budget");
 }
 
 testStaleWatermarkIsIgnored();
@@ -1409,10 +1664,19 @@ testTelemetryImeAndInputNormalization();
 testTelemetryClockDiscontinuityAndSubmission();
 const reviewTests = [testTelemetryEnableBeforeBeginStartsKnownDwell,
   testTelemetryRecoveryAfterEnableIsSilentlyBaselined,
-  testTelemetryPeriodicDiscontinuityResumesKnownDwell];
+  testTelemetryPeriodicDiscontinuityResumesKnownDwell,
+  testTelemetrySlowLoadUsesGenerationAnchor,
+  testTelemetryLateEnableUsesNativeAnchorAndDuplicatePreservesBaseline,
+  testTelemetryReloadAndZeroRawClockHaveIndependentOrigins,
+  testTelemetryFractionalIntervalsRoundAfterSubtracting,
+  testTelemetryInvalidAnchorsAndMissingClockLeaveAnswersUsable,
+  testTelemetryRegressionFromZeroAndUnsafeAdditionEndCollection,
+  testTelemetryRecoveryFinalizeMatchesCollectionOff, testTelemetryRawClockFailuresAndZeroWallHistory,
+  testTelemetryDirectSubmitChecksClockDiscontinuity, testTelemetryDirectDisableChecksClockDiscontinuity,
+  testTelemetryExplicitStartupRetryPreservesAnchorAndRawBaseline];
 const reviewFailures = [];
 for (const test of reviewTests) {
   try { test(); } catch (error) { reviewFailures.push(`${test.name}: ${error.stack}`); }
 }
 assert.strictEqual(reviewFailures.length, 0, reviewFailures.join("\n"));
-console.log("exam web recovery tests: 32 passed");
+console.log("exam web recovery tests: 43 passed");

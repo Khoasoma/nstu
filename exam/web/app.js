@@ -2260,6 +2260,9 @@
   const telemetry = {
     enabled: false,
     collectorId: 0,
+    startupSample: null,
+    startupRetryCount: 0,
+    lastStartupRetryRaw: null,
     currentQuestionIndex: -1,
     currentQuestionId: "",
     currentQuestionRevision: 0,
@@ -2271,18 +2274,53 @@
     isDwelling: false,
     pendingSamples: [],
     periodicTimer: null,
-    lastMonotonicTime: 0,
+    rawReceiptBaseline: null,
+    nativeAnchor: 0,
+    lastElapsed: 0,
+    lastMonotonicTime: null,
+    lastWallMonotonicTime: null,
     lastWallClockTime: 0,
     isComposing: false
   };
 
-  function currentMonotonicMs() {
-    const perf = (typeof window !== "undefined" && window.performance) ||
-                 (typeof performance !== "undefined" ? performance : null);
-    if (perf && typeof perf.now === "function") {
-      return Math.round(perf.now());
+  function rawPerformanceMs() {
+    try {
+      const perf = (typeof window !== "undefined" && window.performance) ||
+                   (typeof performance !== "undefined" ? performance : null);
+      if (!perf || typeof perf.now !== "function") return null;
+      const raw = perf.now();
+      return Number.isFinite(raw) && raw >= 0 ? raw : null;
+    } catch (_) { return null; }
+  }
+
+  function endTelemetryClock() {
+    telemetry.isDwelling = false;
+    // The last valid mapped observation remains measurable. Do not manufacture
+    // an elapsed time or dwell across the failed clock segment.
+    emitTelemetrySample({ kind: "clock_discontinuity", reason: "discontinuity_monotonic",
+      monotonicElapsedMilliseconds: telemetry.lastElapsed });
+    flushTelemetry();
+    telemetry.enabled = false;
+    if (telemetry.periodicTimer) {
+      window.clearInterval(telemetry.periodicTimer);
+      telemetry.periodicTimer = null;
     }
-    return Date.now();
+  }
+
+  function readTelemetryClock() {
+    if (!telemetry.enabled) return null;
+    const raw = rawPerformanceMs();
+    const delta = raw === null ? NaN : Math.round(raw - telemetry.rawReceiptBaseline);
+    if (raw === null || raw < telemetry.lastMonotonicTime ||
+        !Number.isSafeInteger(delta) || delta < 0 ||
+        delta > Number.MAX_SAFE_INTEGER - telemetry.nativeAnchor) {
+      endTelemetryClock();
+      return null;
+    }
+    const elapsed = telemetry.nativeAnchor + delta;
+    telemetry.lastMonotonicTime = raw;
+    telemetry.lastElapsed = elapsed;
+    return { raw, elapsed };
   }
 
   function currentWallClockMs() {
@@ -2291,7 +2329,10 @@
 
   function emitTelemetrySample(sample) {
     if (!telemetry.enabled) return;
-    const nowMono = currentMonotonicMs();
+    const explicitElapsed = Number.isSafeInteger(sample.monotonicElapsedMilliseconds) &&
+      sample.monotonicElapsedMilliseconds >= 0;
+    const clock = explicitElapsed ? null : readTelemetryClock();
+    if (!telemetry.enabled || (!explicitElapsed && !clock)) return;
     const nowWall = currentWallClockMs();
     const qid = typeof sample.questionId === "string" ? sample.questionId : "";
     const item = qid ? questionById(qid) : null;
@@ -2303,8 +2344,8 @@
       collectorId: telemetry.collectorId,
       questionId: qid,
       questionRevision: qid ? qrev : 0,
-      monotonicElapsedMilliseconds: Number.isSafeInteger(sample.monotonicElapsedMilliseconds)
-        ? sample.monotonicElapsedMilliseconds : nowMono,
+      monotonicElapsedMilliseconds: explicitElapsed
+        ? sample.monotonicElapsedMilliseconds : clock.elapsed,
       durationMilliseconds: Math.max(0, Math.min(0xffffffff, Number(sample.durationMilliseconds) || 0)),
       clientTimeUnixMilliseconds: Number.isSafeInteger(sample.clientTimeUnixMilliseconds)
         ? sample.clientTimeUnixMilliseconds : nowWall,
@@ -2313,6 +2354,7 @@
       reason: String(sample.reason || "none")
     };
     telemetry.pendingSamples.push(clean);
+    return clean;
   }
 
   function flushTelemetry() {
@@ -2334,15 +2376,20 @@
 
   function startDwell() {
     if (!canDwell() || !telemetry.currentQuestionId || telemetry.isDwelling) return;
-    telemetry.dwellStartMonotonic = currentMonotonicMs();
+    const clock = readTelemetryClock();
+    if (!clock) return;
+    telemetry.dwellStartMonotonic = clock.raw;
     telemetry.isDwelling = true;
   }
 
   function closeDwell(record = true) {
     if (!telemetry.isDwelling) return;
-    const now = currentMonotonicMs();
-    const elapsed = Math.max(0, now - telemetry.dwellStartMonotonic);
+    if (!record) { telemetry.isDwelling = false; return; }
+    const clock = readTelemetryClock();
+    if (!clock) return;
+    const elapsed = Math.round(clock.raw - telemetry.dwellStartMonotonic);
     telemetry.isDwelling = false;
+    if (!Number.isSafeInteger(elapsed) || elapsed < 0) { endTelemetryClock(); return; }
     if (record && elapsed > 0 && telemetry.currentQuestionId) {
       emitTelemetrySample({
         kind: "question_dwell",
@@ -2355,29 +2402,20 @@
   }
 
   function checkClockDiscontinuity() {
-    if (!telemetry.enabled) return;
-    const mono = currentMonotonicMs();
+    const clock = readTelemetryClock();
+    if (!clock) return;
     const wall = currentWallClockMs();
-    if (telemetry.lastMonotonicTime > 0) {
-      const monoDiff = mono - telemetry.lastMonotonicTime;
+    if (telemetry.lastWallMonotonicTime !== null) {
+      const monoDiff = clock.raw - telemetry.lastWallMonotonicTime;
       const wallDiff = wall - telemetry.lastWallClockTime;
-      if (monoDiff < 0) {
+      if (Math.abs(wallDiff - monoDiff) > 15000) {
         closeDwell(false);
-        emitTelemetrySample({
-          kind: "clock_discontinuity",
-          reason: "discontinuity_monotonic",
-          numericValue: 0
-        });
-      } else if (Math.abs(wallDiff - monoDiff) > 15000) {
-        closeDwell(false);
-        emitTelemetrySample({
-          kind: "clock_discontinuity",
-          reason: "discontinuity_wall_clock",
-          numericValue: Math.abs(wallDiff - monoDiff)
-        });
+        emitTelemetrySample({ kind: "clock_discontinuity", reason: "discontinuity_wall_clock",
+          monotonicElapsedMilliseconds: clock.elapsed,
+          numericValue: Math.round(Math.abs(wallDiff - monoDiff)) });
       }
     }
-    telemetry.lastMonotonicTime = mono;
+    telemetry.lastWallMonotonicTime = clock.raw;
     telemetry.lastWallClockTime = wall;
   }
 
@@ -2430,26 +2468,52 @@
     const shouldEnable = enable.enabled === true || enable.enabled === 1 || enable.enabled === "1";
     if (!shouldEnable) {
       if (telemetry.enabled) {
+        checkClockDiscontinuity();
         closeDwell(true);
         flushTelemetry();
         telemetry.enabled = false;
       }
       return;
     }
-    if (telemetry.enabled) {
+    // A generation gets one receipt baseline and one startup. Stale enables
+    // cannot establish or replace it, even after a clock failure.
+    if (telemetry.collectorId !== 0) {
+      if (enable.collectorStartupRetry !== true || !telemetry.enabled || !telemetry.startupSample ||
+          enable.collectorId !== telemetry.collectorId ||
+          enable.collectorElapsedMilliseconds !== telemetry.nativeAnchor ||
+          telemetry.startupRetryCount >= 3) return;
+      const clock = readTelemetryClock();
+      if (!clock || clock.raw - telemetry.lastStartupRetryRaw < 1000) return;
+      telemetry.lastStartupRetryRaw = clock.raw;
+      telemetry.startupRetryCount += 1;
+      // A retry is the original startup in its own packet. Pending ordinary
+      // observations keep their mapped times and cannot be discarded with it.
+      postHostMessage({ type: "exam_telemetry_samples", samples: [telemetry.startupSample] });
       return;
     }
+    if (enable.collectorStartupRetry === true) return;
+    if (!Number.isSafeInteger(enable.collectorId) || enable.collectorId <= 0 ||
+        !Number.isSafeInteger(enable.collectorElapsedMilliseconds) ||
+        enable.collectorElapsedMilliseconds < 0) return;
+    const raw = rawPerformanceMs();
+    if (raw === null) return;
     telemetry.enabled = true;
-    telemetry.collectorId = Number(enable.collectorId) || 0;
-    telemetry.lastMonotonicTime = currentMonotonicMs();
+    telemetry.collectorId = enable.collectorId;
+    telemetry.nativeAnchor = enable.collectorElapsedMilliseconds;
+    telemetry.rawReceiptBaseline = raw;
+    telemetry.lastStartupRetryRaw = raw;
+    telemetry.lastElapsed = telemetry.nativeAnchor;
+    telemetry.lastMonotonicTime = raw;
+    telemetry.lastWallMonotonicTime = raw;
     telemetry.lastWallClockTime = currentWallClockMs();
 
     const hasPreExistingEdits = Object.keys(state.answers).some((k) => !answerIsEmpty(state.answers[k]));
     const isLate = state.started && (state.index > 0 || hasPreExistingEdits);
     const startReason = isLate ? "collector_late_enable" : "collector_initial";
 
-    emitTelemetrySample({
+    telemetry.startupSample = emitTelemetrySample({
       kind: "collector_started",
+      monotonicElapsedMilliseconds: telemetry.nativeAnchor,
       reason: startReason,
       numericValue: 0
     });
@@ -2470,7 +2534,7 @@
       startDwell();
     }
 
-    if (!telemetry.periodicTimer) {
+    if (telemetry.enabled && !telemetry.periodicTimer) {
       telemetry.periodicTimer = window.setInterval(() => {
         checkClockDiscontinuity();
         startDwell();
@@ -2484,6 +2548,9 @@
     closeDwell(false);
     telemetry.enabled = false;
     telemetry.collectorId = 0;
+    telemetry.startupSample = null;
+    telemetry.startupRetryCount = 0;
+    telemetry.lastStartupRetryRaw = null;
     telemetry.currentQuestionIndex = -1;
     telemetry.currentQuestionId = "";
     telemetry.currentQuestionRevision = 0;
@@ -2498,7 +2565,11 @@
       window.clearInterval(telemetry.periodicTimer);
       telemetry.periodicTimer = null;
     }
-    telemetry.lastMonotonicTime = 0;
+    telemetry.rawReceiptBaseline = null;
+    telemetry.nativeAnchor = 0;
+    telemetry.lastElapsed = 0;
+    telemetry.lastMonotonicTime = null;
+    telemetry.lastWallMonotonicTime = null;
     telemetry.lastWallClockTime = 0;
     telemetry.isComposing = false;
   }
@@ -2849,6 +2920,7 @@
     el("save-status").textContent = text("submitted");
     document.querySelectorAll("button, input, textarea, select").forEach((node) => { node.disabled = true; });
     if (telemetry.enabled) {
+      checkClockDiscontinuity();
       closeDwell(true);
       emitTelemetrySample({
         kind: "exam_submitted",

@@ -814,7 +814,222 @@ void test_collector_identity_is_distinct_across_restart_and_hosts() {
     assert(!error.empty());
 }
 
+
+void exercise_browser_clock_safe_boundary() {
+    using namespace nstu::client;
+    std::vector<nstu::exam::TelemetrySample> samples;
+    std::string error;
+    const std::string unsafe = R"json({"type":"exam_telemetry_samples","samples":[{
+        "kind":"collector_started","collectorId":42,
+        "monotonicElapsedMilliseconds":9007199254740992,
+        "clientTimeUnixMilliseconds":1700000000000,"reason":"collector_initial"
+    }]})json";
+    assert(!parse_browser_telemetry_samples(unsafe, 42, {}, samples, &error));
+    auto maximum = unsafe;
+    maximum.replace(maximum.find("9007199254740992"), 16, "9007199254740991");
+    assert(parse_browser_telemetry_samples(maximum, 42, {}, samples, &error));
+    assert(samples[0].monotonic_elapsed_milliseconds == kMaximumExamCollectorId);
+    maximum.replace(maximum.find("\"collectorId\":42"), 16, "\"collectorId\":9007199254740992");
+    assert(!parse_browser_telemetry_samples(maximum, kMaximumExamCollectorId + 1, {}, samples, &error));
+}
+
+
+void exercise_native_capture_clock() {
+    using namespace nstu;
+    using namespace nstu::client;
+    using Clock = ExamHostTelemetryState::Clock;
+    const Clock::time_point origin{};
+    const auto at = [origin](std::uint64_t ms) { return origin + std::chrono::milliseconds(ms); };
+    const auto event = make_event();
+    exam::StateRequest context;
+    context.package_id = event.package_id; context.package_digest = event.package_digest;
+    context.client_id = event.client_id; context.session_id = event.session_id;
+    context.candidate_id = event.candidate_id;
+    exam::TelemetryEnable enable;
+    enable.package_id = context.package_id; enable.package_digest = context.package_digest;
+    enable.client_id = context.client_id; enable.session_id = context.session_id;
+    enable.candidate_id = context.candidate_id;
+    enable.server_time_unix_milliseconds = 1700000000000ULL;
+    ExamHostTelemetryState clock;
+    assert(clock.start(context, 42, origin));
+    assert(clock.apply_enable(enable));
+    unsigned posts = 0;
+    std::string posted;
+    const auto post = [&](std::string_view json) { ++posts; posted = json; return true; };
+    const auto packet = [](std::string id, std::string kind, std::uint64_t elapsed, unsigned numeric = 999) {
+        return "{\"type\":\"exam_telemetry_samples\",\"samples\":[{" + id +
+            "\"kind\":\"" + kind + "\",\"monotonicElapsedMilliseconds\":" + std::to_string(elapsed) +
+            ",\"clientTimeUnixMilliseconds\":1700000000000,\"numericValue\":" + std::to_string(numeric) +
+            ",\"reason\":\"" + (kind == "collector_started" ? "collector_initial" : "none") + "\"}]}";
+    };
+    const std::string id = "\"collectorId\":42,";
+    std::vector<exam::TelemetrySample> samples;
+    std::string error;
+    // Failed local publication never authorizes a browser clock.
+    assert(!clock.post_browser_enable([](std::string_view) { return false; }, at(30)));
+    assert(!clock.forward_browser_samples(packet(id, "collector_started", 30), {}, at(35), samples, &error));
+    assert(!clock.forward_browser_samples(packet(id, "focus_changed", 35), {}, at(35), samples, &error));
+    assert(clock.post_browser_enable(post, at(40)));
+    assert(posted.find("\"collectorId\":42") != std::string::npos);
+    assert(posted.find("\"collectorElapsedMilliseconds\":40") != std::string::npos);
+    assert(!clock.forward_browser_samples(packet(id, "focus_changed", 40), {}, at(45), samples, &error));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":41,", "collector_started", 40), {}, at(46), samples, &error));
+    assert(!clock.forward_browser_samples(packet(id, "collector_started", 39), {}, at(47), samples, &error));
+    assert(!clock.forward_browser_samples(packet("", "collector_started", 40), {}, at(48), samples, &error));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":0,", "collector_started", 40), {}, at(49), samples, &error));
+    assert(clock.forward_browser_samples(packet(id, "collector_started", 40), {}, at(65), samples, &error));
+    assert(samples.size() == 1 && samples[0].monotonic_elapsed_milliseconds == 40);
+    assert(samples[0].numeric_value == 27); // native receipt interval + signed quantization slack
+    assert(clock.apply_enable(enable));
+    assert(clock.post_browser_enable(post, at(70)) && posts == 1);
+    assert(!clock.forward_browser_samples(packet(id, "collector_started", 40), {}, at(75), samples, &error));
+    assert(!clock.forward_browser_samples(packet("", "focus_changed", 50), {}, at(75), samples, &error));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":0,", "focus_changed", 50), {}, at(75), samples, &error));
+    assert(clock.forward_browser_samples(packet(id, "focus_changed", 50), {}, at(75), samples, &error));
+    assert(!clock.forward_browser_samples(packet(id, "focus_changed", 49), {}, at(76), samples, &error));
+    assert(!clock.forward_browser_samples(packet(id, "focus_changed", 60), {}, at(77), samples, &error));
+
+    // Reload at a repeated zero anchor still requires the new explicitly supplied ID.
+    clock.advance_collector(43, origin);
+    assert(clock.post_browser_enable(post, at(0)));
+    for (const std::string raw_id : {"", "\"collectorId\":0,", "\"collectorId\":42,", "\"collectorId\":9007199254740992,"}) {
+        assert(!clock.forward_browser_samples(packet(raw_id, "collector_started", 0), {}, at(0), samples, &error));
+    }
+    const std::string new_id = "\"collectorId\":43,";
+    assert(clock.forward_browser_samples(packet(new_id, "collector_started", 0), {}, at(0), samples, &error));
+    assert(samples[0].numeric_value == 2);
+    const auto radius = samples[0].numeric_value;
+    // At initial calibration, estimate 1 with radius 2 includes native floored elapsed 0.
+    assert(clock.forward_browser_samples(packet(new_id, "focus_changed", 1), {}, origin + std::chrono::microseconds(600), samples, &error));
+    assert(samples[0].monotonic_elapsed_milliseconds == 1);
+    const auto estimate = samples[0].monotonic_elapsed_milliseconds;
+    const auto lower = estimate > radius ? estimate - radius : 0;
+    const auto upper = estimate + radius;
+    assert(lower == 0 && upper == 3);
+    const auto floored_native = clock.native_elapsed(origin + std::chrono::microseconds(600));
+    assert(floored_native && lower <= *floored_native && *floored_native <= upper);
+
+    clock.advance_collector(44, origin);
+    assert(clock.post_browser_enable(post, at(40)));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":44,", "collector_started", 40), {}, at(39), samples, &error));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":44,", "collector_started", 40), {}, at(65), samples, &error));
+    clock.advance_collector(45, origin);
+    assert(clock.post_browser_enable(post, at(0)));
+    const auto largest_radius = static_cast<std::uint64_t>(UINT32_MAX) - 2;
+    assert(clock.forward_browser_samples(packet("\"collectorId\":45,", "collector_started", 0), {}, at(largest_radius), samples, &error));
+    assert(samples[0].numeric_value == UINT32_MAX);
+    clock.advance_collector(46, origin);
+    assert(clock.post_browser_enable(post, at(0)));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":46,", "collector_started", 0), {}, at(largest_radius + 1), samples, &error));
+    // Signed steady-clock subtraction extremes refuse overflow rather than clamp.
+    clock.advance_collector(47, Clock::time_point::min());
+    assert(!clock.native_elapsed(Clock::time_point::max()));
+    clock.advance_collector(48, origin);
+    assert(!clock.post_browser_enable([](std::string_view) -> bool { throw 1; }, at(0)));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":48,", "collector_started", 0), {}, at(0), samples, &error));
+    assert(clock.post_browser_enable(post, at(0)));
+    assert(clock.forward_browser_samples(packet("\"collectorId\":48,", "collector_started", 0), {}, at(65), samples, &error));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":48,", "focus_changed", 1), {}, at(64), samples, &error));
+    assert(!clock.forward_browser_samples(packet("\"collectorId\":48,", "focus_changed", 1), {}, at(66), samples, &error));
+    clock.stop();
+    assert(!clock.post_browser_enable(post, at(0)));
+    assert(!clock.forward_browser_samples(packet(new_id, "collector_started", 0), {}, at(0), samples, &error));
+    assert(clock.start(context, 0, origin)); // unavailable telemetry identity cannot block the exam context
+    assert(!clock.apply_enable(enable));
+    assert(make_exam_telemetry_enable_json(enable, kMaximumExamCollectorId, kMaximumExamCollectorId).find(
+        "\"collectorElapsedMilliseconds\":9007199254740991") != std::string::npos);
+    assert(make_exam_telemetry_enable_json(enable, 0, 0).empty());
+    assert(make_exam_telemetry_enable_json(enable, 42, kMaximumExamCollectorId + 1).empty());
+    assert(make_exam_telemetry_enable_json(enable, kMaximumExamCollectorId + 1, 0).empty());
+}
+
+
+void exercise_native_startup_full_window_recovery() {
+    using namespace nstu;
+    using namespace nstu::client;
+    using Clock = ExamHostTelemetryState::Clock;
+    const Clock::time_point origin{};
+    const auto at = [origin](int ms) { return origin + std::chrono::milliseconds(ms); };
+    const auto event = make_event();
+    exam::StateRequest context;
+    context.package_id = event.package_id; context.package_digest = event.package_digest;
+    context.client_id = event.client_id; context.session_id = event.session_id;
+    context.candidate_id = event.candidate_id;
+    exam::TelemetryEnable enable;
+    enable.package_id = context.package_id; enable.package_digest = context.package_digest;
+    enable.client_id = context.client_id; enable.session_id = context.session_id;
+    enable.candidate_id = context.candidate_id; enable.server_time_unix_milliseconds = 1700000000000ULL;
+    ExamHostTelemetryState telemetry;
+    assert(telemetry.start(context, 42, origin));
+    assert(telemetry.apply_enable(enable));
+    std::vector<std::string> posted;
+    const auto post = [&](std::string_view json) { posted.emplace_back(json); return true; };
+    const auto packet = [](unsigned id, std::string_view kind, unsigned elapsed, unsigned count = 1) {
+        const std::string item = "{\"kind\":\"" + std::string(kind) + "\",\"collectorId\":" +
+            std::to_string(id) + ",\"monotonicElapsedMilliseconds\":" + std::to_string(elapsed) +
+            ",\"clientTimeUnixMilliseconds\":1700000000000,\"reason\":\"none\"}";
+        std::string json = "{\"type\":\"exam_telemetry_samples\",\"samples\":[";
+        for (unsigned i = 0; i < count; ++i) { if (i != 0) json += ','; json += item; }
+        return json + "]}";
+    };
+    std::vector<exam::TelemetrySample> samples;
+    std::string error;
+    assert(telemetry.post_browser_enable(post, at(40)));
+    assert(telemetry.forward_browser_samples(packet(42, "collector_started", 40), {}, at(65), samples, &error));
+    for (unsigned batch = 0; batch < 7; ++batch) {
+        assert(telemetry.forward_browser_samples(packet(42, "focus_changed", 70, 32), {}, at(100), samples, &error));
+    }
+    assert(telemetry.forward_browser_samples(packet(42, "focus_changed", 70, 31), {}, at(100), samples, &error));
+    // Exactly 256 admitted samples fill the existing window, including startup.
+    assert(!telemetry.forward_browser_samples(packet(42, "focus_changed", 70), {}, at(100), samples, &error));
+    telemetry.advance_collector(43, at(200));
+    assert(telemetry.post_browser_enable(post, at(200)));
+    assert(!telemetry.forward_browser_samples(packet(43, "collector_started", 0), {}, at(201), samples, &error));
+    assert(!telemetry.forward_browser_samples(packet(43, "focus_changed", 1), {}, at(201), samples, &error));
+    assert(!telemetry.maintain_browser_startup(post, at(1199)) && posted.size() == 2);
+    assert(telemetry.maintain_browser_startup(post, at(1200)) && posted.size() == 3);
+    assert(posted.back().find("\"collectorStartupRetry\":true") != std::string::npos);
+    assert(posted.back().find("\"collectorId\":43") != std::string::npos);
+    assert(posted.back().find("\"collectorElapsedMilliseconds\":0") != std::string::npos);
+    assert(!telemetry.maintain_browser_startup(post, at(1200)) && posted.size() == 3);
+    assert(!telemetry.forward_browser_samples(packet(43, "focus_changed", 1), {}, at(1200), samples, &error));
+    assert(!telemetry.forward_browser_samples(packet(42, "collector_started", 0), {}, at(1200), samples, &error));
+    assert(!telemetry.forward_browser_samples(packet(43, "collector_started", 1), {}, at(1200), samples, &error));
+    assert(telemetry.forward_browser_samples(packet(43, "collector_started", 0), {}, at(1201), samples, &error));
+    assert(samples[0].numeric_value == 1003); // Same original anchor, later receipt.
+    for (unsigned batch = 0; batch < 7; ++batch) {
+        assert(telemetry.forward_browser_samples(packet(43, "focus_changed", 2, 32), {}, at(1300), samples, &error));
+    }
+    assert(telemetry.forward_browser_samples(packet(43, "focus_changed", 2, 31), {}, at(1300), samples, &error));
+    assert(!telemetry.forward_browser_samples(packet(43, "focus_changed", 2), {}, at(1300), samples, &error));
+    assert(!telemetry.maintain_browser_startup(post, at(2200)) && posted.size() == 3);
+    assert(telemetry.apply_enable(enable));
+    assert(telemetry.post_browser_enable(post, at(2200)) && posted.size() == 3);
+    // An already queued retry reply is rejected as another startup, while an
+    // ordinary standalone packet remains eligible after the quota window resets.
+    assert(!telemetry.forward_browser_samples(packet(43, "collector_started", 0), {}, at(2201), samples, &error));
+    assert(telemetry.forward_browser_samples(packet(43, "focus_changed", 3), {}, at(2201), samples, &error));
+    telemetry.advance_collector(44, at(2300));
+    assert(telemetry.post_browser_enable(post, at(2300)));
+    assert(!telemetry.maintain_browser_startup(post, at(3299)));
+    assert(!telemetry.maintain_browser_startup([](std::string_view) { return false; }, at(3300)));
+    assert(!telemetry.maintain_browser_startup(post, at(3400))); // Failed attempts are throttled too.
+    assert(telemetry.maintain_browser_startup(post, at(4300)));
+    assert(telemetry.maintain_browser_startup(post, at(5300)));
+    const auto count_after_budget = posted.size();
+    assert(!telemetry.maintain_browser_startup(post, at(6300)) && posted.size() == count_after_budget);
+    assert(!telemetry.maintain_browser_startup(post, at(10000)) && posted.size() == count_after_budget);
+    telemetry.advance_collector(45, at(10100));
+    assert(telemetry.post_browser_enable(post, at(10100)));
+    assert(telemetry.maintain_browser_startup(post, at(11100)));
+    telemetry.stop();
+    assert(!telemetry.maintain_browser_startup(post, at(12100)));
+}
+
 int main() {
+    exercise_native_startup_full_window_recovery();
+    exercise_native_capture_clock();
+    exercise_browser_clock_safe_boundary();
     test_collector_identity_is_distinct_across_restart_and_hosts();
     using namespace nstu;
 

@@ -1208,7 +1208,8 @@ std::string ack_status_name(exam::AnswerAckStatus status) {
 }
 
 [[maybe_unused]] std::string make_telemetry_enable_json(
-    const exam::TelemetryEnable& enable, std::uint64_t collector_id) {
+    const exam::TelemetryEnable& enable, std::uint64_t collector_id,
+    std::uint64_t collector_elapsed_milliseconds, bool startup_retry) {
     return "{\"type\":\"exam_telemetry_enable\",\"enable\":{"
            "\"packageId\":\"" + json_escape(enable.package_id) +
            "\",\"packageDigestHex\":\"" + hex_string(enable.package_digest) +
@@ -1217,7 +1218,8 @@ std::string ack_status_name(exam::AnswerAckStatus status) {
            "\",\"candidateId\":\"" + json_escape(enable.candidate_id) +
            "\",\"enabled\":true,"
            "\"collectorId\":" + std::to_string(collector_id) +
-           "}}";
+           ",\"collectorElapsedMilliseconds\":" + std::to_string(collector_elapsed_milliseconds) +
+           (startup_retry ? ",\"collectorStartupRetry\":true" : "") + "}}";
 }
 
 [[maybe_unused]] std::string make_state_json(const exam::StateResponse& response) {
@@ -1589,9 +1591,6 @@ struct ExamHost::Impl {
     std::uint64_t operation_generation = 0;
 
     ExamHostTelemetryState telemetry;
-    std::uint64_t collector_start_monotonic_ms = 0;
-    std::uint64_t telemetry_rate_window_start_ms = 0;
-    std::uint32_t telemetry_rate_samples_in_window = 0;
 
 #if NSTU_HAS_WEBVIEW2
     HMODULE loader = nullptr;
@@ -2074,11 +2073,21 @@ HRESULT on_web_resource_requested(
     return S_OK;
 }
 
-void post_webview_json(ExamHost::Impl& host, std::string_view json) {
-    if (host.webview == nullptr || json.empty()) return;
+bool post_webview_json(ExamHost::Impl& host, std::string_view json) {
+    if (host.webview == nullptr || json.empty()) return false;
     const auto wide = utf8_to_wide(json);
-    if (wide.empty()) return;
-    (void)host.webview->PostWebMessageAsJson(wide.c_str());
+    return !wide.empty() && SUCCEEDED(host.webview->PostWebMessageAsJson(wide.c_str()));
+}
+
+void post_telemetry_enable(ExamHost::Impl& host, bool maintenance = false) noexcept {
+    if (!host.webview_ready || host.webview == nullptr) return;
+    try {
+        const auto post = [&host](std::string_view json) { return post_webview_json(host, json); };
+        if (maintenance) (void)host.telemetry.maintain_browser_startup(post);
+        else (void)host.telemetry.post_browser_enable(post);
+    } catch (...) {
+        // Telemetry publication failure must not alter answer availability.
+    }
 }
 
 HRESULT on_navigation_starting(ExamHost::Impl& host,
@@ -2096,6 +2105,9 @@ HRESULT on_navigation_starting(ExamHost::Impl& host,
         notify_status(host, "Exam navigation was blocked by the local policy.");
         return S_OK;
     }
+    // Navigation starts a new generation before any document can send data.
+    host.webview_ready = false;
+    host.telemetry.advance_collector();
     return S_OK;
 }
 
@@ -2180,28 +2192,18 @@ HRESULT on_web_message(ExamHost::Impl& host,
             }
         }
     } else if (type == "exam_telemetry_samples") {
-        if (!host.telemetry.enabled()) {
+        if (!host.telemetry.enabled() || !host.webview_ready) {
             // Collection remains off without a matching enable.
             return S_OK;
         }
-        const auto now_ms = GetTickCount64();
-        if (now_ms - host.telemetry_rate_window_start_ms > 1000) {
-            host.telemetry_rate_window_start_ms = now_ms;
-            host.telemetry_rate_samples_in_window = 0;
-        }
         std::vector<exam::TelemetrySample> samples;
         std::string parse_error;
-        if (!parse_browser_telemetry_samples(
-                json, host.telemetry.collector_id(), host.valid_question_ids,
+        if (!host.telemetry.forward_browser_samples(
+                json, host.valid_question_ids, ExamHostTelemetryState::Clock::now(),
                 samples, &parse_error)) {
             notify_status(host, "Exam telemetry rejected: " + parse_error);
             return S_OK;
         }
-        if (host.telemetry_rate_samples_in_window + samples.size() > 256) {
-            notify_status(host, "Exam telemetry burst limit exceeded; samples dropped.");
-            return S_OK;
-        }
-        host.telemetry_rate_samples_in_window += static_cast<std::uint32_t>(samples.size());
         const auto payload = encode_exam_telemetry_samples_payload(samples);
         if (!payload.empty() && host.callbacks.send_to_service) {
             host.callbacks.send_to_service(
@@ -2391,12 +2393,7 @@ void on_environment_created(ExamHost::Impl& host, std::uint64_t generation,
                     set_host_state(host, ExamHostState::running,
                                    "Exam host is ready.");
                     post_webview_json(host, "{\"type\":\"exam_host_ready\"}");
-                    host.telemetry.advance_collector();
-                    host.collector_start_monotonic_ms = GetTickCount64();
-                    if (host.telemetry.enabled() && host.telemetry.active_enable().has_value()) {
-                        post_webview_json(host, make_telemetry_enable_json(
-                            *host.telemetry.active_enable(), host.telemetry.collector_id()));
-                    }
+                    post_telemetry_enable(host);
                     return S_OK;
                 });
             host.process_failed_handler = make_webview_callback<
@@ -2661,9 +2658,6 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
         stop(command_publication);
         return false;
     }
-    impl_->collector_start_monotonic_ms = GetTickCount64();
-    impl_->telemetry_rate_window_start_ms = GetTickCount64();
-    impl_->telemetry_rate_samples_in_window = 0;
     set_host_state(*impl_, ExamHostState::initializing);
     enable_per_monitor_dpi_awareness();
     const auto instance = GetModuleHandleW(nullptr);
@@ -2869,15 +2863,18 @@ void ExamHost::drain_bridge() {
 #else
     exam_bridge().clear_through_publication(impl_->command_publication);
 #endif
+#if NSTU_HAS_WEBVIEW2
+    // Answer/control bridge work above keeps priority over calibration retries.
+    post_telemetry_enable(*impl_, true);
+#endif
     if (impl_->telemetry.enabled() && impl_->callbacks.send_to_service) {
-        const auto now_tick = GetTickCount64();
-        const auto now_mono = now_tick >= impl_->collector_start_monotonic_ms
-            ? (now_tick - impl_->collector_start_monotonic_ms) : 0;
+        const auto now_mono = impl_->telemetry.native_elapsed();
+        if (!now_mono) return;
         const auto now_wall = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
         if (const auto shortcut_sample = impl_->telemetry.drain_blocked_shortcuts(
-                now_mono, now_wall)) {
+                *now_mono, now_wall)) {
             const auto payload = encode_exam_telemetry_samples_payload(
                 std::span<const exam::TelemetrySample>(&*shortcut_sample, 1));
             if (!payload.empty()) {
@@ -2936,18 +2933,11 @@ bool ExamHost::apply_telemetry_enable(
     if (impl_ == nullptr || impl_->stopping || impl_->state == ExamHostState::failed) {
         return false;
     }
-    const bool was_enabled = impl_->telemetry.enabled();
     if (!impl_->telemetry.apply_enable(enable)) {
         return false;
     }
-    if (was_enabled) {
-        return true;
-    }
 #if NSTU_HAS_WEBVIEW2
-    if (impl_->webview_ready && impl_->webview != nullptr) {
-        post_webview_json(*impl_, make_telemetry_enable_json(
-            enable, impl_->telemetry.collector_id()));
-    }
+    post_telemetry_enable(*impl_);
 #endif
     return true;
 }
@@ -2960,12 +2950,17 @@ std::uint64_t ExamHost::telemetry_collector_id() const noexcept {
     return impl_ != nullptr ? impl_->telemetry.collector_id() : 0;
 }
 
-bool parse_browser_telemetry_samples(
+namespace {
+bool parse_browser_telemetry_samples_impl(
     std::string_view json,
     std::uint64_t native_collector_id,
     const std::set<std::string>& allowed_question_ids,
     std::vector<nstu::exam::TelemetrySample>& out_samples,
-    std::string* error) {
+    std::string* error, bool require_explicit_collector) {
+    if (native_collector_id == 0 || native_collector_id > kMaximumExamCollectorId) {
+        set_error(error, "invalid native collector id");
+        return false;
+    }
     if (json.empty() || json.size() > 32u * 1024u) {
         set_error(error, "telemetry json size is out of bounds");
         return false;
@@ -3041,11 +3036,10 @@ bool parse_browser_telemetry_samples(
             return false;
         }
 
-        sample.source = nstu::exam::TelemetrySource::browser;
-        sample.collector_id = native_collector_id;
-
         std::uint64_t browser_collector_id = 0;
-        if (!uint64_member(item, "collectorId", browser_collector_id, false)) {
+        if (!uint64_member(item, "collectorId", browser_collector_id, require_explicit_collector) ||
+            browser_collector_id > kMaximumExamCollectorId ||
+            (require_explicit_collector && browser_collector_id == 0)) {
             set_error(error, "invalid collectorId");
             return false;
         }
@@ -3056,6 +3050,8 @@ bool parse_browser_telemetry_samples(
             }
         }
 
+        sample.source = nstu::exam::TelemetrySource::browser;
+        sample.collector_id = native_collector_id;
         if (!string_member(item, "questionId", sample.question_id, false)) {
             set_error(error, "invalid questionId");
             return false;
@@ -3088,7 +3084,8 @@ bool parse_browser_telemetry_samples(
             return false;
         }
 
-        if (!uint64_member(item, "monotonicElapsedMilliseconds", sample.monotonic_elapsed_milliseconds, false)) {
+        if (!uint64_member(item, "monotonicElapsedMilliseconds", sample.monotonic_elapsed_milliseconds, require_explicit_collector) ||
+            sample.monotonic_elapsed_milliseconds > kMaximumExamCollectorId) {
             set_error(error, "invalid monotonicElapsedMilliseconds");
             return false;
         }
@@ -3174,6 +3171,25 @@ bool parse_browser_telemetry_samples(
 
     out_samples = std::move(parsed_samples);
     return true;
+}
+
+} // namespace
+
+bool parse_browser_telemetry_samples(
+    std::string_view json, std::uint64_t native_collector_id,
+    const std::set<std::string>& allowed_question_ids,
+    std::vector<exam::TelemetrySample>& out_samples, std::string* error) {
+    return parse_browser_telemetry_samples_impl(json, native_collector_id,
+        allowed_question_ids, out_samples, error, false);
+}
+
+std::string make_exam_telemetry_enable_json(
+    const exam::TelemetryEnable& enable, std::uint64_t collector_id,
+    std::uint64_t collector_elapsed_milliseconds, bool startup_retry) {
+    if (!exam::validate_telemetry_enable(enable) || collector_id == 0 ||
+        collector_id > kMaximumExamCollectorId ||
+        collector_elapsed_milliseconds > kMaximumExamCollectorId) return {};
+    return make_telemetry_enable_json(enable, collector_id, collector_elapsed_milliseconds, startup_retry);
 }
 
 namespace {
@@ -3305,7 +3321,8 @@ std::uint64_t allocate_exam_telemetry_collector_id() noexcept {
     return 0;
 }
 
-bool ExamHostTelemetryState::start(exam::StateRequest context, std::uint64_t collector_id) noexcept {
+bool ExamHostTelemetryState::start(exam::StateRequest context, std::uint64_t collector_id,
+                                   Clock::time_point origin) noexcept {
     stop();
     try {
         // The existing typed codec validates the complete native tuple.
@@ -3314,11 +3331,19 @@ bool ExamHostTelemetryState::start(exam::StateRequest context, std::uint64_t col
         return false;
     }
     context_ = std::move(context);
+    generation_origin_ = origin;
+    last_native_observation_ = origin;
+    browser_rate_window_start_ = origin;
+    browser_rate_samples_ = 0;
     collector_id_ = collector_id <= kMaximumExamCollectorId ? collector_id : 0;
     return true;
 }
 
 void ExamHostTelemetryState::stop() noexcept {
+    clear_browser_clock();
+    last_native_observation_.reset();
+    browser_rate_window_start_.reset();
+    browser_rate_samples_ = 0;
     shortcuts_.reset();
     active_enable_.reset();
     collector_id_ = 0;
@@ -3342,14 +3367,153 @@ bool ExamHostTelemetryState::apply_enable(const exam::TelemetryEnable& enable) n
     return true;
 }
 
-void ExamHostTelemetryState::advance_collector(std::uint64_t collector_id) noexcept {
+void ExamHostTelemetryState::advance_collector(std::uint64_t collector_id, Clock::time_point origin) noexcept {
     if (collector_id_ == 0) return;
     if (collector_id == 0 || collector_id > kMaximumExamCollectorId || collector_id == collector_id_) {
         stop();
         return;
     }
     collector_id_ = collector_id;
+    generation_origin_ = origin;
+    last_native_observation_ = origin;
+    clear_browser_clock();
     shortcuts_.reset(enabled());
+}
+
+void ExamHostTelemetryState::clear_browser_clock() noexcept {
+    pending_browser_anchor_.reset();
+    last_browser_elapsed_.reset();
+    browser_clock_bound_ = false;
+    last_startup_attempt_.reset();
+    startup_retry_attempts_ = 0;
+}
+
+std::optional<std::uint64_t> ExamHostTelemetryState::native_elapsed(Clock::time_point now) noexcept {
+    const auto origin_epoch = generation_origin_.time_since_epoch();
+    if (collector_id_ == 0 || now < generation_origin_ ||
+        (last_native_observation_ && now < *last_native_observation_) ||
+        (origin_epoch < Clock::duration::zero() &&
+         now.time_since_epoch() > Clock::duration::max() + origin_epoch)) {
+        clear_browser_clock();
+        return std::nullopt;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - generation_origin_).count();
+    if (elapsed < 0 || static_cast<std::uint64_t>(elapsed) > kMaximumExamCollectorId) {
+        clear_browser_clock();
+        return std::nullopt;
+    }
+    last_native_observation_ = now;
+    return static_cast<std::uint64_t>(elapsed);
+}
+
+bool ExamHostTelemetryState::post_browser_enable(
+    const std::function<bool(std::string_view)>& post, Clock::time_point now) {
+    if (!enabled() || !post) return false;
+    if (pending_browser_anchor_) return true; // Preserve the first successful publication.
+    const auto anchor = native_elapsed(now);
+    if (!anchor) return false;
+    const auto json = make_exam_telemetry_enable_json(*active_enable_, collector_id_, *anchor);
+    try {
+        if (json.empty() || !post(json)) {
+            clear_browser_clock();
+            return false;
+        }
+    } catch (...) {
+        clear_browser_clock();
+        return false;
+    }
+    pending_browser_anchor_ = *anchor;
+    last_startup_attempt_ = now;
+    return true;
+}
+
+bool ExamHostTelemetryState::maintain_browser_startup(
+    const std::function<bool(std::string_view)>& post, Clock::time_point now) {
+    if (!enabled() || !post || !pending_browser_anchor_ || browser_clock_bound_ ||
+        !last_startup_attempt_ || startup_retry_attempts_ >= 3) return false;
+    if (!native_elapsed(now)) return false;
+    const auto interval = std::chrono::seconds(1);
+    if (*last_startup_attempt_ > Clock::time_point::max() - interval ||
+        now < *last_startup_attempt_ + interval) return false;
+    // Failed retry publications also consume the finite, throttled budget.
+    last_startup_attempt_ = now;
+    ++startup_retry_attempts_;
+    try {
+        const auto json = make_exam_telemetry_enable_json(*active_enable_, collector_id_,
+            *pending_browser_anchor_, true);
+        return !json.empty() && post(json);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool ExamHostTelemetryState::forward_browser_samples(
+    std::string_view json, const std::set<std::string>& allowed_question_ids,
+    Clock::time_point receipt, std::vector<exam::TelemetrySample>& samples,
+    std::string* error) {
+    if (!enabled() || !pending_browser_anchor_) {
+        set_error(error, "browser clock has no published anchor");
+        return false;
+    }
+    std::vector<exam::TelemetrySample> parsed;
+    // Inspect every explicitly supplied raw ID before the parser rebinds identity.
+    if (!parse_browser_telemetry_samples_impl(json, collector_id_, allowed_question_ids,
+            parsed, error, true)) return false;
+    const auto received = native_elapsed(receipt);
+    if (!received) {
+        set_error(error, "native receipt clock regressed");
+        return false;
+    }
+    const auto interval = std::chrono::seconds(1);
+    if (!browser_rate_window_start_ ||
+        (*browser_rate_window_start_ <= Clock::time_point::max() - interval &&
+         receipt > *browser_rate_window_start_ + interval)) {
+        browser_rate_window_start_ = receipt;
+        browser_rate_samples_ = 0;
+    }
+    if (parsed.size() > 256u - browser_rate_samples_) {
+        set_error(error, "browser telemetry burst limit exceeded");
+        return false; // Retain the pending anchor; UI maintenance can retry startup.
+    }
+    auto last_elapsed = last_browser_elapsed_.value_or(*pending_browser_anchor_);
+    const bool binding = !browser_clock_bound_;
+    if (binding && (parsed.front().kind != exam::TelemetrySampleKind::collector_started ||
+        parsed.front().monotonic_elapsed_milliseconds != *pending_browser_anchor_)) {
+        set_error(error, "browser startup does not match the pending anchor");
+        return false;
+    }
+    for (std::size_t i = 0; i < parsed.size(); ++i) {
+        auto& sample = parsed[i];
+        if (sample.kind == exam::TelemetrySampleKind::collector_started && (!binding || i != 0)) {
+            set_error(error, "duplicate browser startup");
+            return false;
+        }
+        if (sample.monotonic_elapsed_milliseconds < last_elapsed) {
+            clear_browser_clock();
+            set_error(error, "browser elapsed clock regressed");
+            return false;
+        }
+        last_elapsed = sample.monotonic_elapsed_milliseconds;
+    }
+    if (binding) {
+        const auto anchor = *pending_browser_anchor_;
+        if (*received < anchor || *received - anchor > std::numeric_limits<std::uint32_t>::max() - 2ULL) {
+            clear_browser_clock();
+            set_error(error, "initial browser uncertainty is out of bounds");
+            return false;
+        }
+        // Mapped estimates have an initial signed interval
+        // [max(0, estimate-U), estimate+U], U = receipt-anchor+2 ms.
+        // This covers delivery and quantization, not later drift or coarsening;
+        // cross-source order within the interval remains unknown.
+        parsed.front().numeric_value = static_cast<std::uint32_t>(*received - anchor + 2);
+        browser_clock_bound_ = true;
+    }
+    last_browser_elapsed_ = last_elapsed;
+    browser_rate_samples_ += static_cast<std::uint32_t>(parsed.size());
+    samples = std::move(parsed);
+    return true;
 }
 
 void ExamHostTelemetryState::record_blocked_shortcuts(std::uint32_t count) noexcept {
