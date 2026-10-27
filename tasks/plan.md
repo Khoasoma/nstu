@@ -156,6 +156,29 @@ Cross-channel answer equivalence/leakage tests and all local gates/reviews pass.
 
 Real WebView2/VM evidence passes. Human separately authorizes any push; MSVC `/W4 /WX` Release CI is final automated gate.
 
+## Autonomous continuation and scoped task plans — 2026-10-27
+
+The user authorized a one-minute resume heartbeat, planning and task splitting
+before implementation, prioritized subagents, and main promotion only after
+the relevant work is complete, functioning, reviewed and tested with passing CI.
+The durable protocol is [autonomous-workflow.md](autonomous-workflow.md); the
+derived product capability/task index is
+[product-execution-plan.md](product-execution-plan.md). Preserve this incomplete
+Phase 4 plan and the authoritative checklist while extending its follow-up work.
+
+The next corrective unit is
+[CAPTURE-CLOCK-1](task-plans/capture-clock-1.md): native generation-relative
+timing, a local WebView enable anchor, and an explicit native-owned initial
+delivery uncertainty in the previously unused collector-start numeric field.
+No telemetry codec, answer channel or service producer/sequence change is allowed.
+Clock-boundary, privacy, compatibility and failure behavior are specified before
+coding; bounded browser aggregation follows as a separate unit.
+
+`PRODUCT_ROADMAP_NSTU.md` is a private local source and must never be staged,
+committed or uploaded. Derived requirements may be recorded in scoped plans.
+Green CI alone does not clear the remaining capture bugs, unfinished server
+durability/ACK path or required acceptance/runtime evidence for main integration.
+
 ## Out of scope
 
 Automatic verdicts/flags/penalties/grading; teacher monitor UI; answer keys/content; generic protocol v2; post-stop upload; app suppression; IPv6/default-deny WFP; replacing answer journal, audit sink or public diagnostics telemetry.

@@ -18,6 +18,9 @@ telemetry feature or substitute for its required independent acceptance.
   authenticated begin, and resume a known dwell segment after discontinuity.
 - Reject malformed native telemetry numeric/string fields and unchecked narrowing.
 - Reject a deadline send whose final write finishes at the absolute deadline.
+- Map browser observations to a native steady-clock generation anchor with
+  explicit initial uncertainty, strict live collector binding and bounded
+  startup retry. Direct closure handles clock discontinuity without unknown dwell.
 - Allocate exact native collector IDs from a random process origin and shared
   monotonic counter; host restart and document reload cannot reuse a live
   process ID. Unavailable allocation disables collection without blocking exams.
@@ -29,9 +32,8 @@ These fixes have regression coverage. The review report is
 
 | Order | Finding and scope | Required proof |
 |---|---|---|
-| 1 | **P2: clock origin mismatch.** Native host, browser collector and their tests. Establish a documented mapping between document-generation elapsed time and native elapsed time. | Slow document loading, late enable and reload do not merge timestamps with different origins; unknown intervals remain unknown. |
-| 2 | **P2: unbounded browser summaries.** `exam/web/app.js` and browser tests. Coalesce normalized answer changes per question before flushing and bound pending observations. | A sustained edit flood uses bounded memory and packets, preserves observed change totals and navigation/dwell, records bounded loss, and contains no answer/notes/clipboard text. |
-| 3 | Storage hardening tests for protected zero/wrong-length expiry barriers, blocked barrier deletion, ACK/enqueue/purge/clear during cleanup failure and interrupted pristine initialization. | All mutation paths refuse unsafe recovery; cleanup retry preserves quotas and revocations. |
+| 1 | **P2: unbounded browser summaries.** `exam/web/app.js` and browser tests. Coalesce normalized answer changes per question before flushing and bound pending observations. | A sustained edit flood uses bounded memory and packets, preserves observed change totals and navigation/dwell, records bounded loss, and contains no answer/notes/clipboard text. |
+| 2 | Storage hardening tests for protected zero/wrong-length expiry barriers, blocked barrier deletion, ACK/enqueue/purge/clear during cleanup failure and interrupted pristine initialization. | All mutation paths refuse unsafe recovery; cleanup retry preserves quotas and revocations. |
 
 Use separate tests-first units and fresh read-only review for each repair. Preserve
 the answer channel and original assertions. These repairs do not authorize

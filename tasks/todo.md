@@ -19,6 +19,24 @@ Checkpoint B peer/runtime evidence and the collector P2 repairs remain pending.
 The user explicitly authorized commit and push of reviewed work to the feature
 branch on October 27, 2026. Tasks 12–17 retain their existing dependencies.
 
+## Autonomous continuation
+
+The user authorized the one-minute resume heartbeat, planned scoped subagents,
+and conditional main promotion after completion, working behavior, applicable
+reviews/runtime evidence and exact-revision CI. See
+[the resumable workflow](autonomous-workflow.md) and
+[the derived product task index](product-execution-plan.md).
+The private original product roadmap must never be published.
+
+[CAPTURE-CLOCK-1](task-plans/capture-clock-1.md) is locally implemented and
+independently re-reviewed: browser 43 cases, native focused coverage, fast and
+strict 49/49 with zero compiler warnings. Its scope includes generation clock
+mapping, explicit raw collector IDs, native initial uncertainty, bounded startup
+retry under the unchanged quota, and direct closure discontinuity checks.
+Required historical acceptance/checkpoint boxes are unchanged. The next repair
+is bounded browser summary aggregation; server durability/ACK and runtime
+qualification still keep the integration incomplete for main.
+
 ## Task 0: Isolate the work
 
 **Description:** Keep Phase 4 out of PR #6. Human decision: merge PR #6 first, then branch from updated `main`. Merge/branch actions still require explicit authorization.
