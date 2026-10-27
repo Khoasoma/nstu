@@ -50,6 +50,18 @@ nstu_enable_warnings(nstu_exam_control_tests)
 nstu_enable_test_assertions(nstu_exam_control_tests)
 add_test(NAME nstu.exam_control COMMAND nstu_exam_control_tests)
 
+add_executable(nstu_exam_telemetry_tests exam_telemetry_tests.cpp)
+target_link_libraries(nstu_exam_telemetry_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_exam_telemetry_tests)
+nstu_enable_test_assertions(nstu_exam_telemetry_tests)
+add_test(NAME nstu.exam_telemetry COMMAND nstu_exam_telemetry_tests)
+
+add_executable(nstu_exam_telemetry_outbox_tests exam_telemetry_outbox_tests.cpp)
+target_link_libraries(nstu_exam_telemetry_outbox_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_exam_telemetry_outbox_tests)
+nstu_enable_test_assertions(nstu_exam_telemetry_outbox_tests)
+add_test(NAME nstu.exam_telemetry_outbox COMMAND nstu_exam_telemetry_outbox_tests)
+
 add_executable(nstu_packet_loss_tests packet_loss_tests.cpp)
 target_link_libraries(nstu_packet_loss_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_packet_loss_tests)

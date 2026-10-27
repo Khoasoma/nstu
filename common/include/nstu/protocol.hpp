@@ -107,6 +107,13 @@ enum class CommandType : std::uint16_t {
     // exam_control.
     exam_ready = 53,
     exam_begin = 54,
+    // Phase 4 Exam Timing & Behavior Telemetry commands.
+    // server -> client: carries telemetry enable configuration and exam identities.
+    exam_telemetry_enable = 55,
+    // client -> server: carries canonical encoded telemetry sample batch.
+    exam_telemetry_batch = 56,
+    // server -> client: carries receipt acknowledgment with terminal/retry status.
+    exam_telemetry_ack = 57,
 };
 
 enum class ConnectionRole : std::uint8_t {
