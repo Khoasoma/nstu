@@ -1163,6 +1163,142 @@ void test_expired_enqueue_cannot_race_a_send_offer() {
 }
 
 #ifdef _WIN32
+std::vector<std::byte> read_protected_fixture(const std::filesystem::path& path) {
+    std::ifstream stream(path, std::ios::binary | std::ios::ate);
+    assert(stream.is_open());
+    const auto size = stream.tellg();
+    assert(size > 0);
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    stream.seekg(0);
+    stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    assert(stream.good());
+    return bytes;
+}
+
+void assert_invalid_protected_expiry_barrier(
+    const std::string& suffix, const std::vector<std::byte>& plaintext, bool tamper = false) {
+    constexpr std::string_view entropy_text = "NSTU-Exam-Telemetry-Outbox-v1";
+    const std::span<const std::byte> entropy{
+        reinterpret_cast<const std::byte*>(entropy_text.data()), entropy_text.size()};
+    std::string error;
+    auto protected_barrier = nstu::security::protect_machine_secret(plaintext, entropy, &error);
+    assert(!protected_barrier.empty());
+    assert(error.empty());
+    assert(nstu::security::unprotect_machine_secret(protected_barrier, entropy, &error) == plaintext);
+    assert(error.empty());
+    if (tamper) {
+        assert(plaintext.size() == 8);
+        protected_barrier.back() ^= std::byte{1};
+        assert(nstu::security::unprotect_machine_secret(protected_barrier, entropy, &error).empty());
+        assert(!error.empty());
+    }
+
+    const auto path = temp_test_path("protected_barrier_" + suffix);
+    const auto barrier = std::filesystem::path(path.wstring() + L".expiry");
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+    assert(!ec);
+    std::filesystem::remove(barrier, ec);
+    assert(!ec);
+    assert(quarantine_files(path).empty());
+    const auto batch = make_batch(1, 1, wall_clock_ms() - 60000ULL);
+    const auto encoded_batch = nstu::exam::encode_telemetry_batch(batch);
+    const auto batch_hash = nstu::exam::compute_telemetry_batch_hash(batch);
+    assert(!encoded_batch.empty() && batch_hash);
+    nstu::exam::TelemetryOutbox seed;
+    assert(seed.open(path));
+    assert(seed.enqueue(batch));
+    // Normalize the empty loss slot before freezing the valid durable fixture.
+    assert(seed.open(path));
+    const auto now = wall_clock_ms();
+    const auto eligible = seed.next_batch_to_send(now);
+    assert(eligible && nstu::exam::encode_telemetry_batch(*eligible) == encoded_batch);
+    seed.close();
+    const auto payload_bytes = read_protected_fixture(path);
+    const auto payload_write_time = std::filesystem::last_write_time(path);
+    assert(payload_write_time > std::filesystem::file_time_type::clock::now() -
+        std::chrono::hours(24 * nstu::exam::kTelemetryRetentionDays));
+    {
+        std::ofstream stream(barrier, std::ios::binary | std::ios::trunc);
+        assert(stream.is_open());
+        stream.write(reinterpret_cast<const char*>(protected_barrier.data()),
+                     static_cast<std::streamsize>(protected_barrier.size()));
+        stream.flush();
+        assert(stream.good());
+    }
+    assert(read_protected_fixture(barrier) == protected_barrier);
+    const auto barrier_write_time = std::filesystem::last_write_time(barrier);
+
+    nstu::exam::TelemetryOutbox recovered;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        error.clear();
+        assert(!recovered.open(path, now, &error));
+        assert(!error.empty());
+        assert(!recovered.is_open());
+        assert(recovered.pending_batches().empty());
+        assert(recovered.empty() && recovered.bytes() == 0);
+        assert(!recovered.next_batch_to_send(now));
+        assert(read_protected_fixture(path) == payload_bytes);
+        assert(std::filesystem::last_write_time(path) == payload_write_time);
+        assert(read_protected_fixture(barrier) == protected_barrier);
+        assert(std::filesystem::last_write_time(barrier) == barrier_write_time);
+        assert(quarantine_files(path).empty());
+    }
+
+    assert(std::filesystem::remove(barrier));
+    error.clear();
+    assert(recovered.open(path, now, &error));
+    assert(error.empty() && recovered.is_open());
+    const auto pending = recovered.pending_batches();
+    assert(pending.size() == 1);
+    assert(pending.front().session_id == batch.session_id);
+    assert(pending.front().producer_id == batch.producer_id);
+    assert(pending.front().sequence == batch.sequence);
+    assert(pending.front().first_enqueued_at_unix_milliseconds == batch.first_enqueued_at_unix_milliseconds);
+    assert(nstu::exam::compute_telemetry_batch_hash(pending.front()) == batch_hash);
+    assert(nstu::exam::encode_telemetry_batch(pending.front()) == encoded_batch);
+    assert(read_protected_fixture(path) == payload_bytes);
+    assert(std::filesystem::last_write_time(path) == payload_write_time);
+    assert(!std::filesystem::exists(barrier));
+    assert(quarantine_files(path).empty());
+    const auto offered = recovered.next_batch_to_send(now);
+    assert(offered && nstu::exam::encode_telemetry_batch(*offered) == encoded_batch);
+    // The earlier producer stamp must still expire the recovered batch on time.
+    const auto boundary = batch.first_enqueued_at_unix_milliseconds + nstu::exam::kTelemetryRetentionMilliseconds;
+    recovered.clear_inflight();
+    assert(recovered.next_batch_to_send(boundary - 1));
+    assert(!recovered.next_batch_to_send(boundary));
+    assert(recovered.empty());
+    assert(recovered.aggregate_loss(batch.session_id).expired_batches == 1);
+    recovered.close();
+    assert(!std::filesystem::exists(barrier));
+    assert(quarantine_files(path).empty());
+    assert(std::filesystem::remove(path));
+    std::cout << "Protected expiry barrier " << suffix << ": round-trip, refusal, preservation, recovery and retention passed.\n";
+}
+
+void test_protected_seven_byte_expiry_barrier_is_refused() {
+    assert_invalid_protected_expiry_barrier("seven_byte", std::vector<std::byte>(7, std::byte{1}));
+}
+
+void test_protected_nine_byte_expiry_barrier_is_refused() {
+    assert_invalid_protected_expiry_barrier("nine_byte", std::vector<std::byte>(9, std::byte{1}));
+}
+
+void test_protected_zero_expiry_barrier_is_refused() {
+    assert_invalid_protected_expiry_barrier("eight_byte_zero", std::vector<std::byte>(8, std::byte{0}));
+}
+
+void test_tampered_protected_expiry_barrier_is_refused() {
+    const auto observed = wall_clock_ms();
+    assert(observed != 0);
+    std::vector<std::byte> plaintext;
+    for (std::size_t i = 0; i < 8; ++i) {
+        plaintext.push_back(static_cast<std::byte>((observed >> (8u * i)) & 0xffu));
+    }
+    assert_invalid_protected_expiry_barrier("tampered_eight_byte_nonzero", plaintext, true);
+}
+
 nstu::exam::SessionId disjoint_loss_context_id(std::uint8_t bank, std::size_t index) {
     nstu::exam::SessionId id{};
     id[0] = static_cast<std::byte>(bank + 1u);
@@ -1467,6 +1603,13 @@ int main(int argc, char** argv) {
         if (selected == "zero-loss") { test_nonzero_loss_without_first_stamp_is_refused(); return 0; }
         if (selected == "concurrent") { test_expired_enqueue_cannot_race_a_send_offer(); return 0; }
 #ifdef _WIN32
+        if (selected == "protected-barriers") {
+            test_protected_seven_byte_expiry_barrier_is_refused();
+            test_protected_nine_byte_expiry_barrier_is_refused();
+            test_protected_zero_expiry_barrier_is_refused();
+            test_tampered_protected_expiry_barrier_is_refused();
+            return 0;
+        }
         if (selected == "observation-cap") { test_loss_expiry_observation_union_is_bounded(); return 0; }
         if (selected == "observed-reopen") { test_observed_expiry_survives_same_instance_reopen_failure(); return 0; }
         if (selected == "observed-close") { test_observed_expiry_survives_explicit_close_and_reopen(); return 0; }
@@ -1507,6 +1650,10 @@ int main(int argc, char** argv) {
     test_nonzero_loss_without_first_stamp_is_refused();
     test_expired_enqueue_cannot_race_a_send_offer();
 #ifdef _WIN32
+    test_protected_seven_byte_expiry_barrier_is_refused();
+    test_protected_nine_byte_expiry_barrier_is_refused();
+    test_protected_zero_expiry_barrier_is_refused();
+    test_tampered_protected_expiry_barrier_is_refused();
     test_automatic_expiry_persistence_failure_is_closed();
     test_loss_expiry_observation_union_is_bounded();
     test_observed_expiry_survives_same_instance_reopen_failure();
