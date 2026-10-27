@@ -1789,6 +1789,141 @@ void test_mixed_expiry_duplicate_ack_retires_exact_batch_while_barrier_deletion_
     run_mixed_expiry_ack_with_locked_barrier(nstu::exam::TelemetryAckStatus::duplicate);
 }
 
+void assert_mixed_cleanup_empty(const MixedCleanupFixture& fixture,
+                                const nstu::exam::TelemetryOutbox& loaded, bool cleared,
+                                const nstu::exam::TelemetryOutboxAggregateLoss& expected_loss) {
+    const auto disk = read_mixed_cleanup_disk(fixture.path);
+    assert(loaded.empty() && loaded.size() == 0 && loaded.bytes() == 0);
+    assert(loaded.pending_batches().empty());
+    assert(disk.batches.empty() && disk.arrivals.empty());
+    assert(disk.active_session == (cleared ? nstu::exam::SessionId{} : fixture.current_session));
+    if (cleared) {
+        assert(disk.losses.empty());
+    } else {
+        assert(disk.losses.size() == 1);
+        assert_mixed_cleanup_loss_equal(disk.losses[0], expected_loss);
+    }
+    assert_mixed_cleanup_loss_equal(loaded.aggregate_loss(), expected_loss);
+    assert_mixed_cleanup_loss_equal(loaded.aggregate_loss(fixture.current_session), expected_loss);
+    assert_mixed_cleanup_loss_equal(loaded.aggregate_loss(fixture.stale_session), {});
+    assert(!std::filesystem::exists(std::filesystem::path(fixture.path.wstring() + L".revoked")));
+    assert(quarantine_files(fixture.path).empty());
+}
+
+void run_mixed_expiry_removal_with_locked_barrier(bool cleared) {
+    const std::string suffix = cleared ? "clear" : "purge";
+    MixedCleanupFixture fixture("removal_" + suffix);
+    fixture.assert_state(fixture.outbox, false, false);
+    assert(fixture.outbox.is_open() && fixture.outbox.size() == 4);
+    HANDLE payload_lock = CreateFileW(fixture.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(payload_lock != INVALID_HANDLE_VALUE);
+    std::string error;
+    assert(fixture.outbox.prune_expired(fixture.boundary, &error) == 0);
+    assert(error == "failed to atomically rename outbox file");
+    assert(read_protected_fixture(fixture.path) == fixture.original_payload);
+    assert(std::filesystem::last_write_time(fixture.path) == fixture.original_write_time);
+    const auto barrier_bytes = read_protected_fixture(fixture.barrier);
+    error.clear();
+    assert(nstu::security::unprotect_machine_secret(barrier_bytes, mixed_cleanup_entropy(), &error) ==
+        mixed_cleanup_time_bytes(fixture.boundary));
+    assert(error.empty());
+    fixture.assert_state(fixture.outbox, false, true);
+    HANDLE barrier_lock = CreateFileW(fixture.barrier.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(barrier_lock != INVALID_HANDLE_VALUE);
+    assert(CloseHandle(payload_lock));
+    error.clear();
+    // Publish the real R1/R2 cleanup before testing successful removal.
+    assert(fixture.outbox.prune_expired(fixture.boundary - 1, &error) == 0);
+    assert(error == "expiry barrier cleanup failed");
+    fixture.assert_state(fixture.outbox, true, true);
+    assert(fixture.outbox.is_open() && fixture.outbox.size() == 2);
+    const auto cleaned_payload = read_protected_fixture(fixture.path);
+    assert(cleaned_payload != fixture.original_payload);
+    const auto cleaned_loss = fixture.outbox.aggregate_loss(fixture.current_session);
+    assert(cleaned_loss.session_id == fixture.current_session);
+    assert(cleaned_loss.rejected_batches == 0 && cleaned_loss.conflict_batches == 1 && cleaned_loss.expired_batches == 2);
+    assert(cleaned_loss.first_recorded_unix_ms == fixture.time && cleaned_loss.last_updated_unix_ms >= fixture.time);
+    assert(read_protected_fixture(fixture.barrier) == barrier_bytes);
+    fixture.assert_alternate_untouched();
+    error.clear();
+    assert(cleared ? fixture.outbox.clear(&error) : fixture.outbox.purge(&error));
+    assert(error.empty() && fixture.outbox.is_open());
+    const auto expected_loss = cleared ? nstu::exam::TelemetryOutboxAggregateLoss{} : cleaned_loss;
+    assert_mixed_cleanup_empty(fixture, fixture.outbox, cleared, expected_loss);
+    const auto empty_payload = read_protected_fixture(fixture.path);
+    assert(empty_payload != cleaned_payload);
+    const auto empty_write_time = std::filesystem::last_write_time(fixture.path);
+    const auto assert_empty_unchanged = [&] {
+        assert(fixture.outbox.is_open());
+        assert_mixed_cleanup_empty(fixture, fixture.outbox, cleared, expected_loss);
+        assert(read_protected_fixture(fixture.path) == empty_payload);
+        assert(std::filesystem::last_write_time(fixture.path) == empty_write_time);
+        assert(read_protected_fixture(fixture.barrier) == barrier_bytes);
+        fixture.assert_alternate_untouched();
+    };
+    assert_empty_unchanged();
+    assert(!fixture.outbox.next_batch_to_send(fixture.boundary - 1));
+    assert_empty_unchanged();
+    error.clear();
+    assert(!fixture.outbox.enqueue(make_batch(105, 2, fixture.time), &error));
+    assert(error == "expiry barrier cleanup failed");
+    assert_empty_unchanged();
+    error.clear();
+    assert(!fixture.outbox.open(fixture.alternate_path, fixture.boundary - 1, &error));
+    assert(error == "observed expiry cleanup pending; cannot change outbox path");
+    assert_empty_unchanged();
+    nstu::exam::TelemetryOutbox blocked_restart;
+    error.clear();
+    assert(!blocked_restart.open(fixture.path, fixture.boundary - 1, &error));
+    assert(error == "expiry barrier cleanup failed");
+    assert(!blocked_restart.is_open() && blocked_restart.empty() && blocked_restart.size() == 0);
+    assert(blocked_restart.bytes() == 0 && blocked_restart.pending_batches().empty());
+    assert(!blocked_restart.next_batch_to_send(fixture.boundary - 1));
+    assert_mixed_cleanup_loss_equal(blocked_restart.aggregate_loss(), expected_loss);
+    assert_mixed_cleanup_loss_equal(blocked_restart.aggregate_loss(fixture.current_session), expected_loss);
+    assert_mixed_cleanup_loss_equal(blocked_restart.aggregate_loss(fixture.stale_session), {});
+    assert_empty_unchanged();
+    assert(CloseHandle(barrier_lock));
+    error.clear();
+    assert(fixture.outbox.open(fixture.path, fixture.boundary - 1, &error));
+    assert(error.empty() && fixture.outbox.is_open());
+    assert(!std::filesystem::exists(fixture.barrier));
+    assert_mixed_cleanup_empty(fixture, fixture.outbox, cleared, expected_loss);
+    assert(read_protected_fixture(fixture.path) == empty_payload);
+    assert(std::filesystem::last_write_time(fixture.path) == empty_write_time);
+    assert(!fixture.outbox.next_batch_to_send(fixture.boundary - 1));
+    assert_mixed_cleanup_empty(fixture, fixture.outbox, cleared, expected_loss);
+    fixture.assert_alternate_untouched();
+    fixture.outbox.close();
+    nstu::exam::TelemetryOutbox restarted;
+    for (const auto reopen_time : {fixture.boundary - 1, fixture.boundary - 2, fixture.boundary - 2}) {
+        error.clear();
+        assert(restarted.open(fixture.path, reopen_time, &error));
+        assert(error.empty() && restarted.is_open());
+        assert_mixed_cleanup_empty(fixture, restarted, cleared, expected_loss);
+        assert(!restarted.next_batch_to_send(reopen_time));
+        assert_mixed_cleanup_empty(fixture, restarted, cleared, expected_loss);
+        assert(read_protected_fixture(fixture.path) == empty_payload);
+        assert(std::filesystem::last_write_time(fixture.path) == empty_write_time);
+        assert(!std::filesystem::exists(fixture.barrier));
+        fixture.assert_alternate_untouched();
+    }
+    restarted.close();
+    fixture.finish();
+    std::cout << "Mixed expiry removal " << suffix
+              << ": real locked barrier, successful empty publication, refused gates and empty rollback recovery passed.\n";
+}
+
+void test_mixed_expiry_purge_succeeds_after_committed_cleanup_while_barrier_deletion_is_blocked() {
+    run_mixed_expiry_removal_with_locked_barrier(false);
+}
+
+void test_mixed_expiry_clear_succeeds_after_committed_cleanup_while_barrier_deletion_is_blocked() {
+    run_mixed_expiry_removal_with_locked_barrier(true);
+}
+
 nstu::exam::SessionId disjoint_loss_context_id(std::uint8_t bank, std::size_t index) {
     nstu::exam::SessionId id{};
     id[0] = static_cast<std::byte>(bank + 1u);
@@ -2093,6 +2228,11 @@ int main(int argc, char** argv) {
         if (selected == "zero-loss") { test_nonzero_loss_without_first_stamp_is_refused(); return 0; }
         if (selected == "concurrent") { test_expired_enqueue_cannot_race_a_send_offer(); return 0; }
 #ifdef _WIN32
+        if (selected == "mixed-cleanup-removals") {
+            test_mixed_expiry_purge_succeeds_after_committed_cleanup_while_barrier_deletion_is_blocked();
+            test_mixed_expiry_clear_succeeds_after_committed_cleanup_while_barrier_deletion_is_blocked();
+            return 0;
+        }
         if (selected == "mixed-cleanup-acks") {
             test_mixed_expiry_accepted_ack_retires_exact_batch_while_barrier_deletion_is_blocked();
             test_mixed_expiry_duplicate_ack_retires_exact_batch_while_barrier_deletion_is_blocked();
@@ -2154,6 +2294,8 @@ int main(int argc, char** argv) {
     test_mixed_expiry_barrier_deletion_failure_preserves_committed_cleanup_and_path();
     test_mixed_expiry_accepted_ack_retires_exact_batch_while_barrier_deletion_is_blocked();
     test_mixed_expiry_duplicate_ack_retires_exact_batch_while_barrier_deletion_is_blocked();
+    test_mixed_expiry_purge_succeeds_after_committed_cleanup_while_barrier_deletion_is_blocked();
+    test_mixed_expiry_clear_succeeds_after_committed_cleanup_while_barrier_deletion_is_blocked();
     test_protected_seven_byte_expiry_barrier_is_refused();
     test_protected_nine_byte_expiry_barrier_is_refused();
     test_protected_zero_expiry_barrier_is_refused();

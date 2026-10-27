@@ -66,6 +66,14 @@ and all three exact-revision Windows CI jobs passed. Production code is unchange
 The next scoped unit is
 [exact ACK retirement under a blocked barrier](task-plans/storage-recovery-1c-2.md).
 
+STORAGE-RECOVERY-1C-2 is published as `049a11e`: both exact accepted/duplicate ACK
+cases passed, preserving R2 and full loss/retention state while gates stayed
+closed until barrier cleanup. Fresh supporting review, independent Root
+fast/strict 49/49 with zero warnings and all three exact-revision Windows CI jobs
+passed. Production code is unchanged. Removal is split into
+[1C-3A success](task-plans/storage-recovery-1c-3a.md) and a following 1C-3B mixed
+replacement-failure/revocation unit before pristine initialization.
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current

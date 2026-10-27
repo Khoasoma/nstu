@@ -181,9 +181,12 @@ CAPTURE-CLOCK-1, bounded browser aggregation, question-ID compatibility and the
 first two storage recovery units are published with exact-revision Windows CI.
 STORAGE-RECOVERY-1C-1 mixed cleanup/path isolation is published as `7ad7960` with
 fresh supporting review, independent Root gates and all three Windows CI jobs.
+STORAGE-RECOVERY-1C-2 exact ACK retirement is published as `049a11e` with fresh
+supporting review, independent Root gates and all three Windows CI jobs.
 The active follow-up is
-[STORAGE-RECOVERY-1C-2](task-plans/storage-recovery-1c-2.md): exact safe ACK
-retirement while barrier deletion is blocked. Purge/clear remains a separate unit in
+[STORAGE-RECOVERY-1C-3A](task-plans/storage-recovery-1c-3a.md): successful purge/clear
+after cleaned publication while barrier deletion is blocked. Mixed replacement
+failure/revocation remains a separate 1C-3B unit under
 [storage-recovery-1c.md](task-plans/storage-recovery-1c.md); pristine interrupted
 initialization follows. No telemetry codec, answer channel or service
 producer/sequence change is allowed.
