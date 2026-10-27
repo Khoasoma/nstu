@@ -8,11 +8,14 @@ unit receives its own scoped plan before coding, following
 
 ## Current evidence
 
-`6709d33` is published on the telemetry feature branch. Its local fast and strict
-gates passed 49/49, browser checks passed 32 cases, and all three required Windows
-build/test/installer CI jobs passed. These are revision-bound results, not proof
-of feature completion. Bounded browser summaries,
-required acceptance/peer evidence, and Tasks 12â€“17 remain unfinished.
+`a871850` is published on the telemetry feature branch with completed clock and
+bounded aggregation repairs:63 browser cases, Root fast/strict49/49 with zero
+compiler warnings, fresh review and all three exact-revision Windows CI jobs.
+The narrow question-ID repair is also locally implemented/reviewed using the
+existing128-byte shared limit, preserving96-byte manifest admission and all
+UTF-8/NUL/allowlist/generation checks; its new revision receives its own CI.
+Required acceptance/peer evidence and Tasks12–17 remain unfinished, so main
+integration is not ready. Results are revision-bound, not feature completion.
 
 The current code already has answer recovery, snapshot/Focus/broadcast/chat,
 discovery/preferred-room/SAS pairing, installer role selection, diagnostics and

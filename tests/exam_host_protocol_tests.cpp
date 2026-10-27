@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -1026,7 +1027,211 @@ void exercise_native_startup_full_window_recovery() {
     assert(!telemetry.maintain_browser_startup(post, at(12100)));
 }
 
+void exercise_manifest_question_id_bounds() {
+    std::error_code error;
+    const auto temporary = std::filesystem::temp_directory_path(error);
+    assert(!error);
+    const auto root = temporary / ("nstu-exam-question-ids-" +
+        std::to_string(GetCurrentProcessId()) + "-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    const auto package = root / "sample";
+    const auto web = package / "exam" / "web";
+    assert(std::filesystem::create_directories(web, error));
+    assert(!error);
+    {
+        std::ofstream page(web / "index.html", std::ios::binary);
+        assert(page);
+        page << "<!doctype html><title>question IDs</title>";
+    }
+    for (const std::size_t bytes : {65u, 96u, 97u}) {
+        const std::string question_id(bytes, 'q');
+        const std::string manifest =
+            "{\"id\":\"question-id-bounds\",\"title\":\"Question IDs\",\"durationSeconds\":600,"
+            "\"questions\":[{\"id\":\"" + question_id +
+            "\",\"type\":\"short_answer\",\"prompt\":\"Answer\"}]}";
+        {
+            std::ofstream file(package / "manifest.json", std::ios::binary | std::ios::trunc);
+            assert(file);
+            file << manifest;
+        }
+        nstu::client::ExamPackageReport report;
+        std::string inspection_error;
+        const bool accepted = nstu::client::inspect_exam_package(
+            package, web, {}, false, report, &inspection_error);
+        assert(accepted == (bytes <= 96));
+        if (accepted) assert(report.manifest_json == manifest);
+        else assert(inspection_error == "exam manifest question is invalid");
+    }
+    std::filesystem::remove_all(root, error);
+    assert(!error);
+}
+
+void exercise_parser_question_id_bounds() {
+    using namespace nstu::client;
+    using namespace nstu::exam;
+    const std::string id65(65, 'a');
+    const std::string id96(96, 'b');
+    const std::string id128(128, 'c'); // Shared parser/IPC bound; not manifest-valid.
+    const std::string id129(129, 'd');
+    std::string multibyte;
+    for (unsigned i = 0; i < 43; ++i) multibyte += "\xe2\x82\xac"; // 43 characters, 129 bytes.
+    const std::string invalid_utf8 = id65 + "\xc3\x28";
+    const std::string nul_id = id65 + std::string(1, '\0');
+    const std::set<std::string> allowed = {id65, id96, id128, id129, multibyte, invalid_utf8, nul_id};
+    const auto packet = [](const std::string& id, std::uint64_t revision = 7) {
+        return "{\"type\":\"exam_telemetry_samples\",\"samples\":[{\"kind\":\"question_dwell\","
+            "\"source\":\"native\",\"collectorId\":42,\"questionId\":\"" + id +
+            "\",\"questionRevision\":" + std::to_string(revision) +
+            ",\"monotonicElapsedMilliseconds\":12500,\"durationMilliseconds\":3500,"
+            "\"clientTimeUnixMilliseconds\":1700000001000,\"numericValue\":9,\"count\":1,"
+            "\"reason\":\"navigation_button\"}]}";
+    };
+    std::array<bool, 2> admitted{};
+    std::vector<TelemetrySample> samples;
+    std::string error;
+    std::size_t index = 0;
+    // Record both original-boundary outcomes before either positive assertion.
+    for (const auto& id : {id65, id96}) {
+        error.clear();
+        admitted[index++] = parse_browser_telemetry_samples(packet(id), 42, allowed, samples, &error);
+        std::fprintf(stderr, "question-ID parser: %zu-byte accepted=%d error=%s\n",
+                     id.size(), admitted[index - 1] ? 1 : 0, error.c_str());
+    }
+    assert(admitted[0]);
+    assert(admitted[1]);
+    for (const auto& id : {id65, id96, id128}) {
+        assert(parse_browser_telemetry_samples(packet(id), 42, allowed, samples, &error));
+        assert(samples.size() == 1);
+        const auto& sample = samples.front();
+        assert(sample.question_id == id && sample.question_revision == 7);
+        assert(sample.kind == TelemetrySampleKind::question_dwell);
+        assert(sample.source == TelemetrySource::browser && sample.collector_id == 42);
+        assert(sample.monotonic_elapsed_milliseconds == 12500 && sample.duration_milliseconds == 3500);
+        assert(sample.client_time_unix_milliseconds == 1700000001000ULL);
+        assert(sample.numeric_value == 9 && sample.count == 1);
+        assert(sample.reason == TelemetryReason::navigation_button);
+        const auto payload = encode_exam_telemetry_samples_payload(samples);
+        assert(!payload.empty());
+        const auto decoded = decode_exam_telemetry_samples_payload(payload);
+        assert(decoded && decoded->size() == 1);
+        assert(decoded->front().question_id == id && decoded->front().question_revision == 7);
+        assert(encode_exam_telemetry_samples_payload(*decoded) == payload);
+        assert_agent_round_trip(AgentMessageType::exam_telemetry_samples, payload);
+    }
+    for (const auto& id : {id129, multibyte}) {
+        assert(!parse_browser_telemetry_samples(packet(id), 42, allowed, samples, &error));
+        assert(error == "questionId exceeds maximum length");
+    }
+    assert(!parse_browser_telemetry_samples(packet(invalid_utf8), 42, allowed, samples, &error));
+    assert(!parse_browser_telemetry_samples(packet(id65 + "\\u0000"), 42, allowed, samples, &error));
+    assert(!parse_browser_telemetry_samples(packet(std::string(96, 'z')), 42, allowed, samples, &error));
+    assert(error == "questionId not in allowed questions");
+    assert(!parse_browser_telemetry_samples(packet(id65, 0), 42, allowed, samples, &error));
+    assert(!parse_browser_telemetry_samples(packet(id96, 4294967296ULL), 42, allowed, samples, &error));
+    assert(!parse_browser_telemetry_samples(packet("", 1), 42, allowed, samples, &error));
+    // An empty allowlist keeps the existing pure-parser behavior.
+    assert(parse_browser_telemetry_samples(packet(id96), 42, {}, samples, &error));
+    assert(samples.front().question_id == id96);
+}
+
+bool exercise_live_question_id_binding() {
+    using namespace nstu;
+    using namespace nstu::client;
+    using Clock = ExamHostTelemetryState::Clock;
+    const Clock::time_point origin{};
+    const auto at = [origin](int ms) { return origin + std::chrono::milliseconds(ms); };
+    const auto event = make_event();
+    exam::StateRequest context;
+    context.package_id = event.package_id; context.package_digest = event.package_digest;
+    context.client_id = event.client_id; context.session_id = event.session_id;
+    context.candidate_id = event.candidate_id;
+    exam::TelemetryEnable enable;
+    enable.package_id = context.package_id; enable.package_digest = context.package_digest;
+    enable.client_id = context.client_id; enable.session_id = context.session_id;
+    enable.candidate_id = context.candidate_id;
+    enable.server_time_unix_milliseconds = 1700000000000ULL;
+    const std::string id65(65, 'a');
+    const std::string id96(96, 'b');
+    const std::set<std::string> allowed = {id65, id96};
+    const auto packet = [](const std::string& raw_collector, const std::string& id, unsigned elapsed) {
+        return "{\"type\":\"exam_telemetry_samples\",\"samples\":[{" + raw_collector +
+            "\"kind\":\"question_dwell\",\"source\":\"native\",\"questionId\":\"" + id +
+            "\",\"questionRevision\":2,\"monotonicElapsedMilliseconds\":" + std::to_string(elapsed) +
+            ",\"durationMilliseconds\":5,\"clientTimeUnixMilliseconds\":1700000001000,"
+            "\"count\":1,\"reason\":\"navigation_button\"}]}";
+    };
+    const auto startup = [](unsigned collector, unsigned elapsed) {
+        return "{\"type\":\"exam_telemetry_samples\",\"samples\":[{\"kind\":\"collector_started\","
+            "\"collectorId\":" + std::to_string(collector) +
+            ",\"monotonicElapsedMilliseconds\":" + std::to_string(elapsed) +
+            ",\"clientTimeUnixMilliseconds\":1700000000000,\"reason\":\"collector_initial\"}]}";
+    };
+    ExamHostTelemetryState telemetry;
+    assert(telemetry.start(context, 42, origin));
+    assert(telemetry.apply_enable(enable));
+    std::string posted;
+    const auto post = [&posted](std::string_view json) { posted = json; return true; };
+    std::vector<exam::TelemetrySample> samples;
+    std::string error;
+    assert(telemetry.post_browser_enable(post, at(40)));
+    assert(posted.find("\"collectorId\":42") != std::string::npos);
+    assert(posted.find("\"collectorElapsedMilliseconds\":40") != std::string::npos);
+    assert(telemetry.forward_browser_samples(startup(42, 40), allowed, at(65), samples, &error));
+    assert(samples.front().kind == exam::TelemetrySampleKind::collector_started);
+    assert(samples.front().numeric_value == 27);
+    std::fprintf(stderr, "question-ID live: collector 42 clock started successfully\n");
+    bool admitted = true;
+    for (const auto& id : {id65, id96}) {
+        error.clear();
+        const bool accepted = telemetry.forward_browser_samples(
+            packet("\"collectorId\":42,", id, 70), allowed, at(100), samples, &error);
+        std::fprintf(stderr, "question-ID live: %zu-byte accepted=%d error=%s\n",
+                     id.size(), accepted ? 1 : 0, error.c_str());
+        admitted = admitted && accepted;
+        if (accepted) {
+            assert(samples.size() == 1);
+            assert(samples.front().question_id == id && samples.front().question_revision == 2);
+            assert(samples.front().source == exam::TelemetrySource::browser);
+            assert(samples.front().collector_id == 42);
+            assert(samples.front().monotonic_elapsed_milliseconds == 70);
+            assert(samples.front().duration_milliseconds == 5 && samples.front().count == 1);
+            assert(samples.front().client_time_unix_milliseconds == 1700000001000ULL);
+            assert(samples.front().reason == exam::TelemetryReason::navigation_button);
+        }
+        for (const std::string raw_id : {"", "\"collectorId\":0,", "\"collectorId\":41,"}) {
+            assert(!telemetry.forward_browser_samples(packet(raw_id, id, 70), allowed, at(100), samples, &error));
+        }
+    }
+    telemetry.advance_collector(43, at(200));
+    assert(telemetry.post_browser_enable(post, at(210)));
+    assert(posted.find("\"collectorId\":43") != std::string::npos);
+    assert(posted.find("\"collectorElapsedMilliseconds\":10") != std::string::npos);
+    for (const auto& id : {id65, id96}) {
+        assert(!telemetry.forward_browser_samples(packet("\"collectorId\":42,", id, 20), allowed, at(230), samples, &error));
+        assert(!telemetry.forward_browser_samples(packet("\"collectorId\":43,", id, 20), allowed, at(230), samples, &error));
+    }
+    assert(!telemetry.forward_browser_samples(startup(42, 10), allowed, at(230), samples, &error));
+    assert(!telemetry.forward_browser_samples(startup(43, 11), allowed, at(230), samples, &error));
+    assert(telemetry.forward_browser_samples(startup(43, 10), allowed, at(235), samples, &error));
+    for (const auto& id : {id65, id96}) {
+        const bool accepted = telemetry.forward_browser_samples(
+            packet("\"collectorId\":43,", id, 40), allowed, at(250), samples, &error);
+        admitted = admitted && accepted;
+        if (accepted) {
+            assert(samples.front().question_id == id && samples.front().question_revision == 2);
+            assert(samples.front().collector_id == 43 && samples.front().source == exam::TelemetrySource::browser);
+        }
+        assert(!telemetry.forward_browser_samples(packet("\"collectorId\":42,", id, 40), allowed, at(250), samples, &error));
+    }
+    return admitted;
+}
+
 int main() {
+    exercise_manifest_question_id_bounds();
+    // Bootstrap and record both live IDs before the parser's RED assertion.
+    const bool live_question_ids_accepted = exercise_live_question_id_binding();
+    exercise_parser_question_id_bounds();
+    assert(live_question_ids_accepted);
     exercise_native_startup_full_window_recovery();
     exercise_native_capture_clock();
     exercise_browser_clock_safe_boundary();

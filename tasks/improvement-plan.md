@@ -41,9 +41,9 @@ Use separate tests-first units and fresh read-only review for each repair. Prese
 the answer channel and original assertions. These repairs do not authorize
 checking historical acceptance boxes.
 
-A separate repair must align the native telemetry question-ID limit with valid
-manifest IDs and the existing shared answer/wire limit; no format widening is
-implied by the aggregation task.
+Native question-ID compatibility is now repaired with the existing shared
+128-byte limit; manifest admission remains96. Valid65/96-byte parser/live inputs
+round-trip without truncation, with original UTF-8/NUL/allowlist/generation checks.
 
 ## Resume the existing checklist
 

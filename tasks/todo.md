@@ -36,7 +36,9 @@ retry under the unchanged quota, and direct closure discontinuity checks.
 Required historical acceptance/checkpoint boxes are unchanged. Browser
 aggregation is now locally implemented and independently reviewed: 63 browser
 cases, native focused coverage, and Root fast/strict 49/49 with zero warnings.
-Question-ID compatibility, server durability/ACK and runtime qualification still
+Question-ID compatibility is now locally repaired and independently reviewed,
+with shared/native3/3, browser63 and Root fast/strict49/49 checks. Server
+durability/ACK, required acceptance/peer evidence and runtime qualification still
 keep the integration incomplete for main.
 
 ## Task 0: Isolate the work

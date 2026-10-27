@@ -3056,7 +3056,7 @@ bool parse_browser_telemetry_samples_impl(
             set_error(error, "invalid questionId");
             return false;
         }
-        if (sample.question_id.size() > 64) {
+        if (sample.question_id.size() > nstu::exam::kMaximumQuestionIdBytes) {
             set_error(error, "questionId exceeds maximum length");
             return false;
         }
