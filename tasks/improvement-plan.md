@@ -59,6 +59,13 @@ tracked in local recovery evidence. No production defect or RED was fabricated.
 The next matrix is split in [storage-recovery-1c.md](task-plans/storage-recovery-1c.md),
 starting with [mixed cleanup and path isolation](task-plans/storage-recovery-1c-1.md).
 
+STORAGE-RECOVERY-1C-1 is published as `7ad7960`. Both real lock-stage cases passed,
+including exact mixed durable state, rollback/restart and alternate-path isolation.
+Fresh supporting review, independent Root fast/strict 49/49 with zero warnings
+and all three exact-revision Windows CI jobs passed. Production code is unchanged.
+The next scoped unit is
+[exact ACK retirement under a blocked barrier](task-plans/storage-recovery-1c-2.md).
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current

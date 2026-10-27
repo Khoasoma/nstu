@@ -179,10 +179,11 @@ Phase 4 plan and the authoritative checklist while extending its follow-up work.
 
 CAPTURE-CLOCK-1, bounded browser aggregation, question-ID compatibility and the
 first two storage recovery units are published with exact-revision Windows CI.
+STORAGE-RECOVERY-1C-1 mixed cleanup/path isolation is published as `7ad7960` with
+fresh supporting review, independent Root gates and all three Windows CI jobs.
 The active follow-up is
-[STORAGE-RECOVERY-1C-1](task-plans/storage-recovery-1c-1.md): mixed cleanup stages
-and path isolation. Its local tests and independent evidence must be reconciled
-before publication. Safe ACK retirement and purge/clear remain separate units in
+[STORAGE-RECOVERY-1C-2](task-plans/storage-recovery-1c-2.md): exact safe ACK
+retirement while barrier deletion is blocked. Purge/clear remains a separate unit in
 [storage-recovery-1c.md](task-plans/storage-recovery-1c.md); pristine interrupted
 initialization follows. No telemetry codec, answer channel or service
 producer/sequence change is allowed.
