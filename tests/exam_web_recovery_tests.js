@@ -319,7 +319,12 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
     },
     console
   });
-  vm.runInContext(APP_SOURCE, context, { filename: "exam/web/app.js" });
+  // Expose owning-layer state only inside this VM, never in the shipped page.
+  const source = options.captureInspection ? APP_SOURCE.replace(/\}\(\)\);\s*$/, `
+    window.captureInspection = { telemetry, emitTelemetrySample, flushTelemetry,
+      resetTelemetryState, saveAnswer, activateQuestion };
+  }());`) : APP_SOURCE;
+  vm.runInContext(source, context, { filename: "exam/web/app.js" });
   return {
     document, localStorage, webview, window, timers, intervalCallbacks,
     now: () => now,
@@ -1633,6 +1638,479 @@ function testTelemetryExplicitStartupRetryPreservesAnchorAndRawBaseline() {
   assert.equal(clockSamples(h).length, 2, "browser retries also have a finite three-attempt budget");
 }
 
+function aggregationHarness(name, options = {}) {
+  const c = contextFor(name);
+  const h = createHarness(c, null, new FakeStorage(), {
+    manifest: MULTI_MANIFEST, captureInspection: true, ...options
+  });
+  clockEnable(h, c);
+  h.webview.messages.length = 0;
+  return { c, h, api: h.window.captureInspection, t: h.window.captureInspection.telemetry };
+}
+function aggregationPackets(h) {
+  return h.webview.messages.filter(m => m.type === "exam_telemetry_samples");
+}
+function aggregationDetails(api, count) {
+  for (let i = 0; i < count; ++i) {
+    api.emitTelemetrySample({ kind: "focus_changed", reason: i % 2 ? "focus_gain" : "focus_blur", numericValue: i % 2 });
+  }
+}
+function assertAggregationPackets(h) {
+  const samples = clockSamples(h);
+  for (const packet of aggregationPackets(h)) {
+    assert.ok(packet.samples.length >= 1 && packet.samples.length <= 32);
+    assert.ok(Buffer.byteLength(JSON.stringify(packet)) <= 32 * 1024);
+  }
+  for (let i = 1; i < samples.length; ++i) {
+    assert.ok(samples[i].monotonicElapsedMilliseconds >= samples[i - 1].monotonicElapsedMilliseconds,
+      "retained ordinary and terminal observations cannot regress elapsed time");
+  }
+  assertTelemetryPrivacy(samples);
+}
+function aggregationPending(t) {
+  return [...t.pendingSamples, ...Object.values(t.losses || {}).filter(Boolean),
+    ...(t.startupSample ? [t.startupSample] : []), ...(t.terminalUnsent || [])];
+}
+function testAggregationTwentyThousandTransitionsStayLosslessAndBounded() {
+  const { h, api, t } = aggregationHarness("aggregation-flood");
+  const input = latestAnswerInput(h.document);
+  for (let i = 0; i < 20000; ++i) {
+    input.value = i % 2 ? "secret flood B" : "secret flood A";
+    input.dispatchEvent({ type: "input" });
+  }
+  const summaries = t.pendingSamples.filter(s => s.kind === "answer_change_summary");
+  assert.equal(summaries.length, 1, "20,000 edits require one pending per-question summary");
+  assert.equal(summaries[0].count, 20000);
+  assert.equal(summaries[0].numericValue, 20000);
+  assert.equal(summaries[0].durationMilliseconds, 0);
+  assert.equal(t.pendingSamples.filter(s => s.kind === "question_first_answer").length, 1);
+  assert.ok(Buffer.byteLength(JSON.stringify(aggregationPending(t))) <= 2 * 1024 * 1024);
+  h.advancePerf(100);
+  clockNavigate(h);
+  assert.ok(clockSamples(h).some(s => s.kind === "question_dwell" && s.durationMilliseconds === 100));
+  assert.ok(clockSamples(h).some(s => s.kind === "question_first_view" && s.questionId === "q2"));
+  assert.equal(clockSamples(h).filter(s => s.kind === "answer_change_summary").length, 1);
+  assertAggregationPackets(h);
+}
+function testAggregationCumulativeAndDeltaAcrossFlushes() {
+  const { h, api } = aggregationHarness("aggregation-delta");
+  api.saveAnswer("q1", "A"); api.saveAnswer("q1", "B"); api.flushTelemetry();
+  api.saveAnswer("q1", "B");
+  api.saveAnswer("q1", ""); api.saveAnswer("q1", "A"); api.saveAnswer("q1", "B");
+  api.flushTelemetry();
+  const summaries = clockSamples(h).filter(s => s.kind === "answer_change_summary");
+  assert.deepEqual(summaries.map(s => [s.count, s.numericValue]), [[2, 2], [5, 3]]);
+  assert.equal(clockSamples(h).filter(s => s.kind === "question_first_answer").length, 1);
+  const input = latestAnswerInput(h.document);
+  input.dispatchEvent({ type: "compositionstart" });
+  input.value = "IME interim"; input.dispatchEvent({ type: "input" });
+  api.flushTelemetry();
+  assert.equal(clockSamples(h).filter(s => s.kind === "answer_change_summary").length, 2);
+  input.dispatchEvent({ type: "compositionend" }); api.flushTelemetry();
+  assert.equal(clockSamples(h).filter(s => s.kind === "answer_change_summary").at(-1).numericValue, 1);
+  assertAggregationPackets(h);
+}
+function testAggregationEmptyInputUsesTheExistingEmptyBaseline() {
+  const { h, api, t } = aggregationHarness("aggregation-empty-baseline");
+  api.saveAnswer("q1", ""); api.saveAnswer("q1", ""); api.flushTelemetry();
+  assert.equal(clockSamples(h).length, 0, "unchanged empty input is not a normalized transition");
+  api.saveAnswer("q1", "A"); api.flushTelemetry();
+  assert.deepEqual(clockSamples(h).filter(s => s.kind === "answer_change_summary").map(s => [s.count, s.numericValue]), [[1, 1]]);
+  assert.equal(t.pendingSamples.length, 0);
+}
+function testAggregationChronologyTracksMutableSummaryTime() {
+  const { h, api } = aggregationHarness("aggregation-order");
+  h.advancePerf(10); api.saveAnswer("q1", "A");
+  h.advancePerf(10); api.emitTelemetrySample({ kind: "question_first_view", questionId: "q2" });
+  h.advancePerf(10); api.saveAnswer("q1", "B");
+  h.advancePerf(10); api.saveAnswer("q3", "essay draft canary");
+  api.flushTelemetry();
+  assertAggregationPackets(h);
+  assert.deepEqual(clockSamples(h).filter(s => s.kind === "answer_change_summary").map(s => [s.questionId, s.count, s.numericValue]),
+    [["q1", 2, 2], ["q3", 1, 1]]);
+  assert.ok(clockSamples(h).findIndex(s => s.kind === "question_first_view") <
+    clockSamples(h).findIndex(s => s.kind === "answer_change_summary"));
+}
+function testAggregationDetailsCapacityAndRollingPacketWindow() {
+  const { h, api, t } = aggregationHarness("aggregation-capacity");
+  aggregationDetails(api, 400);
+  assert.equal(t.pendingSamples.length, 256, "ordinary detail retention is capped at 256");
+  assert.equal(t.losses.loss_queue_full.count, 144);
+  api.flushTelemetry();
+  assert.equal(aggregationPackets(h).length, 4, "one flush has at most four attempted ordinary packets");
+  api.flushTelemetry();
+  h.advancePerf(1000); api.flushTelemetry();
+  assert.equal(aggregationPackets(h).length, 4, "rolling window lasts 1001 raw milliseconds");
+  h.advancePerf(1); api.flushTelemetry();
+  assert.equal(aggregationPackets(h).length, 8);
+  assert.ok(t.pendingSamples.length <= 1);
+  h.advancePerf(1001); api.flushTelemetry();
+  assert.equal(clockSamples(h).filter(s => s.kind === "focus_changed").length, 256);
+  assert.equal(clockSamples(h).filter(s => s.reason === "loss_queue_full").reduce((sum, s) => sum + s.count, 0), 144);
+  assert.equal(t.pendingSamples.length, 0);
+  assertAggregationPackets(h);
+}
+function testAggregationRollingWindowUsesActualPostAttemptTimes() {
+  const { h, api, t } = aggregationHarness("aggregation-post-clock-window");
+  aggregationDetails(api, 256);
+  const attempts = [];
+  const originalPost = h.webview.postMessage.bind(h.webview);
+  h.webview.postMessage = message => {
+    if (message.type === "exam_telemetry_samples") {
+      attempts.push(h.perfNow());
+      if (attempts.length <= 4) h.advancePerf(1);
+    }
+    originalPost(message);
+  };
+  api.flushTelemetry();
+  assert.deepEqual(attempts, [1000, 1001, 1002, 1003]);
+  h.setPerfNow(2001); api.flushTelemetry();
+  assert.equal(attempts.length, 5, "at2001 only the1000 attempt has expired, leaving one ordinary slot");
+  assert.equal(t.pendingSamples.length, 96);
+  for (const raw of [2002, 2003, 2004]) { h.setPerfNow(raw); api.flushTelemetry(); }
+  for (const raw of attempts) {
+    assert.ok(attempts.filter(t => t <= raw && raw - t < 1001).length <= 4,
+      `actual post attempts must fit the rolling1001ms window at${raw}`);
+  }
+  assert.equal(t.pendingSamples.length, 0);
+  assertAggregationPackets(h);
+}
+function testAggregationClockFailureDuringPostingHasOneFiniteTerminal() {
+  for (const failure of ["unavailable", "regression"]) {
+    const { c, h, api, t } = aggregationHarness(`aggregation-post-clock-${failure}`);
+    h.webview.emit(stateResponse(c, 0, "", ""));
+    api.saveAnswer("q1", "secret closure answer canary");
+    aggregationDetails(api, 200);
+    const originalPost = h.webview.postMessage.bind(h.webview);
+    let ordinaryAttempts = 0;
+    let terminalAttempts = 0;
+    h.webview.postMessage = message => {
+      if (message.type === "exam_telemetry_samples") {
+        if (message.samples.some(s => s.kind === "clock_discontinuity" && s.reason === "discontinuity_monotonic")) {
+          ++terminalAttempts;
+          throw new Error("terminal unavailable during clock failure");
+        }
+        ++ordinaryAttempts;
+        if (ordinaryAttempts === 1) h.advancePerf(5);
+        if (ordinaryAttempts === 2) {
+          if (failure === "unavailable") h.window.performance = undefined;
+          else h.setPerfNow(1004); // Regresses from the second attempt's1005.
+        }
+      }
+      originalPost(message);
+    };
+    api.flushTelemetry();
+    assert.equal(ordinaryAttempts, 2, "a broken per-post clock cannot grant further ordinary capacity");
+    assert.equal(terminalAttempts, 1, "during-flush clock failure has one terminal attempt without recursive ordinary drain");
+    assert.equal(t.enabled, false); assert.equal(t.pendingSamples.length, 0);
+    assert.ok(t.terminalUnsent.length >= 1 && t.terminalUnsent.length <= 32);
+    assert.equal(t.terminalUnsent.at(-1).monotonicElapsedMilliseconds, 5, "terminal uses the last measured attempt clock");
+    assert.ok(t.terminalUnsent.some(s => s.reason === "loss_rate_limit"));
+    h.window.performance = { now: () => h.perfNow() }; h.setPerfNow(4000);
+    api.flushTelemetry(); clockEnable(h, c);
+    h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    assert.equal(ordinaryAttempts, 2); assert.equal(terminalAttempts, 1);
+    assertRepairFinalizeAndAnswer(h, c);
+    assertTelemetryPrivacy(t.terminalUnsent); assertAggregationPackets(h);
+  }
+}
+function testAggregationSubmissionTerminalUsesLatestDrainedClock() {
+  for (const failClock of [false, true]) {
+    const { c, h, api, t } = aggregationHarness(`aggregation-submit-post-clock-${failClock}`);
+    h.webview.emit(stateResponse(c, 0, "", ""));
+    api.saveAnswer("q1", "secret closure answer canary"); aggregationDetails(api, 200);
+    const originalPost = h.webview.postMessage.bind(h.webview);
+    let ordinaryAttempts = 0;
+    let terminalAttempts = 0;
+    h.webview.postMessage = message => {
+      if (message.type === "exam_telemetry_samples") {
+        const terminal = message.samples.find(s => s.kind === "exam_submitted" ||
+          (s.kind === "clock_discontinuity" && s.reason === "discontinuity_monotonic"));
+        if (terminal) ++terminalAttempts;
+        else {
+          ++ordinaryAttempts;
+          h.advancePerf(5);
+          if (failClock && ordinaryAttempts === 2) h.window.performance = undefined;
+        }
+      }
+      originalPost(message);
+    };
+    h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    assert.equal(ordinaryAttempts, failClock ? 2 : 4);
+    assert.equal(terminalAttempts, 1, "nested clock closure cannot duplicate the submission terminal attempt");
+    const terminal = aggregationPackets(h).at(-1).samples.at(-1);
+    assert.equal(terminal.kind, failClock ? "clock_discontinuity" : "exam_submitted");
+    assert.equal(terminal.monotonicElapsedMilliseconds, failClock ? 5 : 15,
+      "terminal follows the last valid mapped time measured while draining");
+    assert.equal(t.pendingSamples.length, 0);
+    assertRepairFinalizeAndAnswer(h, c); assertAggregationPackets(h);
+  }
+}
+function testAggregationAllManifestSummaryAndFirstSlotsStayBounded() {
+  const manifest = { ...MULTI_MANIFEST, questions: Array.from({ length: 500 }, (_, i) => ({
+    id: `q${i + 1}`, type: "short_answer", points: 1, prompt: "Question"
+  })) };
+  const { h, api, t } = aggregationHarness("aggregation-manifest-capacity", { manifest });
+  for (const q of manifest.questions) {
+    api.saveAnswer(q.id, "A");
+    api.emitTelemetrySample({ kind: "question_first_view", questionId: q.id });
+  }
+  aggregationDetails(api, 300);
+  assert.equal(t.pendingSamples.filter(s => s.kind === "answer_change_summary").length, 500);
+  assert.equal(t.pendingSamples.filter(s => s.kind === "question_first_answer" || s.kind === "question_first_view").length, 1000);
+  assert.equal(t.pendingSamples.filter(s => s.kind === "focus_changed").length, 256);
+  assert.equal(t.losses.loss_queue_full.count, 44);
+  assert.ok(Buffer.byteLength(JSON.stringify(aggregationPending(t))) <= 2 * 1024 * 1024);
+  api.flushTelemetry();
+  assert.equal(aggregationPackets(h).length, 4);
+}
+function testAggregationFailedFlushStopsAndRetainsGlobalPrefix() {
+  const { h, api, t } = aggregationHarness("aggregation-failed-prefix");
+  aggregationDetails(api, 100);
+  let attempts = 0;
+  const originalPost = h.webview.postMessage.bind(h.webview);
+  h.webview.postMessage = message => {
+    if (message.type === "exam_telemetry_samples" && ++attempts === 1) throw new Error("ordinary post unavailable");
+    originalPost(message);
+  };
+  api.flushTelemetry();
+  assert.equal(attempts, 1, "failed post stops the flush before a suffix can overtake it");
+  assert.equal(t.pendingSamples.length, 100, "failed post retains its prefix and suffix");
+  assert.equal(aggregationPackets(h).length, 0);
+  api.flushTelemetry();
+  assert.equal(attempts, 4, "failed attempt consumed one rolling packet slot");
+  assert.equal(clockSamples(h).length, 96);
+  h.advancePerf(1001); api.flushTelemetry();
+  assert.equal(clockSamples(h).length, 100);
+  assertAggregationPackets(h);
+}
+function testAggregationRetryReselectsAfterSummaryMovesPastDetail() {
+  const { h, api, t } = aggregationHarness("aggregation-failed-mutable");
+  h.advancePerf(10); api.saveAnswer("q1", "A");
+  const originalPost = h.webview.postMessage.bind(h.webview);
+  let attempts = 0;
+  h.webview.postMessage = message => {
+    if (message.type === "exam_telemetry_samples" && ++attempts === 1) throw new Error("first attempt unavailable");
+    originalPost(message);
+  };
+  api.flushTelemetry();
+  h.advancePerf(10); api.emitTelemetrySample({ kind: "focus_changed", reason: "focus_gain" });
+  h.advancePerf(10); api.saveAnswer("q1", "B");
+  assert.equal(t.pendingSamples.length, 3);
+  api.flushTelemetry();
+  assertAggregationPackets(h);
+  assert.deepEqual(clockSamples(h).map(s => s.monotonicElapsedMilliseconds), [10, 20, 30]);
+  assert.deepEqual(clockSamples(h).filter(s => s.kind === "answer_change_summary").map(s => [s.count, s.numericValue]), [[2, 2]]);
+  assert.equal(t.pendingSamples.length, 0);
+}
+function testAggregationIndependentCounterSaturationFlags() {
+  const { h, api, t } = aggregationHarness("aggregation-counter-flags");
+  const max = 0xffffffff;
+  t.answerChangeCount.q1 = max - 1;
+  api.saveAnswer("q1", "A");
+  let summary = t.pendingSamples.find(s => s.kind === "answer_change_summary");
+  assert.equal(summary.count, max); assert.equal(summary.numericValue, 1); assert.equal(summary.durationMilliseconds, 0);
+  api.saveAnswer("q1", "B");
+  assert.equal(summary.count, max); assert.equal(summary.numericValue, 2); assert.equal(summary.durationMilliseconds, 1);
+  summary.numericValue = max;
+  api.saveAnswer("q1", "C");
+  assert.equal(summary.numericValue, max); assert.equal(summary.durationMilliseconds, 3);
+  api.flushTelemetry(); api.saveAnswer("q1", "D");
+  summary = t.pendingSamples.find(s => s.kind === "answer_change_summary");
+  assert.equal(summary.numericValue, 1); assert.equal(summary.durationMilliseconds, 1, "new delta is exact despite cumulative lower bound");
+  t.answerChangeCount.q3 = 0;
+  api.saveAnswer("q3", "A");
+  summary = t.pendingSamples.find(s => s.kind === "answer_change_summary" && s.questionId === "q3");
+  summary.numericValue = max;
+  api.saveAnswer("q3", "B");
+  assert.equal(summary.count, 2); assert.equal(summary.numericValue, max); assert.equal(summary.durationMilliseconds, 2);
+  api.flushTelemetry();
+  for (const s of clockSamples(h)) {
+    for (const key of ["count", "numericValue", "durationMilliseconds"]) {
+      assert.ok(Number.isInteger(s[key]) && s[key] >= 0 && s[key] <= max);
+    }
+  }
+}
+function testAggregationLossExactMaximumAndOverflowAreDistinct() {
+  const { api, t } = aggregationHarness("aggregation-loss-flags");
+  aggregationDetails(api, 257);
+  const loss = t.losses.loss_queue_full;
+  loss.count = 0xfffffffe;
+  aggregationDetails(api, 1);
+  assert.equal(loss.count, 0xffffffff); assert.equal(loss.durationMilliseconds, 0); assert.equal(loss.numericValue, 0);
+  aggregationDetails(api, 1);
+  assert.equal(loss.count, 0xffffffff); assert.equal(loss.durationMilliseconds, 1); assert.equal(loss.numericValue, 0);
+}
+function testAggregationTerminalReservesLossSlotsAndCountsOmittedDeltas() {
+  const { c, h, api, t } = aggregationHarness("aggregation-terminal-units");
+  aggregationDetails(api, 300);
+  api.flushTelemetry(); // 128 retained details remain, plus 44 queue losses.
+  h.advancePerf(1);
+  t.answerChangeCount.q1 = 1000; // Omitted units must use delta, never cumulative.
+  for (let i = 0; i < 7; ++i) api.saveAnswer("q1", i % 2 ? "B" : "A");
+  const before = aggregationPackets(h).length;
+  h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+  const terminal = aggregationPackets(h).slice(before);
+  assert.equal(terminal.length, 1, "exhausted ordinary capacity permits one finite terminal packet");
+  const samples = terminal[0].samples;
+  assert.equal(samples.filter(s => s.kind === "exam_submitted").length, 1);
+  assert.equal(samples.find(s => s.reason === "loss_queue_full").count, 44);
+  assert.equal(samples.find(s => s.reason === "loss_rate_limit").count, (128 - 29) + 1 + 7 + 1,
+    "omitted summary represents seven transitions, alongside omitted first-answer and final dwell");
+  assert.equal(samples.length, 32, "two nonzero losses and terminal each have a reserved slot");
+  assert.equal(t.pendingSamples.length, 0);
+  h.advancePerf(1001); api.flushTelemetry();
+  assert.equal(aggregationPackets(h).length, before + 1, "terminal retirement prohibits old replay");
+  assert.ok(h.webview.messages.some(m => m.type === "exam_submit"));
+  assertAggregationPackets(h);
+}
+function testAggregationTerminalLossPreservesOnlyRelevantLowerBoundFlags() {
+  for (const deltaOverflow of [false, true]) {
+    const { h, api, t } = aggregationHarness(`aggregation-terminal-saturation-${deltaOverflow}`);
+    aggregationDetails(api, 300); api.flushTelemetry();
+    h.advancePerf(1);
+    t.answerChangeCount.q1 = 0xffffffff;
+    api.saveAnswer("q1", "A");
+    const summary = t.pendingSamples.find(s => s.kind === "answer_change_summary");
+    if (deltaOverflow) { summary.numericValue = 0xffffffff; summary.durationMilliseconds |= 2; }
+    t.losses.loss_queue_full.count = 0xffffffff;
+    t.losses.loss_queue_full.durationMilliseconds = 1;
+    h.webview.emit({ type: "exam_telemetry_enable", enable: { ...contextFor(`aggregation-terminal-saturation-${deltaOverflow}`), enabled: false } });
+    const samples = aggregationPackets(h).at(-1).samples;
+    const rateLoss = samples.find(s => s.reason === "loss_rate_limit");
+    assert.equal(rateLoss.durationMilliseconds, deltaOverflow ? 1 : 0,
+      "cumulative overflow alone must not mark the omitted delta as inexact");
+    assert.equal(samples.find(s => s.reason === "loss_queue_full").durationMilliseconds, 1);
+    assert.equal(samples.at(-1).kind, "clock_discontinuity");
+    assert.equal(samples.at(-1).reason, "discontinuity_suspend");
+    assertAggregationPackets(h);
+  }
+}
+function testAggregationFailedTerminalPathsStayFiniteAndAnswersUsable() {
+  for (const path of ["submit", "disable", "clock"]) {
+    const { c, h, api, t } = aggregationHarness(`aggregation-terminal-failure-${path}`);
+    h.webview.emit(stateResponse(c, 0, "", ""));
+    api.saveAnswer("q1", "secret closure answer canary");
+    aggregationDetails(api, 300); api.flushTelemetry();
+    let attempts = 0;
+    const originalPost = h.webview.postMessage.bind(h.webview);
+    h.webview.postMessage = message => {
+      if (message.type === "exam_telemetry_samples") { ++attempts; throw new Error("terminal unavailable"); }
+      originalPost(message);
+    };
+    if (path === "disable") h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: false } });
+    else if (path === "clock") { h.setPerfNow(-1); clockNavigate(h); }
+    else h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    assert.equal(attempts, 1, `${path} has exactly one terminal attempt, including failure`);
+    assert.equal(t.pendingSamples.length, 0, "older tail is retired even when terminal delivery fails");
+    assert.ok(t.terminalUnsent.length >= 1 && t.terminalUnsent.length <= 32);
+    assert.ok(Buffer.byteLength(JSON.stringify(aggregationPending(t))) <= 2 * 1024 * 1024);
+    h.advancePerf(2000); api.flushTelemetry();
+    clockEnable(h, c); // Same generation cannot reopen or replay terminal.
+    if (path !== "submit") h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    assert.equal(attempts, 1);
+    assertRepairFinalizeAndAnswer(h, c);
+    assertTelemetryPrivacy(t.terminalUnsent);
+  }
+}
+function testAggregationResetCancelsDeferredDrainAndClearsGeneration() {
+  const { h, api, t } = aggregationHarness("aggregation-reset");
+  aggregationDetails(api, 200); api.flushTelemetry();
+  assert.ok(t.deferredTimer !== null, "exhausted capacity schedules one deferred drain");
+  const id = t.deferredTimer;
+  api.flushTelemetry();
+  assert.equal(t.deferredTimer, id, "repeated triggers coalesce into one timer");
+  assert.ok(h.timers.has(id));
+  api.resetTelemetryState();
+  assert.ok(!h.timers.has(id));
+  assert.equal(t.deferredTimer, null); assert.equal(t.pendingSamples.length, 0);
+  assert.equal(t.startupSample, null); assert.equal(t.terminalUnsent.length, 0);
+  assert.equal(Object.values(t.losses).filter(Boolean).length, 0);
+}
+function testAggregationDeferredTimerDrainsOnceCapacityReturns() {
+  const { h, api, t } = aggregationHarness("aggregation-deferred-drain");
+  aggregationDetails(api, 200); api.flushTelemetry();
+  const id = t.deferredTimer;
+  assert.equal(h.timers.get(id).delay, 1001);
+  const callback = h.timers.get(id).callback;
+  h.timers.delete(id);
+  h.advancePerf(1001); callback();
+  assert.equal(clockSamples(h).length, 200);
+  assert.equal(t.pendingSamples.length, 0); assert.equal(t.deferredTimer, null);
+  callback(); // A stale callback cannot cause another drain.
+  assert.equal(aggregationPackets(h).length, 7);
+  assertAggregationPackets(h);
+}
+function testAggregationRejectedStartupRetryRetainsPendingObservations() {
+  const { c, h, api, t } = aggregationHarness("aggregation-retry-pending");
+  const startup = JSON.parse(JSON.stringify(t.startupSample));
+  api.saveAnswer("q1", "secret retry answer canary"); aggregationDetails(api, 200);
+  const ordinary = JSON.stringify(t.pendingSamples);
+  h.advancePerf(1000);
+  const originalPost = h.webview.postMessage.bind(h.webview);
+  h.webview.postMessage = message => {
+    if (message.type === "exam_telemetry_samples" && message.samples[0].kind === "collector_started") throw new Error("startup duplicate rejected");
+    originalPost(message);
+  };
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42,
+    collectorElapsedMilliseconds: 0, collectorStartupRetry: true } });
+  assert.equal(JSON.stringify(t.pendingSamples), ordinary);
+  assert.deepEqual(JSON.parse(JSON.stringify(t.startupSample)), startup);
+  api.flushTelemetry(); h.advancePerf(1001); api.flushTelemetry();
+  assert.equal(clockSamples(h).filter(s => s.kind === "answer_change_summary").reduce((sum, s) => sum + s.numericValue, 0), 1);
+  assertAggregationPackets(h);
+}
+function testAggregationPressureFailureRecoveryAndFinalizeMatchOff() {
+  const c = contextFor("aggregation-answer-equivalence");
+  const run = mode => {
+    const storage = new FakeStorage();
+    const h = createHarness(c, target => seedDurable(target, c, {
+      serverHighestSequence: 1, nextSequence: 2, previousEventHashHex: HEX32_A,
+      serverLastEventHashHex: HEX32_A, serverStateHashHex: HEX32_B
+    }), storage, { manifest: MULTI_MANIFEST, captureInspection: true });
+    const api = h.window.captureInspection;
+    if (mode !== "off") clockEnable(h, c);
+    h.webview.emit(stateResponse(c, 1, HEX32_A, HEX32_B, false, [{
+      questionId: "q1", questionRevision: 1, sequence: 1, clientTimeUnixMilliseconds: h.now(),
+      kind: "upsert", answer: "secret recovered answer canary", eventHashHex: HEX32_A
+    }]));
+    h.document.getElementById("notes").value = "private note pressure canary";
+    h.document.getElementById("notes").dispatchEvent({ type: "input" });
+    api.saveAnswer("q1", "secret edited answer canary");
+    if (mode === "pressure" || mode === "failed" || mode === "clock") {
+      aggregationDetails(api, 400);
+      api.flushTelemetry();
+    }
+    if (mode === "failed") {
+      const originalPost = h.webview.postMessage.bind(h.webview);
+      h.webview.postMessage = message => {
+        if (message.type === "exam_telemetry_samples") throw new Error("telemetry unavailable");
+        originalPost(message);
+      };
+    }
+    if (mode === "disabled") h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: false } });
+    if (mode === "clock") { h.setPerfNow(-1); clockNavigate(h); }
+    else clockNavigate(h);
+    h.document.getElementById("submit-form").dispatchEvent({ type: "submit", submitter: { value: "submit" } });
+    const first = h.webview.messages.find(m => m.type === "exam_answer_event");
+    assert.ok(first);
+    if (first.event.kind !== "finalize") h.webview.emit(stateResponse(c, first.event.sequence, first.event.eventHashHex, HEX32_D,
+      false, [{ questionId: first.event.questionId, questionRevision: first.event.questionRevision,
+        sequence: first.event.sequence, clientTimeUnixMilliseconds: first.event.clientTimeUnixMilliseconds,
+        kind: first.event.kind, answer: first.event.answer, eventHashHex: first.event.eventHashHex }]));
+    const final = h.webview.messages.find(m => m.type === "exam_answer_event" && m.event.kind === "finalize");
+    assert.ok(final);
+    h.webview.emit(stateResponse(c, final.event.sequence, final.event.eventHashHex, HEX32_C, true));
+    assertTelemetryPrivacy(clockSamples(h)); assertTelemetryPrivacy(api.telemetry.terminalUnsent || []);
+    return { messages: h.webview.messages.filter(m => m.type !== "exam_telemetry_samples"),
+      storage: [...storage.values], response: JSON.parse(JSON.stringify(h.window.NSTU_EXAM_RESPONSE)) };
+  };
+  const off = run("off");
+  for (const mode of ["enabled", "disabled", "pressure", "failed", "clock"]) {
+    assert.deepEqual(run(mode), off, `${mode} must preserve exact answer recovery and finalization`);
+  }
+}
+
 testStaleWatermarkIsIgnored();
 testFinalizedResponseDoesNotRequeueFinalize();
 testContextSwitchPreservesTargetNamespace();
@@ -1678,5 +2156,21 @@ const reviewFailures = [];
 for (const test of reviewTests) {
   try { test(); } catch (error) { reviewFailures.push(`${test.name}: ${error.stack}`); }
 }
+const aggregationTests = [testAggregationTwentyThousandTransitionsStayLosslessAndBounded,
+  testAggregationCumulativeAndDeltaAcrossFlushes, testAggregationEmptyInputUsesTheExistingEmptyBaseline,
+  testAggregationChronologyTracksMutableSummaryTime,
+  testAggregationDetailsCapacityAndRollingPacketWindow, testAggregationRollingWindowUsesActualPostAttemptTimes,
+  testAggregationClockFailureDuringPostingHasOneFiniteTerminal, testAggregationSubmissionTerminalUsesLatestDrainedClock,
+  testAggregationAllManifestSummaryAndFirstSlotsStayBounded,
+  testAggregationFailedFlushStopsAndRetainsGlobalPrefix, testAggregationRetryReselectsAfterSummaryMovesPastDetail,
+  testAggregationIndependentCounterSaturationFlags, testAggregationLossExactMaximumAndOverflowAreDistinct,
+  testAggregationTerminalReservesLossSlotsAndCountsOmittedDeltas, testAggregationTerminalLossPreservesOnlyRelevantLowerBoundFlags,
+  testAggregationFailedTerminalPathsStayFiniteAndAnswersUsable,
+  testAggregationResetCancelsDeferredDrainAndClearsGeneration, testAggregationDeferredTimerDrainsOnceCapacityReturns,
+  testAggregationRejectedStartupRetryRetainsPendingObservations,
+  testAggregationPressureFailureRecoveryAndFinalizeMatchOff];
+for (const test of aggregationTests) {
+  try { test(); } catch (error) { reviewFailures.push(`${test.name}: ${error.stack}`); }
+}
 assert.strictEqual(reviewFailures.length, 0, reviewFailures.join("\n"));
-console.log("exam web recovery tests: 43 passed");
+console.log(`exam web recovery tests: ${43 + aggregationTests.length} passed`);

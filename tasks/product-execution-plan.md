@@ -35,7 +35,7 @@ application, not a Teacher Windows service. The student service is separate.
 |---|---|---|
 | REC-01 | Reconcile recorded local provenance and current hashes; evidence only. | Preserve unknown README/banner/About work; identify current task/owner without inventing provenance; retain failed-run history. |
 | EX-R1 | Implemented native/browser clock repair; five capture source/test files. Scoped plan: [capture-clock-1.md](task-plans/capture-clock-1.md). | Generation-bound origin mapping; slow-load/late-enable/reload/unknown-time behavior; unchanged answer channel and truthful uncertainty. |
-| EX-R2 | Bounded browser summaries, after EX-R1 review. `app.js` and browser tests. | Coalesced normalized changes; bounded memory/flush and loss with preserved totals/navigation/dwell; privacy and answer equivalence. |
+| EX-R2 | Implemented bounded browser summaries after EX-R1 review. `app.js` and browser tests. | Coalesced normalized changes; bounded memory/flush and loss with preserved totals/navigation/dwell; privacy and answer equivalence. |
 | EX-R3 | Hostile storage recovery tests; add production changes only for a reproduced defect. | Malformed protected barriers refuse unsafe recovery; blocked cleanup/interrupted initialization retain refusal; mutation retries preserve quotas/revocation. |
 | EX-A5…A11 | Close canonical acceptance in its existing dependency order. | Current source review and applicable focused/full gates; required reviewer evidence; no historical acceptance inferred from changed hashes. |
 | EX-B | Existing Checkpoint B. | Actual old/new peers; disconnect suspension versus explicit revocation; shutdown/restart and enable behavior. |

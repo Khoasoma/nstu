@@ -60,6 +60,17 @@ ACK: session ID, producer ID, exact sequence/hash, server receipt time and statu
 
 Gaps are accepted and recorded; they do not stall later evidence.
 
+### Browser summary and loss representation
+
+For answer_change_summary, count is the cumulative observed transition count and
+numeric_value is the pending delta represented by that summary. The otherwise
+unused duration_milliseconds on this kind is a two-bit flag: bit0 marks cumulative
+count overflow/lower-bound, bit1 marks delta overflow/lower-bound. Exact UINT32_MAX
+without overflow has no flag. For loss_summary only, duration_milliseconds bit0
+marks saturated/lower-bound loss; numeric_value remains zero. Other kinds retain
+their existing duration meaning. Field layout/codecs and answer formats do not
+change. Browser posting remains an attempt, not proof of native/durable acceptance.
+
 ### Collector/recovery semantics
 
 - New native collector ID for each successful top-level exam document generation/reload.

@@ -2270,9 +2270,20 @@
     hasAnswered: new Set(),
     lastAnswerValue: Object.create(null),
     answerChangeCount: Object.create(null),
+    answerCountOverflow: new Set(),
+    pendingAnswerSummaries: new Map(),
+    firstSampleKeys: new Set(),
     dwellStartMonotonic: 0,
     isDwelling: false,
     pendingSamples: [],
+    pendingSampleBytes: 0,
+    detailCount: 0,
+    losses: { loss_queue_full: null, loss_rate_limit: null },
+    packetRawTimes: [],
+    isFlushing: false,
+    deferredTimer: null,
+    terminalAttempted: false,
+    terminalUnsent: [],
     periodicTimer: null,
     rawReceiptBaseline: null,
     nativeAnchor: 0,
@@ -2297,14 +2308,8 @@
     telemetry.isDwelling = false;
     // The last valid mapped observation remains measurable. Do not manufacture
     // an elapsed time or dwell across the failed clock segment.
-    emitTelemetrySample({ kind: "clock_discontinuity", reason: "discontinuity_monotonic",
+    finishTelemetry({ kind: "clock_discontinuity", reason: "discontinuity_monotonic",
       monotonicElapsedMilliseconds: telemetry.lastElapsed });
-    flushTelemetry();
-    telemetry.enabled = false;
-    if (telemetry.periodicTimer) {
-      window.clearInterval(telemetry.periodicTimer);
-      telemetry.periodicTimer = null;
-    }
   }
 
   function readTelemetryClock() {
@@ -2327,7 +2332,7 @@
     return Date.now();
   }
 
-  function emitTelemetrySample(sample) {
+  function cleanTelemetrySample(sample) {
     if (!telemetry.enabled) return;
     const explicitElapsed = Number.isSafeInteger(sample.monotonicElapsedMilliseconds) &&
       sample.monotonicElapsedMilliseconds >= 0;
@@ -2338,7 +2343,7 @@
     const item = qid ? questionById(qid) : null;
     const qrev = item ? questionRevision(item) : (Number(sample.questionRevision) || 0);
 
-    const clean = {
+    return {
       kind: String(sample.kind || ""),
       source: "browser",
       collectorId: telemetry.collectorId,
@@ -2353,20 +2358,199 @@
       count: Math.max(0, Math.min(0xffffffff, Number(sample.count) || 0)),
       reason: String(sample.reason || "none")
     };
+  }
+
+  const TELEMETRY_UINT32_MAX = 0xffffffff;
+  const TELEMETRY_PACKET_BYTES = 32 * 1024;
+  // Reserve bytes for the stored startup, two fixed losses, terminal and JSON
+  // punctuation. All admitted samples still contain only the existing fields.
+  const TELEMETRY_PENDING_BYTES = 2 * 1024 * 1024 - 4096;
+
+  function telemetrySampleBytes(sample) {
+    return new TextEncoder().encode(JSON.stringify(sample)).length + 1;
+  }
+
+  function addTelemetryLoss(reason, units, lowerBound = false) {
+    if (!units && !lowerBound) return;
+    let loss = telemetry.losses[reason];
+    if (!loss) {
+      loss = cleanTelemetrySample({ kind: "loss_summary", reason,
+        monotonicElapsedMilliseconds: telemetry.lastElapsed });
+      telemetry.losses[reason] = loss;
+    }
+    // On loss_summary, duration bit0 marks a lower-bound count; numericValue
+    // stays zero. Exact UINT32_MAX has no flag until another unit is omitted.
+    const overflow = lowerBound || units > TELEMETRY_UINT32_MAX - loss.count;
+    loss.count = Math.min(TELEMETRY_UINT32_MAX, loss.count + units);
+    loss.durationMilliseconds |= overflow ? 1 : 0;
+    loss.monotonicElapsedMilliseconds = telemetry.lastElapsed;
+    loss.clientTimeUnixMilliseconds = currentWallClockMs();
+  }
+
+  function emitTelemetrySample(sample) {
+    const clean = cleanTelemetrySample(sample);
+    if (!clean || telemetry.terminalAttempted) return;
+    if (clean.kind === "collector_started") return clean; // Stored standalone.
+    const isSummary = clean.kind === "answer_change_summary";
+    const isFirst = clean.kind === "question_first_view" || clean.kind === "question_first_answer";
+    const previous = isSummary ? telemetry.pendingAnswerSummaries.get(clean.questionId) : null;
+    if (previous) {
+      const oldBytes = telemetrySampleBytes(previous);
+      // On answer_change_summary, numericValue is the pending transition delta.
+      // Duration bit0 is cumulative overflow, bit1 is independent delta overflow.
+      const deltaOverflow = previous.numericValue === TELEMETRY_UINT32_MAX;
+      clean.numericValue = Math.min(TELEMETRY_UINT32_MAX, previous.numericValue + 1);
+      clean.durationMilliseconds |= (previous.durationMilliseconds & 2) | (deltaOverflow ? 2 : 0);
+      const newBytes = telemetrySampleBytes(clean);
+      if (telemetry.pendingSampleBytes - oldBytes + newBytes > TELEMETRY_PENDING_BYTES) {
+        addTelemetryLoss("loss_queue_full", 1);
+        return;
+      }
+      Object.assign(previous, clean); // Latest transition owns the summary time.
+      telemetry.pendingSampleBytes += newBytes - oldBytes;
+      return previous;
+    }
+    const firstKey = `${clean.kind}:${clean.questionId}`;
+    if (isFirst && telemetry.firstSampleKeys.has(firstKey)) return;
+    const bytes = telemetrySampleBytes(clean);
+    if ((isSummary && telemetry.pendingAnswerSummaries.size >= 500) ||
+        (isFirst && telemetry.firstSampleKeys.size >= 1000) ||
+        (!isSummary && !isFirst && telemetry.detailCount >= 256) ||
+        bytes > TELEMETRY_PACKET_BYTES - 128 ||
+        telemetry.pendingSampleBytes + bytes > TELEMETRY_PENDING_BYTES) {
+      addTelemetryLoss("loss_queue_full", isSummary ? clean.numericValue : 1,
+        isSummary && Boolean(clean.durationMilliseconds & 2));
+      return;
+    }
     telemetry.pendingSamples.push(clean);
+    telemetry.pendingSampleBytes += bytes;
+    if (isSummary) telemetry.pendingAnswerSummaries.set(clean.questionId, clean);
+    else if (isFirst) telemetry.firstSampleKeys.add(firstKey);
+    else telemetry.detailCount += 1;
     return clean;
   }
 
-  function flushTelemetry() {
-    if (!telemetry.enabled || telemetry.pendingSamples.length === 0) return;
-    while (telemetry.pendingSamples.length > 0) {
-      const batch = telemetry.pendingSamples.slice(0, 32);
-      telemetry.pendingSamples = telemetry.pendingSamples.slice(batch.length);
-      postHostMessage({
-        type: "exam_telemetry_samples",
-        samples: batch
-      });
+  function orderedTelemetrySamples() {
+    // Stable ties retain observation order; every attempt sorts anew because a
+    // previously failed summary can move past details when its answer changes.
+    return [...telemetry.pendingSamples, ...Object.values(telemetry.losses).filter(Boolean)]
+      .sort((a, b) => a.monotonicElapsedMilliseconds - b.monotonicElapsedMilliseconds);
+  }
+
+  function telemetryPacket(samples) {
+    return { type: "exam_telemetry_samples", samples };
+  }
+
+  function telemetryPrefix(records, slots = 32, tail = []) {
+    const batch = [];
+    for (const sample of records) {
+      if (batch.length >= slots || new TextEncoder().encode(
+        JSON.stringify(telemetryPacket([...batch, sample, ...tail]))).length > TELEMETRY_PACKET_BYTES) break;
+      batch.push(sample);
     }
+    return batch;
+  }
+
+  function retireTelemetrySamples(batch) {
+    const sent = new Set(batch);
+    telemetry.pendingSamples = telemetry.pendingSamples.filter(sample => {
+      if (!sent.has(sample)) return true;
+      telemetry.pendingSampleBytes -= telemetrySampleBytes(sample);
+      if (sample.kind === "answer_change_summary") telemetry.pendingAnswerSummaries.delete(sample.questionId);
+      else if (sample.kind !== "question_first_view" && sample.kind !== "question_first_answer") telemetry.detailCount -= 1;
+      return false;
+    });
+    for (const reason of Object.keys(telemetry.losses)) {
+      if (sent.has(telemetry.losses[reason])) telemetry.losses[reason] = null;
+    }
+  }
+
+  function scheduleTelemetryDrain(raw) {
+    if (telemetry.deferredTimer !== null || !orderedTelemetrySamples().length) return;
+    const delay = Math.max(1, Math.ceil(1001 - (raw - telemetry.packetRawTimes[0])));
+    const timer = window.setTimeout(() => {
+      if (telemetry.deferredTimer !== timer) return;
+      telemetry.deferredTimer = null;
+      flushTelemetry();
+    }, delay);
+    telemetry.deferredTimer = timer;
+  }
+
+  function flushTelemetry() {
+    if (!telemetry.enabled || telemetry.terminalAttempted || telemetry.isFlushing ||
+        !orderedTelemetrySamples().length) return;
+    telemetry.isFlushing = true;
+    try {
+      for (let attempts = 0; attempts < 4; ++attempts) {
+        const batch = telemetryPrefix(orderedTelemetrySamples());
+        if (!batch.length) break;
+        // Posting and serialization can advance raw time. Each attempt needs
+        // its own current clock; a failed clock ends capacity immediately.
+        const clock = readTelemetryClock();
+        if (!clock || !telemetry.enabled) break;
+        telemetry.packetRawTimes = telemetry.packetRawTimes.filter(raw => clock.raw - raw < 1001);
+        if (telemetry.packetRawTimes.length >= 4) break;
+        telemetry.packetRawTimes.push(clock.raw); // Failed posts consume capacity.
+        if (!postHostMessage(telemetryPacket(batch))) break;
+        retireTelemetrySamples(batch);
+      }
+    } finally {
+      telemetry.isFlushing = false;
+    }
+    if (telemetry.enabled && !telemetry.terminalAttempted) {
+      scheduleTelemetryDrain(telemetry.lastMonotonicTime);
+    }
+  }
+
+  function stopTelemetryTimers() {
+    if (telemetry.deferredTimer !== null) window.clearTimeout(telemetry.deferredTimer);
+    telemetry.deferredTimer = null;
+    if (telemetry.periodicTimer) window.clearInterval(telemetry.periodicTimer);
+    telemetry.periodicTimer = null;
+  }
+
+  function finishTelemetry(sample) {
+    if (!telemetry.enabled || telemetry.terminalAttempted) return;
+    // A broken clock grants no ordinary capacity. During an active flush the
+    // guard also prevents its clock-failure terminal from recursively draining.
+    if (sample.reason !== "discontinuity_monotonic") flushTelemetry();
+    if (!telemetry.enabled || telemetry.terminalAttempted) return;
+    const terminal = cleanTelemetrySample({ ...sample, monotonicElapsedMilliseconds: telemetry.lastElapsed });
+    const records = telemetry.pendingSamples.slice()
+      .sort((a, b) => a.monotonicElapsedMilliseconds - b.monotonicElapsedMilliseconds);
+    let lossSlots = Object.values(telemetry.losses).filter(Boolean).length;
+    if (records.length > 31 - lossSlots && !telemetry.losses.loss_rate_limit) lossSlots += 1;
+    // Reserve serialized bytes for both worst-case fixed losses before adding
+    // omitted-tail units. Their counts can grow while the prefix is selected.
+    const lossAllowance = cleanTelemetrySample({ kind: "loss_summary", reason: "loss_queue_full",
+      count: TELEMETRY_UINT32_MAX, durationMilliseconds: 1, monotonicElapsedMilliseconds: telemetry.lastElapsed });
+    const tailAllowance = [lossAllowance, { ...lossAllowance, reason: "loss_rate_limit" }, terminal];
+    let prefix = telemetryPrefix(records, 31 - lossSlots, tailAllowance);
+    if (prefix.length < records.length && !telemetry.losses.loss_rate_limit &&
+        lossSlots === Object.values(telemetry.losses).filter(Boolean).length) {
+      // Byte pressure, as well as slot pressure, needs a new rate-loss slot.
+      lossSlots += 1;
+      prefix = telemetryPrefix(records, 31 - lossSlots, tailAllowance);
+    }
+    for (const omitted of records.slice(prefix.length)) {
+      addTelemetryLoss("loss_rate_limit", omitted.kind === "answer_change_summary" ? omitted.numericValue : 1,
+        omitted.kind === "answer_change_summary" && Boolean(omitted.durationMilliseconds & 2));
+    }
+    const losses = Object.values(telemetry.losses).filter(Boolean);
+    for (const loss of losses) loss.monotonicElapsedMilliseconds = telemetry.lastElapsed;
+    const batch = [...prefix, ...losses, terminal];
+    telemetry.terminalAttempted = true; // The finite exception includes failure.
+    telemetry.enabled = false;
+    telemetry.isDwelling = false;
+    stopTelemetryTimers();
+    telemetry.pendingSamples = [];
+    telemetry.pendingAnswerSummaries.clear();
+    telemetry.pendingSampleBytes = 0;
+    telemetry.detailCount = 0;
+    telemetry.losses = { loss_queue_full: null, loss_rate_limit: null };
+    // Retire the entire older tail before this attempt. An unsuccessful terminal
+    // is bounded unsent local accounting; it is never replayed at an older time.
+    telemetry.terminalUnsent = postHostMessage(telemetryPacket(batch)) ? [] : batch;
   }
 
   function canDwell() {
@@ -2470,8 +2654,7 @@
       if (telemetry.enabled) {
         checkClockDiscontinuity();
         closeDwell(true);
-        flushTelemetry();
-        telemetry.enabled = false;
+        finishTelemetry({ kind: "clock_discontinuity", reason: "discontinuity_suspend" });
       }
       return;
     }
@@ -2517,11 +2700,12 @@
       reason: startReason,
       numericValue: 0
     });
+    postHostMessage({ type: "exam_telemetry_samples", samples: [telemetry.startupSample] });
 
     manifest.questions.forEach((q) => {
+      try { telemetry.lastAnswerValue[q.id] = answerText(state.answers[q.id]); } catch (_) {}
       if (!answerIsEmpty(state.answers[q.id])) {
         telemetry.hasAnswered.add(q.id);
-        try { telemetry.lastAnswerValue[q.id] = answerText(state.answers[q.id]); } catch (_) {}
       }
     });
 
@@ -2558,13 +2742,20 @@
     telemetry.hasAnswered = new Set();
     telemetry.lastAnswerValue = Object.create(null);
     telemetry.answerChangeCount = Object.create(null);
+    telemetry.answerCountOverflow = new Set();
+    telemetry.pendingAnswerSummaries.clear();
+    telemetry.firstSampleKeys.clear();
     telemetry.dwellStartMonotonic = 0;
     telemetry.isDwelling = false;
     telemetry.pendingSamples = [];
-    if (telemetry.periodicTimer) {
-      window.clearInterval(telemetry.periodicTimer);
-      telemetry.periodicTimer = null;
-    }
+    telemetry.pendingSampleBytes = 0;
+    telemetry.detailCount = 0;
+    telemetry.losses = { loss_queue_full: null, loss_rate_limit: null };
+    telemetry.packetRawTimes = [];
+    telemetry.isFlushing = false;
+    telemetry.terminalAttempted = false;
+    telemetry.terminalUnsent = [];
+    stopTelemetryTimers();
     telemetry.rawReceiptBaseline = null;
     telemetry.nativeAnchor = 0;
     telemetry.lastElapsed = 0;
@@ -2788,12 +2979,16 @@
             reason: "none"
           });
         }
-        telemetry.answerChangeCount[id] = (telemetry.answerChangeCount[id] || 0) + 1;
+        const previousCount = telemetry.answerChangeCount[id] || 0;
+        if (previousCount === TELEMETRY_UINT32_MAX) telemetry.answerCountOverflow.add(id);
+        telemetry.answerChangeCount[id] = Math.min(TELEMETRY_UINT32_MAX, previousCount + 1);
         emitTelemetrySample({
           kind: "answer_change_summary",
           questionId: id,
           questionRevision: qRev,
           count: telemetry.answerChangeCount[id],
+          numericValue: 1,
+          durationMilliseconds: telemetry.answerCountOverflow.has(id) ? 1 : 0,
           reason: "none"
         });
       }
@@ -2922,12 +3117,11 @@
     if (telemetry.enabled) {
       checkClockDiscontinuity();
       closeDwell(true);
-      emitTelemetrySample({
+      finishTelemetry({
         kind: "exam_submitted",
         reason: state.remainingSeconds === 0 ? "submit_timeout" : "submit_manual",
         numericValue: 0
       });
-      flushTelemetry();
     }
     postHostMessage({
       type: "exam_submit", response,

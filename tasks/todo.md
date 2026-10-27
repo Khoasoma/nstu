@@ -33,9 +33,11 @@ independently re-reviewed: browser 43 cases, native focused coverage, fast and
 strict 49/49 with zero compiler warnings. Its scope includes generation clock
 mapping, explicit raw collector IDs, native initial uncertainty, bounded startup
 retry under the unchanged quota, and direct closure discontinuity checks.
-Required historical acceptance/checkpoint boxes are unchanged. The next repair
-is bounded browser summary aggregation; server durability/ACK and runtime
-qualification still keep the integration incomplete for main.
+Required historical acceptance/checkpoint boxes are unchanged. Browser
+aggregation is now locally implemented and independently reviewed: 63 browser
+cases, native focused coverage, and Root fast/strict 49/49 with zero warnings.
+Question-ID compatibility, server durability/ACK and runtime qualification still
+keep the integration incomplete for main.
 
 ## Task 0: Isolate the work
 
