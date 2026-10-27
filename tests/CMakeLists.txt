@@ -260,6 +260,22 @@ if(TARGET nstu_client_platform)
     nstu_enable_test_assertions(nstu_exam_host_protocol_tests)
     add_test(NAME nstu.exam_host_protocol COMMAND nstu_exam_host_protocol_tests)
 
+    add_executable(nstu_exam_telemetry_lifecycle_tests
+        exam_telemetry_lifecycle_tests.cpp)
+    target_link_libraries(nstu_exam_telemetry_lifecycle_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_telemetry_lifecycle_tests)
+    nstu_enable_test_assertions(nstu_exam_telemetry_lifecycle_tests)
+    add_test(NAME nstu.exam_telemetry_lifecycle COMMAND nstu_exam_telemetry_lifecycle_tests)
+
+    add_executable(nstu_exam_telemetry_service_tests
+        exam_telemetry_service_tests.cpp)
+    target_link_libraries(nstu_exam_telemetry_service_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_telemetry_service_tests)
+    nstu_enable_test_assertions(nstu_exam_telemetry_service_tests)
+    add_test(NAME nstu.exam_telemetry_service COMMAND nstu_exam_telemetry_service_tests)
+
     # Fail-safe exam network-lockdown policy; pure state machine over the WFP
     # allowlist config, no firewall touched.
     add_executable(nstu_exam_network_lockdown_tests

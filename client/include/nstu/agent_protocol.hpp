@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <span>
 #include <string>
@@ -72,11 +73,29 @@ enum class AgentMessageType : std::uint16_t {
     // Agent UI-thread liveness signal. Emitted every 10s during preparing,
     // initializing, and running states to refresh the service lockdown watchdog.
     exam_alive = 35,
+    // Phase 4 Exam Timing & Behavior Telemetry IPC types.
+    // service -> agent: delivers telemetry enablement configuration
+    exam_telemetry_enable = 36,
+    // agent -> service: batches of sampled telemetry observations from browser/native
+    exam_telemetry_samples = 37,
 };
 
 struct AgentMessage {
     AgentMessageType type = AgentMessageType::status_request;
     std::vector<std::byte> payload;
+};
+
+// Caller serializes access. Telemetry has a separate bounded queue and cannot
+// evict protected messages. Each drain takes protected work then one sample packet.
+class AgentServiceQueue {
+public:
+    explicit AgentServiceQueue(std::size_t capacity = 128) : capacity_(capacity) {}
+    void push(AgentMessage message, bool front = false);
+    [[nodiscard]] std::deque<AgentMessage> take_pending();
+private:
+    std::size_t capacity_;
+    std::deque<AgentMessage> protected_;
+    std::deque<AgentMessage> telemetry_;
 };
 
 // One server this machine could pair with, as offered to the agent for the

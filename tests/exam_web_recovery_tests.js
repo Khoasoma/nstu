@@ -118,11 +118,22 @@ class FakeDocument {
     this.getElementById("pdf-frame").hidden = true;
     this.getElementById("pdf-empty").hidden = false;
     this.getElementById("notes-pane").hidden = true;
+    this.hidden = false;
+    this.hasFocus = () => true;
     this.addActionButton("previous");
     this.addActionButton("next");
     this.addActionButton("settings");
     this.addActionButton("submit");
     this.addActionButton("download");
+  }
+
+  dispatchEvent(event) {
+    const current = event || {};
+    if (!current.target) current.target = this.body;
+    for (const listener of this.listeners[current.type] || []) {
+      listener.call(this, current);
+    }
+    return true;
   }
 
   addNode(tagName, id = "") {
@@ -259,12 +270,25 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
   let timerId = 0;
   const timers = new Map();
   let now = Number.isSafeInteger(options.now) ? options.now : 1_700_000_000_000;
+  let perfNow = 1000;
   const intervalCallbacks = [];
+  const windowListeners = Object.create(null);
   const window = {
     NSTU_EXAM_MANIFEST: options.manifest || MANIFEST,
     NSTU_EXAM_CONTEXT: initialContext,
     chrome: options.hosted === false ? undefined : { webview },
     crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000000" },
+    performance: { now: () => perfNow },
+    addEventListener: (type, listener) => {
+      (windowListeners[type] ||= []).push(listener);
+    },
+    dispatchEvent: (event) => {
+      const current = event || {};
+      for (const listener of windowListeners[current.type] || []) {
+        listener.call(window, current);
+      }
+      return true;
+    },
     setTimeout: (callback, delay) => {
       const id = ++timerId;
       timers.set(id, { callback, delay });
@@ -296,7 +320,11 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
   vm.runInContext(APP_SOURCE, context, { filename: "exam/web/app.js" });
   return {
     document, localStorage, webview, window, timers, intervalCallbacks,
-    setNow: (value) => { now = value; }
+    now: () => now,
+    perfNow: () => perfNow,
+    setNow: (value) => { now = value; },
+    setPerfNow: (value) => { perfNow = value; },
+    advancePerf: (ms) => { perfNow += ms; now += ms; }
   };
 }
 
@@ -942,6 +970,414 @@ function testMalformedManifestDoesNotCrashInitialRender() {
     "malformed question data must not produce a partial question render");
 }
 
+const MULTI_MANIFEST = {
+  id: "exam-web-recovery-test",
+  title: "Multi question test",
+  subject: "Test",
+  durationSeconds: 1800,
+  documents: [],
+  questions: [
+    { id: "q1", type: "short_answer", points: 1, prompt: "Q1" },
+    { id: "q2", type: "multiple_choice", points: 1, prompt: "Q2", options: ["A", "B"] },
+    { id: "q3", type: "essay", points: 5, prompt: "Q3" }
+  ]
+};
+
+function assertTelemetryPrivacy(samples) {
+  const allowedKeys = new Set([
+    "kind", "source", "collectorId", "questionId", "questionRevision",
+    "monotonicElapsedMilliseconds", "durationMilliseconds",
+    "clientTimeUnixMilliseconds", "numericValue", "count", "reason"
+  ]);
+  const forbiddenSubstrings = ["must-be-empty", "secret", "private note", "essay draft", "answer text"];
+  for (const sample of samples) {
+    for (const key of Object.keys(sample)) {
+      assert.ok(allowedKeys.has(key), `forbidden key in sample: ${key}`);
+    }
+    assert.equal(sample.source, "browser");
+    const json = JSON.stringify(sample);
+    for (const bad of forbiddenSubstrings) {
+      assert.ok(!json.includes(bad), `sample must not leak forbidden data: ${bad}`);
+    }
+  }
+}
+
+function testTelemetryDisabledByDefaultAndEnableLifecycle() {
+  const context = contextFor("telem-candidate");
+  const harness = createHarness(context, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+
+  // 1. Telemetry is disabled by default: actions produce no telemetry messages
+  const q1Input = latestAnswerInput(harness.document);
+  q1Input.value = "initial";
+  q1Input.dispatchEvent({ type: "input" });
+  harness.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const initialTelem = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  assert.equal(initialTelem.length, 0, "telemetry must be disabled by default");
+
+  // 2. Enable message arrives from host
+  harness.webview.emit({
+    type: "exam_telemetry_enable",
+    enable: {
+      packageId: MULTI_MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      enabled: true,
+      collectorId: 42,
+      samplingIntervalMs: 30000,
+      maxBatchSamples: 32
+    }
+  });
+
+  const enabledTelem = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  assert.ok(enabledTelem.length > 0, "enabling telemetry must produce telemetry samples");
+  const firstBatch = enabledTelem[0].samples;
+  assert.ok(Array.isArray(firstBatch) && firstBatch.length > 0, "must emit initial samples");
+  assert.equal(firstBatch[0].kind, "collector_started", "first sample must be collector_started");
+  assert.equal(firstBatch[0].collectorId, 42);
+  assertTelemetryPrivacy(firstBatch);
+}
+
+function testTelemetryNavigationAndDwell() {
+  const context = contextFor("telem-nav");
+  const harness = createHarness(context, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+
+  harness.webview.emit({
+    type: "exam_telemetry_enable",
+    enable: {
+      packageId: MULTI_MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      enabled: true,
+      collectorId: 101,
+      samplingIntervalMs: 30000,
+      maxBatchSamples: 32
+    }
+  });
+
+  // Clear startup messages
+  harness.webview.messages.length = 0;
+
+  // Dwell on q1 for 3000ms
+  harness.advancePerf(3000);
+
+  // Navigate to q2 via Next button
+  const nextBtn = harness.document.querySelector('[data-action="next"]');
+  nextBtn.dispatchEvent({ type: "click" });
+
+  const telemMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  assert.ok(telemMsgs.length > 0, "navigation must flush telemetry");
+  const allSamples = telemMsgs.flatMap((m) => m.samples);
+
+  // Must have closed dwell for q1 and first view for q2
+  const q1Dwell = allSamples.find((s) => s.kind === "question_dwell" && s.questionId === "q1");
+  assert.ok(q1Dwell, "must emit question_dwell for q1");
+  assert.ok(q1Dwell.durationMilliseconds >= 3000, "dwell duration must be >= 3000ms");
+
+  const q2FirstView = allSamples.find((s) => s.kind === "question_first_view" && s.questionId === "q2");
+  assert.ok(q2FirstView, "must emit question_first_view for q2");
+  assert.equal(q2FirstView.reason, "navigation_button");
+
+  // Rerendering question list or clicking active question button should NOT emit another first_view
+  harness.webview.messages.length = 0;
+  const qButtons = harness.document.getElementById("question-list").children;
+  // Button at index 1 is q2 (currently active)
+  qButtons[1].dispatchEvent({ type: "click" });
+  const rerenderTelem = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  assert.equal(rerenderTelem.length, 0, "rerendering active question must not emit new view or dwell");
+
+  // Navigate back to q1 via ArrowLeft key
+  harness.advancePerf(2000);
+  harness.document.dispatchEvent({ type: "keydown", key: "ArrowLeft" });
+
+  const arrowMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const arrowSamples = arrowMsgs.flatMap((m) => m.samples);
+  const q2Dwell = arrowSamples.find((s) => s.kind === "question_dwell" && s.questionId === "q2");
+  assert.ok(q2Dwell, "must emit question_dwell for q2");
+  assert.ok(q2Dwell.durationMilliseconds >= 2000);
+
+  // q1 was already viewed, so returning to q1 must NOT emit question_first_view
+  const q1ReView = arrowSamples.find((s) => s.kind === "question_first_view" && s.questionId === "q1");
+  assert.equal(q1ReView, undefined, "returning to previously viewed question must not emit question_first_view");
+
+  assertTelemetryPrivacy(allSamples.concat(arrowSamples));
+}
+
+function testTelemetryLateEnableAndSilentlyBaselines() {
+  const context = contextFor("telem-late");
+  const harness = createHarness(context, (storage) => {
+    seedAnswers(storage, context, "pre-existing answer", "pre-existing notes");
+  }, new FakeStorage(), { manifest: MULTI_MANIFEST });
+
+  // Move to question 2 before enable
+  harness.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+
+  // Late enable
+  harness.webview.emit({
+    type: "exam_telemetry_enable",
+    enable: {
+      packageId: MULTI_MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      enabled: true,
+      collectorId: 55,
+      samplingIntervalMs: 30000,
+      maxBatchSamples: 32
+    }
+  });
+
+  const telemMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  assert.ok(telemMsgs.length > 0);
+  const samples = telemMsgs.flatMap((m) => m.samples);
+
+  const startSample = samples.find((s) => s.kind === "collector_started");
+  assert.ok(startSample);
+  assert.equal(startSample.reason, "collector_late_enable", "must be collector_late_enable");
+
+  // Pre-existing answer for q1 must NOT generate a question_first_answer or change event
+  const retroactiveAnswer = samples.find((s) => s.kind === "question_first_answer" && s.questionId === "q1");
+  assert.equal(retroactiveAnswer, undefined, "late enable must silently baseline pre-existing answers");
+
+  assertTelemetryPrivacy(samples);
+}
+
+function testTelemetryFocusAndVisibility() {
+  const context = contextFor("telem-focus");
+  const harness = createHarness(context, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+
+  harness.webview.emit({
+    type: "exam_telemetry_enable",
+    enable: {
+      packageId: MULTI_MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      enabled: true,
+      collectorId: 77,
+      samplingIntervalMs: 30000,
+      maxBatchSamples: 32
+    }
+  });
+
+  harness.webview.messages.length = 0;
+  harness.advancePerf(1000);
+
+  // Window loses focus (blur)
+  harness.document.hasFocus = () => false;
+  harness.window.dispatchEvent({ type: "blur" });
+
+  const blurMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const blurSamples = blurMsgs.flatMap((m) => m.samples);
+
+  const blurFocus = blurSamples.find((s) => s.kind === "focus_changed" && s.reason === "focus_blur");
+  assert.ok(blurFocus, "must emit focus_changed blur");
+  assert.equal(blurFocus.numericValue, 0);
+
+  const dwellBeforeBlur = blurSamples.find((s) => s.kind === "question_dwell");
+  assert.ok(dwellBeforeBlur, "blur must close active dwell segment");
+  assert.ok(dwellBeforeBlur.durationMilliseconds >= 1000);
+
+  // Time elapses while blurred: 5000ms
+  harness.webview.messages.length = 0;
+  harness.advancePerf(5000);
+
+  // Window regains focus
+  harness.document.hasFocus = () => true;
+  harness.window.dispatchEvent({ type: "focus" });
+
+  const focusMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const focusSamples = focusMsgs.flatMap((m) => m.samples);
+  const gainFocus = focusSamples.find((s) => s.kind === "focus_changed" && s.reason === "focus_gain");
+  assert.ok(gainFocus, "must emit focus_changed gain");
+  assert.equal(gainFocus.numericValue, 1);
+
+  // Dwell while focused for 2000ms
+  harness.webview.messages.length = 0;
+  harness.advancePerf(2000);
+
+  // Visibility hidden
+  harness.document.hidden = true;
+  harness.document.dispatchEvent({ type: "visibilitychange" });
+
+  const hiddenMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const hiddenSamples = hiddenMsgs.flatMap((m) => m.samples);
+  const visHidden = hiddenSamples.find((s) => s.kind === "visibility_changed" && s.reason === "visibility_hidden");
+  assert.ok(visHidden, "must emit visibility_changed hidden");
+  assert.equal(visHidden.numericValue, 0);
+
+  const dwellBeforeHide = hiddenSamples.find((s) => s.kind === "question_dwell");
+  assert.ok(dwellBeforeHide, "hidden must close active dwell");
+  assert.ok(dwellBeforeHide.durationMilliseconds >= 2000);
+  // Must NOT include the 5000ms blurred time
+  assert.ok(dwellBeforeHide.durationMilliseconds < 4500, "dwell must exclude blurred interval");
+
+  assertTelemetryPrivacy(blurSamples.concat(focusSamples, hiddenSamples));
+}
+
+function testTelemetryImeAndInputNormalization() {
+  const context = contextFor("telem-input");
+  const harness = createHarness(context, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+
+  harness.webview.emit({
+    type: "exam_telemetry_enable",
+    enable: {
+      packageId: MULTI_MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      enabled: true,
+      collectorId: 88,
+      samplingIntervalMs: 30000,
+      maxBatchSamples: 32
+    }
+  });
+
+  harness.webview.messages.length = 0;
+  const input = latestAnswerInput(harness.document);
+
+  // 1. IME composition start -> typing during composition must NOT emit telemetry changes
+  input.dispatchEvent({ type: "compositionstart" });
+  input.value = "comp";
+  input.dispatchEvent({ type: "input" });
+
+  const imeDuring = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  assert.equal(imeDuring.length, 0, "typing during IME composition must not emit telemetry samples");
+
+  // 2. IME composition end -> commits final normalized value
+  input.value = "completed word";
+  input.dispatchEvent({ type: "compositionend" });
+
+  // Flush on next navigation or tick
+  harness.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const imeEndMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const samples = imeEndMsgs.flatMap((m) => m.samples);
+
+  const firstAnswer = samples.find((s) => s.kind === "question_first_answer" && s.questionId === "q1");
+  assert.ok(firstAnswer, "must emit question_first_answer on first answer commit");
+
+  const changeSummary = samples.find((s) => s.kind === "answer_change_summary" && s.questionId === "q1");
+  assert.ok(changeSummary, "must emit answer_change_summary");
+  assert.equal(changeSummary.count, 1, "first commit counts as 1 change");
+
+  // 3. Identical input does not increase change count
+  harness.webview.messages.length = 0;
+  // Return to q1
+  harness.document.querySelector('[data-action="previous"]').dispatchEvent({ type: "click" });
+  harness.webview.messages.length = 0;
+
+  const inputQ1Again = latestAnswerInput(harness.document);
+  inputQ1Again.value = "completed word"; // exact same value
+  inputQ1Again.dispatchEvent({ type: "input" });
+
+  harness.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const sameInputMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const sameInputSamples = sameInputMsgs.flatMap((m) => m.samples);
+  const redundantChange = sameInputSamples.find((s) => s.kind === "answer_change_summary" && s.questionId === "q1");
+  assert.equal(redundantChange, undefined, "identical answer input must not produce change sample");
+
+  assertTelemetryPrivacy(samples);
+}
+
+function testTelemetryClockDiscontinuityAndSubmission() {
+  const context = contextFor("telem-disc");
+  const harness = createHarness(context, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+
+  harness.webview.emit({
+    type: "exam_telemetry_enable",
+    enable: {
+      packageId: MANIFEST.id,
+      packageDigestHex: context.packageDigestHex,
+      clientIdHex: context.clientIdHex,
+      sessionIdHex: context.sessionIdHex,
+      candidateId: context.candidateId,
+      enabled: true,
+      collectorId: 99,
+      samplingIntervalMs: 30000,
+      maxBatchSamples: 32
+    }
+  });
+
+  harness.webview.messages.length = 0;
+
+  // Jump wall clock forward by 60 seconds while monotonic only advances by 1000ms
+  harness.setNow(harness.now() + 60000);
+  harness.setPerfNow(harness.perfNow() + 1000);
+
+  // Trigger check via navigation
+  harness.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+
+  const discMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const discSamples = discMsgs.flatMap((m) => m.samples);
+  const clockDisc = discSamples.find((s) => s.kind === "clock_discontinuity" && s.reason === "discontinuity_wall_clock");
+  assert.ok(clockDisc, "must emit clock_discontinuity for wall clock jump > 15s");
+
+  // Now submit assessment
+  harness.webview.messages.length = 0;
+  harness.document.getElementById("submit-form").dispatchEvent({
+    type: "submit", submitter: { value: "submit" }
+  });
+
+  const submitMsgs = harness.webview.messages.filter((m) => m.type === "exam_telemetry_samples");
+  const submitSamples = submitMsgs.flatMap((m) => m.samples);
+  const submittedSample = submitSamples.find((s) => s.kind === "exam_submitted" && s.reason === "submit_manual");
+  assert.ok(submittedSample, "submission must emit exam_submitted sample");
+
+  assertTelemetryPrivacy(discSamples.concat(submitSamples));
+}
+
+function testTelemetryEnableBeforeBeginStartsKnownDwell() {
+  const c = contextFor("begin-dwell", HEX16, HEX16_B, true);
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+  h.webview.emit({ type: "exam_begin", begin: { ...c, serverStartUnixMilliseconds: h.now(), durationSeconds: 1800 } });
+  h.webview.messages.length = 0;
+  h.advancePerf(5000);
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const samples = h.webview.messages.filter(m => m.type === "exam_telemetry_samples").flatMap(m => m.samples);
+  assert.ok(samples.some(s => s.kind === "question_dwell" && s.durationMilliseconds === 5000));
+}
+
+function testTelemetryRecoveryAfterEnableIsSilentlyBaselined() {
+  const c = contextFor("recovery-baseline", HEX16, HEX16_B, true);
+  const h = createHarness(c, storage => seedDurable(storage, c, {
+    serverHighestSequence: 1, nextSequence: 2, previousEventHashHex: HEX32_A,
+    serverLastEventHashHex: HEX32_A, serverStateHashHex: HEX32_B
+  }), new FakeStorage(), { manifest: MULTI_MANIFEST });
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+  h.webview.emit(stateResponse(c, 1, HEX32_A, HEX32_B, false, [{
+    questionId: "q1", questionRevision: 1, sequence: 1,
+    clientTimeUnixMilliseconds: 1700000000000, kind: "upsert", answer: "restored", eventHashHex: HEX32_A
+  }]));
+  const input = latestAnswerInput(h.document);
+  assert.strictEqual(input.value, "restored");
+  h.webview.messages.length = 0;
+  input.dispatchEvent({ type: "input", target: { value: "restored" } });
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const samples = h.webview.messages.filter(m => m.type === "exam_telemetry_samples").flatMap(m => m.samples);
+  assert.ok(!samples.some(s => s.kind === "question_first_answer" || s.kind === "answer_change_summary"));
+}
+
+function testTelemetryPeriodicDiscontinuityResumesKnownDwell() {
+  const c = contextFor("periodic-dwell", HEX16, HEX16_B);
+  const h = createHarness(c, null, new FakeStorage(), { manifest: MULTI_MANIFEST });
+  h.webview.emit({ type: "exam_telemetry_enable", enable: { ...c, enabled: true, collectorId: 42 } });
+  h.setNow(h.now() + 60000);
+  h.setPerfNow(h.perfNow() + 1000);
+  h.intervalCallbacks.find(timer => timer.delay === 30000).callback();
+  h.webview.messages.length = 0;
+  h.advancePerf(5000);
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const samples = h.webview.messages.filter(m => m.type === "exam_telemetry_samples").flatMap(m => m.samples);
+  assert.ok(samples.some(s => s.kind === "question_dwell" && s.durationMilliseconds === 5000));
+}
+
 testStaleWatermarkIsIgnored();
 testFinalizedResponseDoesNotRequeueFinalize();
 testContextSwitchPreservesTargetNamespace();
@@ -965,4 +1401,18 @@ testStaticPreviewKeepsRelativeAssetPaths();
 testExpiredTimerDoesNotResetAfterReload();
 testHostedExamWaitsForAuthenticatedBegin();
 testMalformedManifestDoesNotCrashInitialRender();
-console.log("exam web recovery tests: 23 passed");
+testTelemetryDisabledByDefaultAndEnableLifecycle();
+testTelemetryNavigationAndDwell();
+testTelemetryLateEnableAndSilentlyBaselines();
+testTelemetryFocusAndVisibility();
+testTelemetryImeAndInputNormalization();
+testTelemetryClockDiscontinuityAndSubmission();
+const reviewTests = [testTelemetryEnableBeforeBeginStartsKnownDwell,
+  testTelemetryRecoveryAfterEnableIsSilentlyBaselined,
+  testTelemetryPeriodicDiscontinuityResumesKnownDwell];
+const reviewFailures = [];
+for (const test of reviewTests) {
+  try { test(); } catch (error) { reviewFailures.push(`${test.name}: ${error.stack}`); }
+}
+assert.strictEqual(reviewFailures.length, 0, reviewFailures.join("\n"));
+console.log("exam web recovery tests: 32 passed");

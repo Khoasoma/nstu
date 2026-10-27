@@ -11,6 +11,8 @@
 #include "nstu/exam_host.hpp"
 #include "nstu/exam_lockdown_controller.hpp"
 #include "nstu/exam_sync.hpp"
+#include "nstu/exam_telemetry_router.hpp"
+#include "nstu/exam_telemetry_service.hpp"
 #include "nstu/session.hpp"
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
@@ -62,6 +64,16 @@ std::deque<nstu::client::ClientOutboundCommand> g_outbound_queue;
 nstu::audit::Spool g_audit_spool;
 std::chrono::steady_clock::time_point g_audit_next_upload{};
 nstu::exam::AnswerOutbox g_exam_outbox;
+void queue_agent_message(nstu::client::AgentMessage message);
+nstu::client::ExamTelemetryServiceCoordinator g_exam_telemetry_coordinator;
+nstu::client::ExamTelemetryRouter g_exam_telemetry_router(
+    g_exam_telemetry_coordinator,
+    [](std::span<const std::byte> payload) {
+        queue_agent_message({
+            nstu::client::AgentMessageType::exam_telemetry_enable,
+            std::vector<std::byte>(payload.begin(), payload.end())
+        });
+    });
 std::mutex g_exam_inflight_mutex;
 // The value is the complete exam context key.  Keeping it alongside the
 // event key lets the scheduler enforce one in-flight event per context while
@@ -516,6 +528,45 @@ void emit_audit(nstu::audit::Category category, nstu::audit::Severity severity,
     (void)g_audit_spool.emit(event);
 }
 
+enum class TelemetryOperation : std::size_t {
+    startup, enable, samples, ack, maintenance, shutdown, count
+};
+
+void report_telemetry_result(TelemetryOperation operation, bool succeeded,
+                             std::string_view error = {}) noexcept {
+    static constexpr std::array<std::string_view,
+        static_cast<std::size_t>(TelemetryOperation::count)> actions{
+        "startup", "enable", "samples", "ack", "maintenance", "shutdown"};
+    static std::mutex mutex;
+    static std::array<std::string, actions.size()> last_failure;
+    static std::atomic_flag reporting_failed = ATOMIC_FLAG_INIT;
+    try {
+        const auto index = static_cast<std::size_t>(operation);
+        const auto detail = nstu::audit::sanitize_audit_field(
+            error.empty() ? "operation failed" : error, nstu::audit::kMaximumDetailBytes);
+        {
+            std::scoped_lock lock(mutex);
+            if (succeeded) {
+                last_failure[index].clear();
+                return;
+            }
+            if (last_failure[index] == detail) return;
+            last_failure[index] = detail;
+        }
+        // Fixed operation names and bounded, sanitized diagnostics only.
+        // Repeated unchanged failure is quiet until recovery or a new failure.
+        emit_audit(nstu::audit::Category::exam, nstu::audit::Severity::warning,
+                   "exam_telemetry", std::string(actions[index]), "failed", detail);
+        const auto line = "NSTU exam telemetry " + std::string(actions[index]) +
+                          " failed: " + detail + "\n";
+        OutputDebugStringA(line.c_str());
+    } catch (...) {
+        if (!reporting_failed.test_and_set()) {
+            OutputDebugStringA("NSTU telemetry failure reporting unavailable.\n");
+        }
+    }
+}
+
 void queue_outbound_message(nstu::protocol::CommandType type,
                             std::vector<std::byte> payload) {
     std::scoped_lock lock(g_outbound_queue_mutex);
@@ -625,6 +676,23 @@ std::optional<nstu::client::ClientOutboundCommand> pop_outbound_message() {
         return nstu::client::ClientOutboundCommand{
             nstu::protocol::CommandType::exam_answer_event,
             payload};
+    }
+
+    // Low-priority telemetry scheduling: offer <=1 telemetry batch/s, only after
+    // higher-priority commands, audit, and answer events have no work to send.
+    {
+        static auto s_next_telemetry_time = std::chrono::steady_clock::now();
+        if (now >= s_next_telemetry_time) {
+            const auto now_unix_ms = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count());
+            auto telemetry_cmd = g_exam_telemetry_router.poll_outbound_batch(
+                now_unix_ms, 5000);
+            if (telemetry_cmd.has_value()) {
+                s_next_telemetry_time = now + std::chrono::seconds(1);
+                return telemetry_cmd;
+            }
+        }
     }
     return std::nullopt;
 }
@@ -881,6 +949,15 @@ void agent_pipe_loop() {
                         std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now().time_since_epoch()).count());
                     g_exam_lockdown_controller.heartbeat(now_ms);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::exam_telemetry_samples) {
+                    const auto now_ms = static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count());
+                    std::string telemetry_error;
+                    const bool admitted = g_exam_telemetry_router.handle_agent_samples(
+                        message->payload, now_ms, &telemetry_error);
+                    report_telemetry_result(TelemetryOperation::samples, admitted, telemetry_error);
                 }
             }
             Sleep(25);
@@ -919,6 +996,12 @@ std::filesystem::path exam_outbox_path() {
     const auto root = nstu::deployment::data_root(nullptr);
     return root.empty() ? std::filesystem::path{}
                         : root / L"exam-answer-outbox.bin";
+}
+
+std::filesystem::path exam_telemetry_outbox_path() {
+    const auto root = nstu::deployment::data_root(nullptr);
+    return root.empty() ? std::filesystem::path{}
+                        : root / L"exam-telemetry-outbox.bin";
 }
 
 nstu::control::ClientStatusReport current_status() {
@@ -1692,8 +1775,34 @@ void handle_server_command(
     case nstu::protocol::CommandType::exam_stop:
         if (command.payload.empty()) {
             queue_exam_stop();
+            g_exam_telemetry_router.handle_explicit_stop();
         }
         break;
+    case nstu::protocol::CommandType::exam_telemetry_enable: {
+        std::string telemetry_error;
+        const bool enabled = g_exam_telemetry_router.handle_server_enable(
+            command.payload, &telemetry_error);
+        report_telemetry_result(TelemetryOperation::enable, enabled, telemetry_error);
+        break;
+    }
+    case nstu::protocol::CommandType::exam_telemetry_ack: {
+        const auto now_ms = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count());
+        std::string telemetry_error;
+        const auto applied = g_exam_telemetry_router.handle_server_ack(
+            command.payload, now_ms, &telemetry_error);
+        const bool succeeded = applied == nstu::exam::TelemetryAckApplyResult::retired ||
+                               applied == nstu::exam::TelemetryAckApplyResult::retry_scheduled;
+        if (!succeeded && telemetry_error.empty()) {
+            telemetry_error = applied == nstu::exam::TelemetryAckApplyResult::deleted_terminal
+                ? "telemetry ACK terminal rejection"
+                : applied == nstu::exam::TelemetryAckApplyResult::storage_failed
+                    ? "telemetry ACK persistence failed" : "telemetry ACK did not match";
+        }
+        report_telemetry_result(TelemetryOperation::ack, succeeded, telemetry_error);
+        break;
+    }
     case nstu::protocol::CommandType::exam_begin: {
         // Authenticated server release of the synchronized start. Bind the
         // authoritative begin to this service's provisioned identity before it
@@ -2101,6 +2210,7 @@ void remote_control_loop(std::stop_token stop_token) {
             // must make every unsatisfied event eligible on the next session.
             clear_exam_inflight();
             queue_exam_stop();
+            g_exam_telemetry_router.handle_disconnect();
             set_desired_lock(false);
             // The authenticated teacher session has ended. Tell the agent so it
             // hides / refuses chat until a teacher is reachable again.
@@ -2352,6 +2462,14 @@ void WINAPI service_main(DWORD, wchar_t**) {
             return;
         }
     }
+    {
+        const auto telemetry_path = exam_telemetry_outbox_path();
+        std::string telemetry_error;
+        const bool restored = !telemetry_path.empty() &&
+            g_exam_telemetry_router.handle_restart(telemetry_path, &telemetry_error);
+        if (!restored && telemetry_error.empty()) telemetry_error = "telemetry storage path unavailable";
+        report_telemetry_result(TelemetryOperation::startup, restored, telemetry_error);
+    }
     std::string sweep_error;
     if (!g_exam_lockdown_controller.startup_sweep(&sweep_error)) {
         emit_audit(nstu::audit::Category::security,
@@ -2368,7 +2486,22 @@ void WINAPI service_main(DWORD, wchar_t**) {
     std::jthread agent_supervisor_thread(agent_supervisor_loop);
     launch_agent();
     report_status(SERVICE_RUNNING);
-    WaitForSingleObject(g_stop_event, INFINITE);
+    // The service thread remains available for bounded periodic maintenance
+    // even without an authenticated control connection. No connection/control
+    // lock is held while local durable cleanup runs.
+    constexpr DWORD kTelemetryMaintenancePeriodMs = 1000;
+    for (;;) {
+        const DWORD wait_result = WaitForSingleObject(g_stop_event, kTelemetryMaintenancePeriodMs);
+        if (wait_result == WAIT_OBJECT_0) break;
+        if (wait_result != WAIT_TIMEOUT) {
+            emit_audit(nstu::audit::Category::system, nstu::audit::Severity::error,
+                       "service", "stop_wait", "failed", "service stop wait failed");
+            break;
+        }
+        std::string telemetry_error;
+        const bool maintained = g_exam_telemetry_router.handle_maintenance(0, &telemetry_error);
+        report_telemetry_result(TelemetryOperation::maintenance, maintained, telemetry_error);
+    }
     g_stop_requested = true;
     queue_exam_stop();
     queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
@@ -2410,6 +2543,10 @@ void WINAPI service_main(DWORD, wchar_t**) {
         g_exam_outbox_ready = false;
         g_exam_outbox_path.clear();
     }
+    g_exam_telemetry_router.handle_shutdown();
+    report_telemetry_result(TelemetryOperation::shutdown,
+                           !g_exam_telemetry_coordinator.is_open(),
+                           g_exam_telemetry_coordinator.last_error());
     {
         clear_configured_client_id();
     }

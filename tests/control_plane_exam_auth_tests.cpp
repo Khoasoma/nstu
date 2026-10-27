@@ -1,7 +1,13 @@
+// Compile the exact implementation in this test TU to isolate its test hooks.
+// The production static library compiles without this guard or mutable clocks.
+#define NSTU_CONTROL_PLANE_AUTH_TESTING
+#include "../server/src/control_plane.cpp"
+
 #include "nstu/control_channel.hpp"
 #include "nstu/control_plane.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
+#include "nstu/exam_telemetry.hpp"
 #include "nstu/multicast.hpp"
 
 #include <algorithm>
@@ -125,6 +131,187 @@ std::optional<nstu::control::AuthenticatedControlChannel> connect_channel(
                                                        std::move(*session));
 }
 
+nstu::control::UwfFleetStatusReport verified_protection() {
+    nstu::control::UwfFleetStatusReport proof;
+    proof.phase = nstu::control::UwfFleetPhase::verified_protected;
+    proof.probe.probe_succeeded = true;
+    proof.probe.filter_current_enabled = true;
+    proof.probe.system_volume_current_protected = true;
+    proof.boot_id.fill(std::byte{0xb1});
+    return proof;
+}
+
+struct DeadlineFixture {
+    nstu::security::ClientId id = client_id();
+    std::vector<std::byte> key = client_key();
+    nstu::security::KeyStore store;
+    nstu::server::ClientRegistry registry;
+    nstu::server::ServerControlPlane plane{registry, store};
+    std::filesystem::path path = journal_path();
+    std::optional<nstu::control::AuthenticatedControlChannel> channel;
+    nstu::exam::ExamStartRequest start = make_start(id);
+    nstu::exam::AnswerEvent event = make_event(start, 1);
+    std::uint64_t registry_id = 0;
+    std::string error;
+
+    DeadlineFixture() {
+        assert(store.enroll(id, 9, key, &error));
+        nstu::server::ServerControlPlaneConfig config;
+        config.port = 0;
+        config.maximum_clients = 16;
+        config.exam_journal_path = path;
+        assert(plane.start(std::move(config), &error));
+        reconnect("CLOCK-INITIAL");
+        assert(registry.set_uwf_fleet_status(registry_id, verified_protection()));
+        assert(plane.start_exam(registry_id, start, &error));
+        const auto command = channel->receive(&error);
+        assert(command && command->envelope.type == nstu::protocol::CommandType::exam_start);
+        receive_enable();
+        const auto wire = nstu::exam::encode_answer_event(event);
+        assert(channel->send(nstu::protocol::CommandType::exam_answer_event, 100, wire, &error));
+        const auto ack_frame = channel->receive(&error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_answer_ack);
+        const auto ack = nstu::exam::decode_answer_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::AnswerAckStatus::accepted);
+    }
+    ~DeadlineFixture() {
+        if (channel) channel->close();
+        plane.stop();
+        nstu::security::secure_zero(key);
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        auto lock_path = path;
+        lock_path += L".lock";
+        std::filesystem::remove(lock_path, ec);
+    }
+    void reconnect(const std::string& label) {
+        if (channel) channel->close();
+        channel = connect_channel(plane, id, 9, key, &error);
+        assert(channel);
+        nstu::control::ClientStatusReport status;
+        status.hostname = label;
+        assert(channel->send(nstu::protocol::CommandType::status_report, 1,
+            nstu::control::encode_status_report(status), &error));
+        assert(wait_until([&] {
+            const auto peers = registry.snapshot();
+            const auto peer = std::find_if(peers.begin(), peers.end(), [&](const auto& p) {
+                return p.hostname == label && p.status == nstu::server::ClientStatus::online;
+            });
+            if (peer == peers.end()) return false;
+            registry_id = peer->id;
+            return true;
+        }));
+    }
+    void receive_enable() {
+        const auto frame = channel->receive(&error);
+        assert(frame && frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_enable);
+        const auto enable = nstu::exam::decode_telemetry_enable(frame->payload);
+        assert(enable && enable->package_id == start.package_id &&
+            enable->package_digest == start.package_digest && enable->client_id == start.client_id &&
+            enable->session_id == start.session_id && enable->candidate_id == start.candidate_id);
+    }
+    void receive_answer_state() {
+        assert(channel->send(nstu::protocol::CommandType::exam_state_request, 200,
+            nstu::exam::encode_state_request(make_state_request(start)), &error));
+        const auto frame = channel->receive(&error);
+        assert(frame && frame->envelope.type == nstu::protocol::CommandType::exam_state_response);
+        const auto state = nstu::exam::decode_state_response(frame->payload);
+        assert(state && state->answers.size() == 1 && state->session_id == start.session_id);
+        assert(state->answers.front().answer == event.answer);
+        assert(state->answers.front().event_hash == *nstu::exam::hash_answer_event(event));
+        assert(state->highest_contiguous_sequence == 1);
+    }
+};
+
+void test_wall_expiry_then_rollback_preserves_answers() {
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::milliseconds(0));
+    DeadlineFixture fixture;
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::hours(26));
+    fixture.reconnect("CLOCK-EXPIRED");
+    fixture.receive_answer_state();
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::hours(24));
+    fixture.reconnect("CLOCK-ROLLED-BACK");
+    fixture.receive_answer_state();
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::milliseconds(0));
+}
+
+void test_fixed_deadline_boundaries_and_wrong_client() {
+    using namespace std::chrono_literals;
+    using Clock = std::chrono::steady_clock;
+    const auto wall = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    const auto steady = Clock::now();
+    const auto hours_ms = [](std::chrono::hours hours) {
+        return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(hours).count());
+    };
+    nstu::server::set_telemetry_clock_for_testing(nstu::server::telemetry_detail::ClockSnapshot{wall, steady});
+    {
+        DeadlineFixture fixture;
+        auto other_id = fixture.id;
+        other_id.front() ^= std::byte{0x80};
+        assert(fixture.store.enroll(other_id, 9, fixture.key, &fixture.error));
+        auto other = connect_channel(fixture.plane, other_id, 9, fixture.key, &fixture.error);
+        assert(other);
+        nstu::control::ClientStatusReport status;
+        status.hostname = "CLOCK-WRONG-CLIENT";
+        assert(other->send(nstu::protocol::CommandType::status_report, 1,
+            nstu::control::encode_status_report(status), &fixture.error));
+        std::uint64_t other_registry_id = 0;
+        assert(wait_until([&] {
+            for (const auto& p : fixture.registry.snapshot()) {
+                if (p.hostname == status.hostname && p.status == nstu::server::ClientStatus::online) {
+                    other_registry_id = p.id;
+                    return true;
+                }
+            }
+            return false;
+        }));
+        assert(fixture.plane.send_command(other_registry_id, nstu::protocol::CommandType::heartbeat,
+            {}, &fixture.error));
+        const auto other_frame = other->receive(&fixture.error);
+        assert(other_frame && other_frame->envelope.type == nstu::protocol::CommandType::heartbeat);
+        other->close();
+
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(24h), steady + 24h});
+        fixture.reconnect("CLOCK-24-HOURS");
+        fixture.receive_enable();
+        fixture.receive_answer_state();
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(25h) - 1, steady + 24h});
+        fixture.reconnect("CLOCK-JUST-BEFORE");
+        fixture.receive_enable();
+        fixture.receive_answer_state();
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(25h), steady + 24h});
+        fixture.reconnect("CLOCK-EXACT-WALL-EXPIRY");
+        fixture.receive_answer_state();
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(24h), steady + 24h});
+        fixture.reconnect("CLOCK-LATCH-AFTER-ROLLBACK");
+        fixture.receive_answer_state();
+    }
+    nstu::server::set_telemetry_clock_for_testing(nstu::server::telemetry_detail::ClockSnapshot{wall, steady});
+    {
+        DeadlineFixture fixture;
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(24h), steady + 24h});
+        fixture.reconnect("CLOCK-BEFORE-WALL-ROLLBACK");
+        fixture.receive_enable();
+        fixture.receive_answer_state();
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(1h), steady + 25h - 1ms});
+        fixture.reconnect("CLOCK-STEADY-JUST-BEFORE-WALL-ROLLED-BACK");
+        fixture.receive_enable();
+        fixture.receive_answer_state();
+        nstu::server::set_telemetry_clock_for_testing(
+            nstu::server::telemetry_detail::ClockSnapshot{wall + hours_ms(1h), steady + 25h});
+        fixture.reconnect("CLOCK-STEADY-EXACT-WALL-WITHIN-WINDOW");
+        fixture.receive_answer_state();
+    }
+    nstu::server::set_telemetry_clock_for_testing(std::nullopt);
+}
+
 } // namespace
 
 int main() {
@@ -202,6 +389,21 @@ int main() {
     assert(launched_states.front().client_id == registry_id);
     assert(!launched_states.front().ready);
     assert(!launched_states.front().begun);
+
+    const auto launched_enable = channel->receive(&error);
+    assert(launched_enable.has_value());
+    assert(launched_enable->envelope.type ==
+           nstu::protocol::CommandType::exam_telemetry_enable);
+    const auto decoded_launched_enable =
+        nstu::exam::decode_telemetry_enable(launched_enable->payload);
+    assert(decoded_launched_enable.has_value());
+    assert(decoded_launched_enable->client_id == id);
+    assert(decoded_launched_enable->package_digest == launch.package_digest);
+    assert(decoded_launched_enable->session_id == launched->session_id);
+    assert(decoded_launched_enable->package_id == launch.package_id);
+    assert(decoded_launched_enable->candidate_id == launch.candidate_id);
+    assert(decoded_launched_enable->server_time_unix_milliseconds != 0);
+
     assert(control_plane.stop_exam(registry_id, &error));
     const auto launched_stop = channel->receive(&error);
     assert(launched_stop.has_value());
@@ -215,6 +417,19 @@ int main() {
     assert(start_command.has_value());
     assert(start_command->envelope.type ==
            nstu::protocol::CommandType::exam_start);
+
+    const auto start_enable = channel->receive(&error);
+    assert(start_enable.has_value());
+    assert(start_enable->envelope.type ==
+           nstu::protocol::CommandType::exam_telemetry_enable);
+    const auto decoded_start_enable =
+        nstu::exam::decode_telemetry_enable(start_enable->payload);
+    assert(decoded_start_enable.has_value());
+    assert(decoded_start_enable->client_id == id);
+    assert(decoded_start_enable->package_id == start.package_id);
+    assert(decoded_start_enable->candidate_id == start.candidate_id);
+    assert(decoded_start_enable->session_id == start.session_id);
+    assert(decoded_start_enable->server_time_unix_milliseconds != 0);
 
     // A second start cannot replace the server-issued context while the
     // current session is active.
@@ -323,6 +538,19 @@ int main() {
     assert(reconnected.has_value());
     assert(wait_until([&] { return registry.snapshot().size() == 1; }));
 
+    const auto reconnected_enable = reconnected->receive(&error);
+    assert(reconnected_enable.has_value());
+    assert(reconnected_enable->envelope.type ==
+           nstu::protocol::CommandType::exam_telemetry_enable);
+    const auto decoded_reconnected_enable =
+        nstu::exam::decode_telemetry_enable(reconnected_enable->payload);
+    assert(decoded_reconnected_enable.has_value());
+    assert(decoded_reconnected_enable->client_id == id);
+    assert(decoded_reconnected_enable->package_id == start.package_id);
+    assert(decoded_reconnected_enable->session_id == start.session_id);
+    assert(decoded_reconnected_enable->candidate_id == start.candidate_id);
+    assert(decoded_reconnected_enable->server_time_unix_milliseconds != 0);
+
     auto recovered_event = make_event(start, 2);
     recovered_event.previous_event_hash = *accepted_hash;
     const auto recovered_wire = nstu::exam::encode_answer_event(recovered_event);
@@ -344,6 +572,21 @@ int main() {
     assert(stop_command->envelope.type ==
            nstu::protocol::CommandType::exam_stop);
 
+    // Reconnecting after explicit stop receives no telemetry enable
+    reconnected->close();
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::offline;
+    }));
+    reconnected = connect_channel(control_plane, id, key_id, key, &error);
+    assert(reconnected.has_value());
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::online;
+    }));
+
     // Once explicitly stopped, even a correctly shaped event is rejected.
     auto stopped_event = make_event(start, 3);
     const auto stopped_wire = nstu::exam::encode_answer_event(stopped_event);
@@ -354,6 +597,214 @@ int main() {
     assert(!reconnected->receive(&error).has_value());
     reconnected->close();
 
+    // --- 25-Hour Expiry Without Deadline Renewal and Preserved Answer Recovery ---
+    auto start2 = make_start(id);
+    for (std::size_t i = 0; i < start2.session_id.size(); ++i) {
+        start2.session_id[i] = static_cast<std::byte>(0xa5 + i);
+    }
+
+    auto fresh_ch = connect_channel(control_plane, id, key_id, key, &error);
+    assert(fresh_ch.has_value());
+    // A report from this connection is processed after its handshake demotes
+    // the previous session's UWF proof; online alone is published too early.
+    nstu::control::ClientStatusReport fresh_status;
+    fresh_status.hostname = "AUTH-TEST-FRESH-PC";
+    assert(fresh_ch->send(nstu::protocol::CommandType::status_report, 1,
+                          nstu::control::encode_status_report(fresh_status),
+                          &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::online &&
+               snapshot.front().hostname == fresh_status.hostname;
+    }));
+    assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
+
+    assert(control_plane.start_exam(registry_id, start2, &error));
+    const auto s2_cmd = fresh_ch->receive(&error);
+    assert(s2_cmd.has_value());
+    assert(s2_cmd->envelope.type == nstu::protocol::CommandType::exam_start);
+
+    const auto fresh_enable = fresh_ch->receive(&error);
+    assert(fresh_enable.has_value());
+    assert(fresh_enable->envelope.type == nstu::protocol::CommandType::exam_telemetry_enable);
+
+    fresh_ch->close();
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::offline;
+    }));
+
+    // Advance clock past 25 hours (26 hours)
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::hours(26));
+
+    // Reconnect after 25-hour telemetry deadline
+    auto expired_ch = connect_channel(control_plane, id, key_id, key, &error);
+    assert(expired_ch.has_value());
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::online;
+    }));
+
+    // Submit answer event
+    auto answer_event_exp = make_event(start2, 1);
+    const auto answer_wire_exp = nstu::exam::encode_answer_event(answer_event_exp);
+    assert(!answer_wire_exp.empty());
+    assert(expired_ch->send(nstu::protocol::CommandType::exam_answer_event, 40,
+                            answer_wire_exp, &error));
+
+    // The FIRST message received MUST be the answer ACK, NOT telemetry enable (telemetry expired)!
+    const auto ack_exp = expired_ch->receive(&error);
+    assert(ack_exp.has_value());
+    assert(ack_exp->envelope.type == nstu::protocol::CommandType::exam_answer_ack);
+    const auto dec_ack_exp = nstu::exam::decode_answer_ack(ack_exp->payload);
+    assert(dec_ack_exp.has_value());
+    assert(dec_ack_exp->status == nstu::exam::AnswerAckStatus::accepted);
+
+    // Answer recovery via state request still works!
+    const auto state_req_exp = make_state_request(start2);
+    const auto state_wire_exp = nstu::exam::encode_state_request(state_req_exp);
+    assert(expired_ch->send(nstu::protocol::CommandType::exam_state_request, 41,
+                            state_wire_exp, &error));
+    const auto state_resp_exp = expired_ch->receive(&error);
+    assert(state_resp_exp.has_value());
+    assert(state_resp_exp->envelope.type == nstu::protocol::CommandType::exam_state_response);
+    const auto dec_state_exp = nstu::exam::decode_state_response(state_resp_exp->payload);
+    assert(dec_state_exp.has_value());
+    assert(dec_state_exp->session_id == start2.session_id);
+    assert(dec_state_exp->answers.size() == 1);
+    assert(dec_state_exp->answers.front().answer == answer_event_exp.answer);
+    assert(dec_state_exp->answers.front().event_hash == *nstu::exam::hash_answer_event(answer_event_exp));
+
+    // Extreme offsets saturate instead of overflowing: INT64_MIN must not be
+    // negated, and a large forward offset must not wrap past zero.
+    nstu::server::set_telemetry_clock_offset_for_testing(
+        std::chrono::milliseconds::min());
+    assert(nstu::server::telemetry_server_time_ms_for_testing() == 0);
+    nstu::server::set_telemetry_clock_offset_for_testing(
+        std::chrono::milliseconds::max());
+    assert(nstu::server::telemetry_server_time_ms_for_testing() >
+           static_cast<std::uint64_t>(std::chrono::milliseconds::max().count()));
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::hours(-1));
+    const auto behind_ms = nstu::server::telemetry_server_time_ms_for_testing();
+    nstu::server::set_telemetry_clock_offset_for_testing(std::chrono::milliseconds(0));
+    const auto real_ms = nstu::server::telemetry_server_time_ms_for_testing();
+    assert(behind_ms != 0 && behind_ms < real_ms &&
+           real_ms - behind_ms >= 3'600'000ULL);
+
+    expired_ch->close();
+
+    // Every connection opened so far (channel, two reconnected, fresh_ch,
+    // expired_ch) has closed. Wait for all five on_disconnected callbacks to
+    // return so the churn below can count its own disconnects exactly.
+    assert(wait_until([&] {
+        return nstu::server::completed_disconnect_count_for_testing() == 5;
+    }));
+
+    // Immediate reconnects: the superseded connection's disconnect races the
+    // replacement handshake. Each round waits until the old connection's
+    // on_disconnected has returned, then asserts the replacement is online with
+    // its proof intact, whichever order the two landed in.
+    std::optional<nstu::control::AuthenticatedControlChannel> previous_ch;
+    for (int round = 0; round < 20; ++round) {
+        const auto disconnects_before =
+            nstu::server::completed_disconnect_count_for_testing();
+        if (previous_ch) {
+            previous_ch->close();
+        }
+        auto round_ch = connect_channel(control_plane, id, key_id, key, &error);
+        assert(round_ch.has_value());
+        nstu::control::ClientStatusReport round_status;
+        round_status.hostname = "AUTH-TEST-ROUND-" + std::to_string(round);
+        assert(round_ch->send(nstu::protocol::CommandType::status_report, 1,
+                              nstu::control::encode_status_report(round_status),
+                              &error));
+        assert(wait_until([&] {
+            const auto snapshot = registry.snapshot();
+            return !snapshot.empty() &&
+                   snapshot.front().status == nstu::server::ClientStatus::online &&
+                   snapshot.front().hostname == round_status.hostname;
+        }));
+        assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
+
+        // A second report on the same connection is a server round trip after
+        // the proof was recorded; the proof and online status must survive it.
+        round_status.hostname += "-CONFIRMED";
+        assert(round_ch->send(nstu::protocol::CommandType::status_report, 2,
+                              nstu::control::encode_status_report(round_status),
+                              &error));
+        assert(wait_until([&] {
+            const auto snapshot = registry.snapshot();
+            return !snapshot.empty() &&
+                   snapshot.front().hostname == round_status.hostname;
+        }));
+        // Barrier: the superseded connection's on_disconnected has returned.
+        // Exactly one disconnect per round after the first; none in round 0.
+        const auto expected_disconnects =
+            disconnects_before + (round == 0 ? 0u : 1u);
+        assert(wait_until([&] {
+            return nstu::server::completed_disconnect_count_for_testing() ==
+                   expected_disconnects;
+        }));
+        const auto confirmed = registry.snapshot();
+        assert(confirmed.size() == 1);
+        assert(confirmed.front().status == nstu::server::ClientStatus::online);
+        assert(confirmed.front().uwf.proves_current_protection());
+        previous_ch = std::move(round_ch);
+    }
+
+    // Forced late disconnect: hold disconnect callbacks, let a replacement
+    // supersede the still-open previous connection and record fresh proof, and
+    // only then let the old connection's on_disconnected run.
+    nstu::server::set_disconnect_hold_for_testing(true);
+    const auto disconnects_before_late =
+        nstu::server::completed_disconnect_count_for_testing();
+    auto late_ch = connect_channel(control_plane, id, key_id, key, &error);
+    assert(late_ch.has_value());
+    nstu::control::ClientStatusReport late_status;
+    late_status.hostname = "AUTH-TEST-LATE-DISCONNECT";
+    assert(late_ch->send(nstu::protocol::CommandType::status_report, 1,
+                         nstu::control::encode_status_report(late_status),
+                         &error));
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::online &&
+               snapshot.front().hostname == late_status.hostname;
+    }));
+    assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
+    // The supersede closed the old connection, but its callback is parked.
+    assert(wait_until([] {
+        return nstu::server::held_disconnect_count_for_testing() == 1;
+    }));
+    assert(nstu::server::completed_disconnect_count_for_testing() ==
+           disconnects_before_late);
+    const auto before_late = registry.snapshot();
+    assert(before_late.size() == 1);
+    assert(before_late.front().uwf.proves_current_protection());
+
+    nstu::server::set_disconnect_hold_for_testing(false);
+    assert(nstu::server::release_held_disconnects_for_testing() == 1);
+    assert(nstu::server::completed_disconnect_count_for_testing() ==
+           disconnects_before_late + 1);
+    const auto after_late = registry.snapshot();
+    assert(after_late.size() == 1);
+    assert(after_late.front().status == nstu::server::ClientStatus::online);
+    assert(after_late.front().uwf.proves_current_protection());
+    assert(control_plane.authenticated_client_count() == 1);
+
+    // Control: the live connection's own disconnect still demotes the proof.
+    late_ch->close();
+    assert(wait_until([&] {
+        const auto snapshot = registry.snapshot();
+        return !snapshot.empty() &&
+               snapshot.front().status == nstu::server::ClientStatus::offline &&
+               !snapshot.front().uwf.proves_current_protection();
+    }));
+    previous_ch->close();
+
     control_plane.stop();
     nstu::security::secure_zero(key);
     std::error_code cleanup_error;
@@ -361,5 +812,7 @@ int main() {
     auto lock_path = path;
     lock_path += L".lock";
     std::filesystem::remove(lock_path, cleanup_error);
+    test_wall_expiry_then_rollback_preserves_answers();
+    test_fixed_deadline_boundaries_and_wrong_client();
     return 0;
 }

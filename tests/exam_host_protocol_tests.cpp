@@ -374,10 +374,404 @@ void exercise_exam_manifest_asset_validation() {
     assert(!error);
 }
 
+void exercise_exam_host_telemetry() {
+    using namespace nstu;
+    using namespace nstu::exam;
+    using namespace nstu::client;
+
+    const std::set<std::string> allowed_questions = {"q1", "reading-01", "math-02"};
+
+    // 1. Valid browser sample parsing:
+    // Browser claims packageId, candidateId, source="native", collectorId=999.
+    // Host overrides source to browser, binds native collector ID (42), and ignores browser identity.
+    const std::string valid_json = R"json({
+        "type": "exam_telemetry_samples",
+        "packageId": "spoofed-package",
+        "candidateId": "spoofed-candidate",
+        "samples": [{
+            "kind": "question_dwell",
+            "source": "native",
+            "collectorId": 42,
+            "questionId": "reading-01",
+            "questionRevision": 2,
+            "monotonicElapsedMilliseconds": 12500,
+            "durationMilliseconds": 3500,
+            "clientTimeUnixMilliseconds": 1700000001000,
+            "numericValue": 0,
+            "count": 1,
+            "reason": "navigation_button"
+        }]
+    })json";
+
+    std::vector<TelemetrySample> samples;
+    std::string error;
+    assert(parse_browser_telemetry_samples(valid_json, 42, allowed_questions, samples, &error));
+    assert(samples.size() == 1);
+    const auto s = samples.front();
+    assert(s.kind == TelemetrySampleKind::question_dwell);
+    assert(s.source == TelemetrySource::browser); // overridden
+    assert(s.collector_id == 42);                  // native bound
+    assert(s.question_id == "reading-01");
+    assert(s.question_revision == 2);
+    assert(s.monotonic_elapsed_milliseconds == 12500);
+    assert(s.duration_milliseconds == 3500);
+    assert(s.client_time_unix_milliseconds == 1700000001000ULL);
+    assert(s.count == 1);
+    assert(s.reason == TelemetryReason::navigation_button);
+
+    for (const auto& [field, value] : std::vector<std::pair<std::string, std::string>>{
+            {"collectorId", "\"41\""}, {"durationMilliseconds", "-1"},
+            {"durationMilliseconds", "true"}, {"durationMilliseconds", "\"3500\""},
+            {"questionRevision", "4294967298"}, {"durationMilliseconds", "4294970796"},
+            {"numericValue", "4294967296"}, {"count", "4294967297"},
+            {"monotonicElapsedMilliseconds", "null"}, {"questionId", "42"}, {"reason", "true"}}) {
+        auto malformed = valid_json;
+        const auto begin = malformed.find("\"" + field + "\":") + field.size() + 3;
+        assert(begin < malformed.size());
+        const auto end = malformed.find_first_of(",\n", begin);
+        malformed.replace(begin, end - begin, value);
+        error.clear();
+        assert(!parse_browser_telemetry_samples(malformed, 42, allowed_questions, samples, &error));
+        assert(!error.empty());
+    }
+
+    // 2. Stale collector ID rejection:
+    // Browser explicitly provides a non-zero collectorId that does not match native collector ID.
+    const std::string stale_collector_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "focus_changed",
+            "collectorId": 41,
+            "monotonicElapsedMilliseconds": 13000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000002000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "focus_blur"
+        }]
+    })json";
+    samples.clear();
+    error.clear();
+    assert(!parse_browser_telemetry_samples(stale_collector_json, 42, allowed_questions, samples, &error));
+    assert(!error.empty());
+
+    // 3. Hostile JSON and schema violations:
+    // (a) Oversized payload (> 32 KiB)
+    std::string oversized_json = "{\"type\":\"exam_telemetry_samples\",\"samples\":[";
+    for (int i = 0; i < 300; ++i) {
+        oversized_json += R"json({"kind":"question_dwell","questionId":"reading-01","questionRevision":1,"monotonicElapsedMilliseconds":100,"durationMilliseconds":100,"clientTimeUnixMilliseconds":1700000000000,"numericValue":0,"count":1,"reason":"navigation_button"},)json";
+    }
+    oversized_json.pop_back(); // trailing comma
+    oversized_json += "]}";
+    assert(oversized_json.size() > 32 * 1024);
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(oversized_json, 42, allowed_questions, samples, &error));
+
+    // (b) Depth limit exceeded
+    const std::string deep_json = "{\"type\":\"exam_telemetry_samples\",\"samples\":[[[{\"kind\":\"focus_changed\"}]]]}";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(deep_json, 42, allowed_questions, samples, &error));
+
+    // (c) Samples array count limit: 0 samples
+    const std::string empty_samples_json = R"json({"type":"exam_telemetry_samples","samples":[]})json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(empty_samples_json, 42, allowed_questions, samples, &error));
+
+    // (d) Samples array count limit: > 32 samples
+    std::string too_many_samples_json = "{\"type\":\"exam_telemetry_samples\",\"samples\":[";
+    for (int i = 0; i < 33; ++i) {
+        too_many_samples_json += R"json({"kind":"focus_changed","monotonicElapsedMilliseconds":100,"durationMilliseconds":0,"clientTimeUnixMilliseconds":1700000000000,"numericValue":0,"count":0,"reason":"focus_gain"},)json";
+    }
+    too_many_samples_json.pop_back();
+    too_many_samples_json += "]}";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(too_many_samples_json, 42, allowed_questions, samples, &error));
+
+    // (e) Disallowed forbidden fields in sample (privacy violation / data leakage)
+    const std::string forbidden_field_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "question_dwell",
+            "questionId": "reading-01",
+            "questionRevision": 1,
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 500,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 1,
+            "reason": "navigation_button",
+            "answerText": "Option B selected by candidate"
+        }]
+    })json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(forbidden_field_json, 42, allowed_questions, samples, &error));
+
+    // (f) Unknown sample kind
+    const std::string unknown_kind_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "arbitrary_custom_kind",
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "none"
+        }]
+    })json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(unknown_kind_json, 42, allowed_questions, samples, &error));
+
+    // (g) Unknown / invalid reason
+    const std::string unknown_reason_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "focus_changed",
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "unauthorized_reason"
+        }]
+    })json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(unknown_reason_json, 42, allowed_questions, samples, &error));
+
+    // (h) Nonempty question_id with revision == 0
+    const std::string zero_rev_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "question_first_view",
+            "questionId": "reading-01",
+            "questionRevision": 0,
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "navigation_initial"
+        }]
+    })json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(zero_rev_json, 42, allowed_questions, samples, &error));
+
+    // (i) Empty question_id with revision > 0
+    const std::string empty_qid_nonzero_rev_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "focus_changed",
+            "questionId": "",
+            "questionRevision": 1,
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "focus_blur"
+        }]
+    })json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(empty_qid_nonzero_rev_json, 42, allowed_questions, samples, &error));
+
+    // (j) Question ID not in allowed questions
+    const std::string disallowed_qid_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "question_first_view",
+            "questionId": "unauthorized-question-99",
+            "questionRevision": 1,
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "navigation_initial"
+        }]
+    })json";
+    samples.clear();
+    assert(!parse_browser_telemetry_samples(disallowed_qid_json, 42, allowed_questions, samples, &error));
+
+    // (k) Omitted collectorId: succeeds and binds native collector ID
+    const std::string omitted_collector_json = R"json({
+        "type": "exam_telemetry_samples",
+        "samples": [{
+            "kind": "focus_changed",
+            "monotonicElapsedMilliseconds": 1000,
+            "durationMilliseconds": 0,
+            "clientTimeUnixMilliseconds": 1700000000000,
+            "numericValue": 0,
+            "count": 0,
+            "reason": "focus_gain"
+        }]
+    })json";
+    samples.clear();
+    assert(parse_browser_telemetry_samples(omitted_collector_json, 42, allowed_questions, samples, &error));
+    assert(samples.size() == 1);
+    assert(samples.front().collector_id == 42);
+
+    // 4. Blocked shortcut atomic recording & coalescing drain:
+    // Simulated hook: no allocations or locks
+    record_blocked_shortcut_for_testing(3);
+    record_blocked_shortcut_for_testing(2);
+    // Drain coalesces into 1 sample with count 5
+    const auto drained = drain_blocked_shortcuts(42, 5000, 1700000005000ULL);
+    assert(drained.has_value());
+    assert(drained->kind == TelemetrySampleKind::blocked_shortcut_summary);
+    assert(drained->source == TelemetrySource::native);
+    assert(drained->collector_id == 42);
+    assert(drained->count == 5);
+    assert(drained->reason == TelemetryReason::shortcut_system);
+    assert(drained->monotonic_elapsed_milliseconds == 5000);
+    assert(drained->client_time_unix_milliseconds == 1700000005000ULL);
+    // Subsequent drain is empty
+    assert(!drain_blocked_shortcuts(42, 5000, 1700000005000ULL).has_value());
+
+    // 5. IPC payload serialization for AgentMessageType::exam_telemetry_samples:
+    std::vector<TelemetrySample> test_samples;
+    test_samples.push_back(*drained);
+    test_samples.push_back(s);
+    const auto ipc_payload = encode_exam_telemetry_samples_payload(test_samples);
+    assert(!ipc_payload.empty());
+    const auto decoded_samples = decode_exam_telemetry_samples_payload(ipc_payload);
+    assert(decoded_samples.has_value());
+    assert(decoded_samples->size() == 2);
+    assert((*decoded_samples)[0].kind == TelemetrySampleKind::blocked_shortcut_summary);
+    assert((*decoded_samples)[1].kind == TelemetrySampleKind::question_dwell);
+    assert_agent_round_trip(AgentMessageType::exam_telemetry_samples, ipc_payload);
+
+    // Corrupted payload rejection:
+    auto corrupt_ipc = ipc_payload;
+    corrupt_ipc.pop_back();
+    assert(!decode_exam_telemetry_samples_payload(corrupt_ipc).has_value());
+
+    // 6. Matching enable & idempotency in ExamHost:
+    ExamHost host;
+    assert(!host.telemetry_enabled());
+    assert(host.telemetry_collector_id() == 0);
+
+    // When stopped or not started with matching context, enable rejects:
+    TelemetryEnable enable;
+    enable.package_id = "sample-package";
+    enable.candidate_id = "candidate-01";
+    fill_bytes(enable.package_digest, 0x10);
+    fill_bytes(enable.client_id, 0x30);
+    fill_bytes(enable.session_id, 0x50);
+    enable.server_time_unix_milliseconds = 1700000000000ULL;
+
+    assert(!host.apply_telemetry_enable(enable));
+    assert(!host.telemetry_enabled());
+}
+
+void exercise_started_host_telemetry_state() {
+    using namespace nstu;
+    using namespace nstu::client;
+    const auto event = make_event();
+    exam::StateRequest context;
+    context.package_id = event.package_id;
+    context.package_digest = event.package_digest;
+    context.client_id = event.client_id;
+    context.session_id = event.session_id;
+    context.candidate_id = event.candidate_id;
+    exam::TelemetryEnable enable;
+    enable.package_id = context.package_id;
+    enable.package_digest = context.package_digest;
+    enable.client_id = context.client_id;
+    enable.session_id = context.session_id;
+    enable.candidate_id = context.candidate_id;
+    enable.server_time_unix_milliseconds = 1700000000000ULL;
+
+    // This is the production state owned by ExamHost. No browser/window or
+    // platform response is substituted; successful WebView2 start is separate.
+    ExamHostTelemetryState telemetry;
+    assert(!telemetry.apply_enable(enable));
+    telemetry.record_blocked_shortcuts(7);
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+    assert(telemetry.start(context));
+    assert(!telemetry.enabled());
+    assert(telemetry.collector_id() == 1);
+    telemetry.record_blocked_shortcuts(11);
+
+    for (unsigned field = 0; field < 5; ++field) {
+        auto wrong = enable;
+        switch (field) {
+        case 0: wrong.package_id = "wrong-package"; break;
+        case 1: wrong.package_digest[0] ^= std::byte{1}; break;
+        case 2: wrong.client_id[0] ^= std::byte{1}; break;
+        case 3: wrong.session_id[0] ^= std::byte{1}; break;
+        case 4: wrong.candidate_id = "wrong-candidate"; break;
+        }
+        assert(!telemetry.apply_enable(wrong));
+        assert(!telemetry.enabled());
+    }
+    assert(telemetry.apply_enable(enable));
+    assert(telemetry.enabled());
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+    telemetry.record_blocked_shortcuts(3);
+    auto duplicate = enable;
+    duplicate.server_time_unix_milliseconds += 1000;
+    assert(telemetry.apply_enable(duplicate));
+    assert(telemetry.enabled());
+    assert(telemetry.collector_id() == 1);
+    assert(telemetry.active_enable()->server_time_unix_milliseconds ==
+           enable.server_time_unix_milliseconds);
+    telemetry.record_blocked_shortcuts(2);
+    const auto sample = telemetry.drain_blocked_shortcuts(100, 1000);
+    assert(sample.has_value());
+    assert(sample->count == 5);
+    assert(sample->collector_id == 1);
+    assert(sample->monotonic_elapsed_milliseconds == 100);
+    assert(sample->client_time_unix_milliseconds == 1000);
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+
+    telemetry.record_blocked_shortcuts(9);
+    telemetry.advance_collector();
+    assert(telemetry.collector_id() == 2);
+    assert(telemetry.enabled());
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+    telemetry.record_blocked_shortcuts(13);
+    telemetry.stop();
+    assert(!telemetry.enabled());
+    assert(telemetry.collector_id() == 0);
+    assert(!telemetry.active_enable().has_value());
+    assert(!telemetry.apply_enable(enable));
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+    telemetry.record_blocked_shortcuts(17);
+
+    auto second_context = context;
+    second_context.session_id[0] ^= std::byte{2};
+    auto second_enable = enable;
+    second_enable.session_id = second_context.session_id;
+    assert(telemetry.start(second_context));
+    assert(!telemetry.enabled());
+    assert(!telemetry.apply_enable(enable));
+    assert(telemetry.apply_enable(second_enable));
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+    telemetry.record_blocked_shortcuts(19);
+    assert(telemetry.start(second_context));
+    assert(!telemetry.enabled());
+    assert(telemetry.collector_id() == 1);
+    assert(telemetry.apply_enable(second_enable));
+    assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
+    assert(!telemetry.start(exam::StateRequest{}));
+    assert(!telemetry.enabled());
+    assert(telemetry.collector_id() == 0);
+    assert(!telemetry.apply_enable(second_enable));
+}
+
 } // namespace
 
 int main() {
     using namespace nstu;
+
+    // An idle/default context must not authorize collection, even if all
+    // fields of the supplied enable equal the host's empty initial fields.
+    {
+        client::ExamHost idle_host;
+        assert(!idle_host.apply_telemetry_enable(exam::TelemetryEnable{}));
+        assert(!idle_host.telemetry_enabled());
+        assert(idle_host.telemetry_collector_id() == 0);
+    }
 
     exercise_exam_path_policy();
     exercise_exam_profile_isolation();
@@ -515,6 +909,9 @@ int main() {
     const auto framed_event = client::decode_agent_message(malformed_frame);
     assert(framed_event.has_value());
     assert(!exam::decode_answer_event(framed_event->payload).has_value());
+
+    exercise_exam_host_telemetry();
+    exercise_started_host_telemetry_state();
 
     return 0;
 }

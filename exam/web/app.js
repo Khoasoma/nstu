@@ -1615,6 +1615,7 @@
       : manifest.durationSeconds;
     state.submitted = false;
     state.index = 0;
+    resetTelemetryState();
     clearInFlight();
     state.retryAttempt = 0;
     state.stateRequestAt = 0;
@@ -2117,6 +2118,15 @@
         }
       });
       state.answers = nextAnswers;
+      // Recovery supplies a baseline, never a candidate edit. Local pending
+      // questions keep their already observed transitions.
+      if (telemetry.enabled) {
+        manifest.questions.forEach(q => {
+          if (locallyPending.has(q.id)) return;
+          telemetry.lastAnswerValue[q.id] = answerText(state.answers[q.id]);
+          if (!answerIsEmpty(state.answers[q.id])) telemetry.hasAnswered.add(q.id);
+        });
+      }
       let serializedAnswers;
       try { serializedAnswers = JSON.stringify(state.answers); }
       catch (_) { serializedAnswers = null; }
@@ -2234,6 +2244,7 @@
       updateSubmissionLock();
       updateTimer();
       if (state.remainingSeconds === 0) submitResponse();
+      else startDwell();
     } else if (message.type === "exam_answer_ack") {
       handleAnswerAck(message);
     } else if (message.type === "exam_state_response") {
@@ -2241,7 +2252,255 @@
     } else if (message.type === "exam_host_ready") {
       beginStateReconcile();
       flushAnswerBridge();
+    } else if (message.type === "exam_telemetry_enable") {
+      handleTelemetryEnable(message);
     }
+  }
+
+  const telemetry = {
+    enabled: false,
+    collectorId: 0,
+    currentQuestionIndex: -1,
+    currentQuestionId: "",
+    currentQuestionRevision: 0,
+    hasEverViewed: new Set(),
+    hasAnswered: new Set(),
+    lastAnswerValue: Object.create(null),
+    answerChangeCount: Object.create(null),
+    dwellStartMonotonic: 0,
+    isDwelling: false,
+    pendingSamples: [],
+    periodicTimer: null,
+    lastMonotonicTime: 0,
+    lastWallClockTime: 0,
+    isComposing: false
+  };
+
+  function currentMonotonicMs() {
+    const perf = (typeof window !== "undefined" && window.performance) ||
+                 (typeof performance !== "undefined" ? performance : null);
+    if (perf && typeof perf.now === "function") {
+      return Math.round(perf.now());
+    }
+    return Date.now();
+  }
+
+  function currentWallClockMs() {
+    return Date.now();
+  }
+
+  function emitTelemetrySample(sample) {
+    if (!telemetry.enabled) return;
+    const nowMono = currentMonotonicMs();
+    const nowWall = currentWallClockMs();
+    const qid = typeof sample.questionId === "string" ? sample.questionId : "";
+    const item = qid ? questionById(qid) : null;
+    const qrev = item ? questionRevision(item) : (Number(sample.questionRevision) || 0);
+
+    const clean = {
+      kind: String(sample.kind || ""),
+      source: "browser",
+      collectorId: telemetry.collectorId,
+      questionId: qid,
+      questionRevision: qid ? qrev : 0,
+      monotonicElapsedMilliseconds: Number.isSafeInteger(sample.monotonicElapsedMilliseconds)
+        ? sample.monotonicElapsedMilliseconds : nowMono,
+      durationMilliseconds: Math.max(0, Math.min(0xffffffff, Number(sample.durationMilliseconds) || 0)),
+      clientTimeUnixMilliseconds: Number.isSafeInteger(sample.clientTimeUnixMilliseconds)
+        ? sample.clientTimeUnixMilliseconds : nowWall,
+      numericValue: Math.max(0, Math.min(0xffffffff, Number(sample.numericValue) || 0)),
+      count: Math.max(0, Math.min(0xffffffff, Number(sample.count) || 0)),
+      reason: String(sample.reason || "none")
+    };
+    telemetry.pendingSamples.push(clean);
+  }
+
+  function flushTelemetry() {
+    if (!telemetry.enabled || telemetry.pendingSamples.length === 0) return;
+    while (telemetry.pendingSamples.length > 0) {
+      const batch = telemetry.pendingSamples.slice(0, 32);
+      telemetry.pendingSamples = telemetry.pendingSamples.slice(batch.length);
+      postHostMessage({
+        type: "exam_telemetry_samples",
+        samples: batch
+      });
+    }
+  }
+
+  function canDwell() {
+    return telemetry.enabled && state.started && !state.submitted &&
+      !document.hidden && (typeof document.hasFocus !== "function" || document.hasFocus());
+  }
+
+  function startDwell() {
+    if (!canDwell() || !telemetry.currentQuestionId || telemetry.isDwelling) return;
+    telemetry.dwellStartMonotonic = currentMonotonicMs();
+    telemetry.isDwelling = true;
+  }
+
+  function closeDwell(record = true) {
+    if (!telemetry.isDwelling) return;
+    const now = currentMonotonicMs();
+    const elapsed = Math.max(0, now - telemetry.dwellStartMonotonic);
+    telemetry.isDwelling = false;
+    if (record && elapsed > 0 && telemetry.currentQuestionId) {
+      emitTelemetrySample({
+        kind: "question_dwell",
+        questionId: telemetry.currentQuestionId,
+        questionRevision: telemetry.currentQuestionRevision,
+        durationMilliseconds: elapsed,
+        reason: "none"
+      });
+    }
+  }
+
+  function checkClockDiscontinuity() {
+    if (!telemetry.enabled) return;
+    const mono = currentMonotonicMs();
+    const wall = currentWallClockMs();
+    if (telemetry.lastMonotonicTime > 0) {
+      const monoDiff = mono - telemetry.lastMonotonicTime;
+      const wallDiff = wall - telemetry.lastWallClockTime;
+      if (monoDiff < 0) {
+        closeDwell(false);
+        emitTelemetrySample({
+          kind: "clock_discontinuity",
+          reason: "discontinuity_monotonic",
+          numericValue: 0
+        });
+      } else if (Math.abs(wallDiff - monoDiff) > 15000) {
+        closeDwell(false);
+        emitTelemetrySample({
+          kind: "clock_discontinuity",
+          reason: "discontinuity_wall_clock",
+          numericValue: Math.abs(wallDiff - monoDiff)
+        });
+      }
+    }
+    telemetry.lastMonotonicTime = mono;
+    telemetry.lastWallClockTime = wall;
+  }
+
+  function activateQuestion(index, reason = "navigation_button") {
+    if (!Number.isSafeInteger(index) || index < 0 || index >= manifest.questions.length) return;
+    if (index === state.index && telemetry.currentQuestionIndex === index) {
+      return;
+    }
+    checkClockDiscontinuity();
+    closeDwell(true);
+
+    state.index = index;
+    telemetry.currentQuestionIndex = index;
+    const item = manifest.questions[index];
+    if (item && item.id) {
+      telemetry.currentQuestionId = item.id;
+      telemetry.currentQuestionRevision = questionRevision(item);
+
+      if (telemetry.enabled) {
+        if (!telemetry.hasEverViewed.has(item.id)) {
+          telemetry.hasEverViewed.add(item.id);
+          emitTelemetrySample({
+            kind: "question_first_view",
+            questionId: item.id,
+            questionRevision: telemetry.currentQuestionRevision,
+            reason: reason
+          });
+        }
+        startDwell();
+      }
+    }
+    renderQuestionList();
+    renderQuestion();
+    flushTelemetry();
+  }
+
+  function handleTelemetryEnable(message) {
+    const enable = message.enable && typeof message.enable === "object"
+      ? message.enable : message;
+    if (enable.packageId && enable.packageId !== manifest.id) return;
+    if (enable.packageDigestHex && examContext.packageDigestHex &&
+        normalizeNonZeroHex(enable.packageDigestHex, 32) !== examContext.packageDigestHex) return;
+    if (enable.clientIdHex && examContext.clientIdHex &&
+        normalizeNonZeroHex(enable.clientIdHex, 16) !== examContext.clientIdHex) return;
+    if (enable.sessionIdHex && examContext.sessionIdHex &&
+        normalizeNonZeroHex(enable.sessionIdHex, 16) !== examContext.sessionIdHex) return;
+    if (enable.candidateId && examContext.candidateId &&
+        enable.candidateId !== examContext.candidateId) return;
+
+    const shouldEnable = enable.enabled === true || enable.enabled === 1 || enable.enabled === "1";
+    if (!shouldEnable) {
+      if (telemetry.enabled) {
+        closeDwell(true);
+        flushTelemetry();
+        telemetry.enabled = false;
+      }
+      return;
+    }
+    if (telemetry.enabled) {
+      return;
+    }
+    telemetry.enabled = true;
+    telemetry.collectorId = Number(enable.collectorId) || 0;
+    telemetry.lastMonotonicTime = currentMonotonicMs();
+    telemetry.lastWallClockTime = currentWallClockMs();
+
+    const hasPreExistingEdits = Object.keys(state.answers).some((k) => !answerIsEmpty(state.answers[k]));
+    const isLate = state.started && (state.index > 0 || hasPreExistingEdits);
+    const startReason = isLate ? "collector_late_enable" : "collector_initial";
+
+    emitTelemetrySample({
+      kind: "collector_started",
+      reason: startReason,
+      numericValue: 0
+    });
+
+    manifest.questions.forEach((q) => {
+      if (!answerIsEmpty(state.answers[q.id])) {
+        telemetry.hasAnswered.add(q.id);
+        try { telemetry.lastAnswerValue[q.id] = answerText(state.answers[q.id]); } catch (_) {}
+      }
+    });
+
+    const currentItem = question();
+    if (currentItem && currentItem.id) {
+      telemetry.currentQuestionId = currentItem.id;
+      telemetry.currentQuestionRevision = questionRevision(currentItem);
+      telemetry.currentQuestionIndex = state.index;
+      telemetry.hasEverViewed.add(currentItem.id);
+      startDwell();
+    }
+
+    if (!telemetry.periodicTimer) {
+      telemetry.periodicTimer = window.setInterval(() => {
+        checkClockDiscontinuity();
+        startDwell();
+        flushTelemetry();
+      }, 30000);
+    }
+    flushTelemetry();
+  }
+
+  function resetTelemetryState() {
+    closeDwell(false);
+    telemetry.enabled = false;
+    telemetry.collectorId = 0;
+    telemetry.currentQuestionIndex = -1;
+    telemetry.currentQuestionId = "";
+    telemetry.currentQuestionRevision = 0;
+    telemetry.hasEverViewed = new Set();
+    telemetry.hasAnswered = new Set();
+    telemetry.lastAnswerValue = Object.create(null);
+    telemetry.answerChangeCount = Object.create(null);
+    telemetry.dwellStartMonotonic = 0;
+    telemetry.isDwelling = false;
+    telemetry.pendingSamples = [];
+    if (telemetry.periodicTimer) {
+      window.clearInterval(telemetry.periodicTimer);
+      telemetry.periodicTimer = null;
+    }
+    telemetry.lastMonotonicTime = 0;
+    telemetry.lastWallClockTime = 0;
+    telemetry.isComposing = false;
   }
 
   function applyLanguage() {
@@ -2271,7 +2530,7 @@
       button.className = `question-button${index === state.index ? " active" : ""}${hasAnswer(item) ? " answered" : ""}`;
       button.textContent = String(index + 1);
       button.setAttribute("aria-label", `${text("question")} ${index + 1}`);
-      button.addEventListener("click", () => { state.index = index; renderQuestionList(); renderQuestion(); });
+      button.addEventListener("click", () => { activateQuestion(index, "navigation_button"); });
       list.appendChild(button);
     });
     el("question-count").textContent = `${state.index + 1} / ${manifest.questions.length}`;
@@ -2371,6 +2630,11 @@
     input.type = "text";
     input.placeholder = item.answerPlaceholder || "";
     input.value = state.answers[item.id] || "";
+    input.addEventListener("compositionstart", () => { telemetry.isComposing = true; });
+    input.addEventListener("compositionend", () => {
+      telemetry.isComposing = false;
+      saveAnswer(item.id, input.value);
+    });
     input.addEventListener("input", () => saveAnswer(item.id, input.value));
     parent.appendChild(input);
   }
@@ -2386,6 +2650,12 @@
       const words = area.value.trim() ? area.value.trim().split(/\s+/).length : 0;
       count.textContent = `${words}${item.wordLimit ? ` / ${item.wordLimit}` : ""} words`;
     };
+    area.addEventListener("compositionstart", () => { telemetry.isComposing = true; });
+    area.addEventListener("compositionend", () => {
+      telemetry.isComposing = false;
+      saveAnswer(item.id, area.value);
+      updateCount();
+    });
     area.addEventListener("input", () => { saveAnswer(item.id, area.value); updateCount(); });
     updateCount();
     parent.append(area, count);
@@ -2430,6 +2700,33 @@
       return false;
     }
     markSaved();
+    if (telemetry.enabled && !telemetry.isComposing) {
+      let normVal = "";
+      try { normVal = answerText(value); } catch (_) {}
+      const prevVal = telemetry.lastAnswerValue[id];
+      if (prevVal === undefined || normVal !== prevVal) {
+        telemetry.lastAnswerValue[id] = normVal;
+        const qItem = questionById(id);
+        const qRev = qItem ? questionRevision(qItem) : 1;
+        if (!telemetry.hasAnswered.has(id) && !answerIsEmpty(value)) {
+          telemetry.hasAnswered.add(id);
+          emitTelemetrySample({
+            kind: "question_first_answer",
+            questionId: id,
+            questionRevision: qRev,
+            reason: "none"
+          });
+        }
+        telemetry.answerChangeCount[id] = (telemetry.answerChangeCount[id] || 0) + 1;
+        emitTelemetrySample({
+          kind: "answer_change_summary",
+          questionId: id,
+          questionRevision: qRev,
+          count: telemetry.answerChangeCount[id],
+          reason: "none"
+        });
+      }
+    }
     renderQuestionList();
     return true;
   }
@@ -2551,6 +2848,15 @@
     window.NSTU_EXAM_RESPONSE = response;
     el("save-status").textContent = text("submitted");
     document.querySelectorAll("button, input, textarea, select").forEach((node) => { node.disabled = true; });
+    if (telemetry.enabled) {
+      closeDwell(true);
+      emitTelemetrySample({
+        kind: "exam_submitted",
+        reason: state.remainingSeconds === 0 ? "submit_timeout" : "submit_manual",
+        numericValue: 0
+      });
+      flushTelemetry();
+    }
     postHostMessage({
       type: "exam_submit", response,
       pendingAnswerEvents: state.durable.pending.length + Object.keys(state.durable.drafts).length
@@ -2585,8 +2891,8 @@
       if (action === "settings") el("settings-dialog").showModal();
       if (action === "submit") openSubmitDialog();
       if (action === "download") downloadResponse();
-      if (action === "previous" && state.index > 0) { state.index--; renderQuestionList(); renderQuestion(); }
-      if (action === "next" && state.index < manifest.questions.length - 1) { state.index++; renderQuestionList(); renderQuestion(); }
+      if (action === "previous" && state.index > 0) { activateQuestion(state.index - 1, "navigation_button"); }
+      if (action === "next" && state.index < manifest.questions.length - 1) { activateQuestion(state.index + 1, "navigation_button"); }
     }));
     el("language-setting").value = state.language;
     el("language-setting").addEventListener("change", (event) => {
@@ -2619,9 +2925,38 @@
       el("notes-pane").hidden = reference !== "notes";
     }));
     document.addEventListener("keydown", (event) => {
-      if (event.target.matches("input, textarea, select")) return;
-      if (event.key === "ArrowLeft" && state.index > 0) { state.index--; renderQuestionList(); renderQuestion(); }
-      if (event.key === "ArrowRight" && state.index < manifest.questions.length - 1) { state.index++; renderQuestionList(); renderQuestion(); }
+      if (event.target && typeof event.target.matches === "function" && event.target.matches("input, textarea, select")) return;
+      if (event.key === "ArrowLeft" && state.index > 0) { activateQuestion(state.index - 1, "navigation_arrow"); }
+      if (event.key === "ArrowRight" && state.index < manifest.questions.length - 1) { activateQuestion(state.index + 1, "navigation_arrow"); }
+    });
+    window.addEventListener("focus", () => {
+      checkClockDiscontinuity();
+      if (telemetry.enabled) {
+        emitTelemetrySample({ kind: "focus_changed", reason: "focus_gain", numericValue: 1 });
+        startDwell();
+        flushTelemetry();
+      }
+    });
+    window.addEventListener("blur", () => {
+      checkClockDiscontinuity();
+      if (telemetry.enabled) {
+        closeDwell(true);
+        emitTelemetrySample({ kind: "focus_changed", reason: "focus_blur", numericValue: 0 });
+        flushTelemetry();
+      }
+    });
+    document.addEventListener("visibilitychange", () => {
+      checkClockDiscontinuity();
+      if (telemetry.enabled) {
+        if (document.hidden) {
+          closeDwell(true);
+          emitTelemetrySample({ kind: "visibility_changed", reason: "visibility_hidden", numericValue: 0 });
+        } else {
+          emitTelemetrySample({ kind: "visibility_changed", reason: "visibility_visible", numericValue: 1 });
+          startDwell();
+        }
+        flushTelemetry();
+      }
     });
     const webview = hostWebView();
     if (webview && typeof webview.addEventListener === "function") {
@@ -2651,6 +2986,7 @@
   el("exam-shell").hidden = synchronizedStart;
   bindEvents();
   applyLanguage();
+  activateQuestion(0, "navigation_initial");
   updateSubmissionLock();
   updateTimer();
   window.setInterval(tick, 1000);

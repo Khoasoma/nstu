@@ -281,6 +281,17 @@ bool run_client_control_session(
                 if (!outbound) {
                     break;
                 }
+                if (outbound->type == protocol::CommandType::exam_telemetry_batch) {
+                    const auto deadline = now + std::chrono::milliseconds(500);
+                    if (!channel.send(outbound->type, request_id++,
+                                      outbound->payload, deadline, error)) {
+                        return false;
+                    }
+                    // Low-priority telemetry scheduling: <=1 per loop,
+                    // 500 ms absolute deadline, no back-to-back telemetry sends.
+                    // Proceed directly to receive/wait.
+                    break;
+                }
                 if (!channel.send(outbound->type, request_id++,
                                   outbound->payload, error)) {
                     return false;
