@@ -140,12 +140,22 @@ drain_blocked_shortcuts(std::uint64_t collector_id,
 
 // UI-thread telemetry state used by the native host independently of browser
 // creation. Only a validated bound tuple can enable its atomic shortcut gate.
+inline constexpr std::uint64_t kMaximumExamCollectorId = (1ULL << 53) - 1;
+// Random process origin, then monotonically allocated IDs for every host and
+// document generation. Zero means allocation unavailable; never wrap or reuse.
+[[nodiscard]] std::uint64_t allocate_exam_telemetry_collector_id() noexcept;
+
 class ExamHostTelemetryState {
 public:
-    [[nodiscard]] bool start(exam::StateRequest context) noexcept;
+    // Explicit IDs allow deterministic state tests. Production uses the native
+    // allocator. A valid context still starts if its ID is unavailable, with
+    // collection disabled, so telemetry cannot block an otherwise valid exam.
+    [[nodiscard]] bool start(exam::StateRequest context,
+        std::uint64_t collector_id = allocate_exam_telemetry_collector_id()) noexcept;
     void stop() noexcept;
     [[nodiscard]] bool apply_enable(const exam::TelemetryEnable& enable) noexcept;
-    void advance_collector() noexcept;
+    void advance_collector(
+        std::uint64_t collector_id = allocate_exam_telemetry_collector_id()) noexcept;
     void record_blocked_shortcuts(std::uint32_t count = 1) noexcept;
     [[nodiscard]] std::optional<exam::TelemetrySample> drain_blocked_shortcuts(
         std::uint64_t monotonic_elapsed_ms, std::uint64_t client_time_unix_ms) noexcept;

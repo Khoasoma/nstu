@@ -1,4 +1,5 @@
 #include "nstu/exam_host.hpp"
+#include "nstu/auth.hpp"
 
 #include "nstu/exam_bridge.hpp"
 #include "nstu/exam_control.hpp"
@@ -3285,7 +3286,26 @@ std::optional<exam::TelemetrySample> drain_blocked_shortcuts(
                                monotonic_elapsed_ms, client_time_unix_ms);
 }
 
-bool ExamHostTelemetryState::start(exam::StateRequest context) noexcept {
+std::uint64_t allocate_exam_telemetry_collector_id() noexcept {
+    static std::atomic<std::uint64_t> next_id([]() noexcept {
+        for (unsigned attempt = 0; attempt < 8; ++attempt) {
+            std::array<std::byte, sizeof(std::uint64_t)> random{};
+            if (!security::generate_random(random)) return std::uint64_t{0};
+            std::uint64_t seed = 0;
+            std::memcpy(&seed, random.data(), sizeof(seed));
+            seed &= kMaximumExamCollectorId;
+            if (seed != 0 && seed < kMaximumExamCollectorId) return seed;
+        }
+        return std::uint64_t{0};
+    }());
+    auto id = next_id.load(std::memory_order_relaxed);
+    while (id != 0 && id <= kMaximumExamCollectorId) {
+        if (next_id.compare_exchange_weak(id, id + 1, std::memory_order_relaxed)) return id;
+    }
+    return 0;
+}
+
+bool ExamHostTelemetryState::start(exam::StateRequest context, std::uint64_t collector_id) noexcept {
     stop();
     try {
         // The existing typed codec validates the complete native tuple.
@@ -3294,7 +3314,7 @@ bool ExamHostTelemetryState::start(exam::StateRequest context) noexcept {
         return false;
     }
     context_ = std::move(context);
-    collector_id_ = 1;
+    collector_id_ = collector_id <= kMaximumExamCollectorId ? collector_id : 0;
     return true;
 }
 
@@ -3322,13 +3342,13 @@ bool ExamHostTelemetryState::apply_enable(const exam::TelemetryEnable& enable) n
     return true;
 }
 
-void ExamHostTelemetryState::advance_collector() noexcept {
+void ExamHostTelemetryState::advance_collector(std::uint64_t collector_id) noexcept {
     if (collector_id_ == 0) return;
-    if (collector_id_ == std::numeric_limits<std::uint64_t>::max()) {
+    if (collector_id == 0 || collector_id > kMaximumExamCollectorId || collector_id == collector_id_) {
         stop();
         return;
     }
-    ++collector_id_;
+    collector_id_ = collector_id;
     shortcuts_.reset(enabled());
 }
 

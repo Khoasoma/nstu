@@ -687,7 +687,7 @@ void exercise_started_host_telemetry_state() {
     assert(!telemetry.apply_enable(enable));
     telemetry.record_blocked_shortcuts(7);
     assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
-    assert(telemetry.start(context));
+    assert(telemetry.start(context, 1));
     assert(!telemetry.enabled());
     assert(telemetry.collector_id() == 1);
     telemetry.record_blocked_shortcuts(11);
@@ -725,7 +725,7 @@ void exercise_started_host_telemetry_state() {
     assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
 
     telemetry.record_blocked_shortcuts(9);
-    telemetry.advance_collector();
+    telemetry.advance_collector(2);
     assert(telemetry.collector_id() == 2);
     assert(telemetry.enabled());
     assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
@@ -742,13 +742,13 @@ void exercise_started_host_telemetry_state() {
     second_context.session_id[0] ^= std::byte{2};
     auto second_enable = enable;
     second_enable.session_id = second_context.session_id;
-    assert(telemetry.start(second_context));
+    assert(telemetry.start(second_context, 1));
     assert(!telemetry.enabled());
     assert(!telemetry.apply_enable(enable));
     assert(telemetry.apply_enable(second_enable));
     assert(!telemetry.drain_blocked_shortcuts(100, 1000).has_value());
     telemetry.record_blocked_shortcuts(19);
-    assert(telemetry.start(second_context));
+    assert(telemetry.start(second_context, 1));
     assert(!telemetry.enabled());
     assert(telemetry.collector_id() == 1);
     assert(telemetry.apply_enable(second_enable));
@@ -761,7 +761,61 @@ void exercise_started_host_telemetry_state() {
 
 } // namespace
 
+void test_collector_identity_is_distinct_across_restart_and_hosts() {
+    const auto event = make_event();
+    nstu::exam::StateRequest context;
+    context.package_id = event.package_id;
+    context.package_digest = event.package_digest;
+    context.client_id = event.client_id;
+    context.session_id = event.session_id;
+    context.candidate_id = event.candidate_id;
+    nstu::client::ExamHostTelemetryState first;
+    assert(first.start(context));
+    const auto started_id = first.collector_id();
+    assert(started_id > 0 && started_id <= ((1ULL << 53) - 1));
+    first.advance_collector();
+    const auto document_id = first.collector_id();
+    assert(document_id != started_id);
+    first.stop();
+    assert(first.start(context));
+    const auto restarted_id = first.collector_id();
+    assert(restarted_id != started_id && restarted_id != document_id);
+    nstu::client::ExamHostTelemetryState second;
+    assert(second.start(context));
+    assert(second.collector_id() != restarted_id);
+    assert(second.collector_id() > 0 && second.collector_id() <= ((1ULL << 53) - 1));
+
+    nstu::exam::TelemetryEnable enable;
+    enable.package_id = context.package_id;
+    enable.package_digest = context.package_digest;
+    enable.client_id = context.client_id;
+    enable.session_id = context.session_id;
+    enable.candidate_id = context.candidate_id;
+    for (const auto unavailable : {std::uint64_t{0}, (std::uint64_t{1} << 53)}) {
+        assert(second.start(context, unavailable));
+        assert(second.collector_id() == 0);
+        assert(!second.apply_enable(enable));
+        assert(!second.enabled());
+        second.record_blocked_shortcuts(9);
+        assert(!second.drain_blocked_shortcuts(100, 1000));
+    }
+    assert(second.start(context, nstu::client::kMaximumExamCollectorId));
+    assert(second.apply_enable(enable));
+    second.advance_collector(0);
+    assert(!second.enabled() && second.collector_id() == 0);
+
+    const auto stale_json = std::string("{\"type\":\"exam_telemetry_samples\",\"samples\":[{") +
+        "\"kind\":\"question_dwell\",\"collectorId\":" + std::to_string(document_id) +
+        ",\"questionId\":\"reading-01\",\"questionRevision\":1,\"durationMilliseconds\":100," +
+        "\"clientTimeUnixMilliseconds\":1700000000000}]}";
+    std::vector<nstu::exam::TelemetrySample> samples;
+    std::string error;
+    assert(!nstu::client::parse_browser_telemetry_samples(stale_json, restarted_id, {"reading-01"}, samples, &error));
+    assert(!error.empty());
+}
+
 int main() {
+    test_collector_identity_is_distinct_across_restart_and_hosts();
     using namespace nstu;
 
     // An idle/default context must not authorize collection, even if all
