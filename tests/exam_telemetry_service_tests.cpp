@@ -2,6 +2,7 @@
 #include "nstu/secret_store.hpp"
 #include <windows.h>
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -1177,7 +1178,141 @@ void test_blocked_restart_scrubs_both_durable_payload_stores() {
     assert(!restarted.on_server_enable(enable));
 }
 
+void test_blocked_restart_retries_owned_payload_cleanup() {
+    bool all_outbox_temps_scrubbed = true;
+    bool outbox_temp_lock_reported = true;
+    // Separate real blocked fixtures exercise each deletion lock independently.
+    for (std::size_t locked_store = 0; locked_store < 4; ++locked_store) {
+        const auto path = temp_outbox_path("storage_recovery_1a_" + std::to_string(locked_store));
+        const auto state = std::filesystem::path(path.wstring() + L".coord_state");
+        const auto marker = std::filesystem::path(state.wstring() + L".blocked");
+        const auto state_temp = std::filesystem::path(state.wstring() + L".tmp-101");
+        const auto blocked_temp = std::filesystem::path(state.wstring() + L".blocked.tmp-102");
+        const auto outbox_temp = std::filesystem::path(path.wstring() + L".tmp-103");
+        const std::vector sentinels{
+            std::filesystem::path(state.wstring() + L".tmp-not-owned"),
+            std::filesystem::path(path.wstring() + L".tmp-not-owned"),
+            std::filesystem::path(path.wstring() + L".unrelated.tmp-104")};
+        const auto directory = std::filesystem::path(path.wstring() + L".tmp-105");
+        const auto child = directory / "keep.txt";
+        const std::vector owned_temps{state_temp, blocked_temp, outbox_temp};
+        // Remove only this fixture's known sidecars, including after a failed run.
+        std::error_code ec;
+        for (const auto& sidecar : owned_temps) { std::filesystem::remove(sidecar, ec); assert(!ec); }
+        for (const auto& sentinel : sentinels) { std::filesystem::remove(sentinel, ec); assert(!ec); }
+        std::filesystem::remove(child, ec); assert(!ec);
+        std::filesystem::remove(directory, ec); assert(!ec);
+
+        const auto now = test_now_ms();
+        const auto enable = make_enable();
+        auto coordinator = std::make_unique<Coordinator>([now] { return now; });
+        assert(coordinator->open(path));
+        assert(coordinator->on_server_enable(enable));
+        assert(coordinator->ingest_samples(std::vector{make_sample(95)}, now));
+        assert(coordinator->outbox_size() == 1);
+        const auto durable_payload = nstu::security::load_machine_secret(path.wstring(),
+            entropy_bytes("NSTU-Exam-Telemetry-Outbox-v1"));
+        assert(durable_payload.size() > 32);
+        nstu::exam::TelemetryBatch pending{enable.package_id, enable.package_digest,
+            enable.client_id, enable.session_id, enable.candidate_id, coordinator->active_producer_id(),
+            2, now, {make_sample(96)}};
+        {
+            LockedFile locked(path);
+            assert(!coordinator->ingest_samples(pending.samples, now));
+        }
+        assert(coordinator->next_sequence() == 2);
+        const auto pending_payload = coordinator_fixture_payload(path);
+        const auto pending_bytes = nstu::exam::encode_telemetry_batch(pending);
+        assert(!pending_bytes.empty() && pending_payload.size() >= pending_bytes.size());
+        assert(std::equal(pending_bytes.rbegin(), pending_bytes.rend(), pending_payload.rbegin()));
+        const auto protected_state = nstu::security::load_machine_secret(state.wstring(),
+            entropy_bytes("NSTU-Exam-Telemetry-Service-Coordinator-v1"));
+        assert(protected_state.size() == pending_payload.size() + 32);
+        assert(std::filesystem::copy_file(state, state_temp));
+        assert(std::filesystem::copy_file(state, blocked_temp));
+        assert(std::filesystem::copy_file(path, outbox_temp));
+        for (const auto& copy : std::vector{state_temp, blocked_temp}) {
+            assert(nstu::security::load_machine_secret(copy.wstring(),
+                entropy_bytes("NSTU-Exam-Telemetry-Service-Coordinator-v1")) == protected_state);
+        }
+        assert(nstu::security::load_machine_secret(outbox_temp.wstring(),
+            entropy_bytes("NSTU-Exam-Telemetry-Outbox-v1")) == durable_payload);
+        assert(std::filesystem::copy_file(state, sentinels[0]));
+        assert(std::filesystem::copy_file(path, sentinels[1]));
+        assert(std::filesystem::copy_file(path, sentinels[2]));
+        assert(std::filesystem::create_directory(directory));
+        { std::ofstream stream(child); stream << "preserve nested sentinel"; assert(stream.good()); }
+        {
+            LockedFile payload_lock(path);
+            LockedFile state_lock(state);
+            coordinator->on_explicit_stop();
+            assert(coordinator->lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked);
+            assert(!coordinator->last_error().empty());
+            assert(std::filesystem::exists(marker));
+            assert(coordinator_fixture_payload(path) == pending_payload);
+            assert(nstu::security::load_machine_secret(path.wstring(),
+                entropy_bytes("NSTU-Exam-Telemetry-Outbox-v1")) == durable_payload);
+            coordinator.reset();
+        }
+
+        Coordinator restarted([now] { return now; });
+        const auto assert_refused = [&] {
+            assert(!restarted.is_open());
+            assert(!restarted.on_server_enable(enable));
+            assert(!restarted.on_server_enable(make_enable("storage-recovery-new", "cand-new")));
+            assert(!restarted.ingest_samples(std::vector{make_sample(97)}, now));
+            assert(!restarted.next_batch_to_send(now));
+            assert(!restarted.is_open());
+            assert(std::filesystem::exists(marker));
+        };
+        const std::vector lock_targets{state_temp, outbox_temp, path, state};
+        std::string error;
+        {
+            LockedFile locked(lock_targets[locked_store]);
+            assert(!restarted.open(path, &error));
+            assert(!error.empty());
+            assert_refused();
+            error.clear();
+            assert(!restarted.maintain(now, &error));
+            assert(!error.empty());
+            assert(std::filesystem::exists(lock_targets[locked_store]));
+            if (locked_store == 1) {
+                outbox_temp_lock_reported = error.find("outbox temporary cleanup failed") != std::string::npos &&
+                    std::filesystem::exists(path) && std::filesystem::exists(state);
+                std::cout << "Outbox temporary deletion lock: " << error << std::endl;
+            }
+            assert_refused();
+        }
+        error.clear();
+        assert(!restarted.maintain(now, &error));
+        assert(!error.empty());
+        assert_refused();
+        assert(!std::filesystem::exists(path));
+        assert(!std::filesystem::exists(state));
+        assert(!std::filesystem::exists(state_temp));
+        assert(!std::filesystem::exists(blocked_temp));
+        const bool outbox_temp_scrubbed = !std::filesystem::exists(outbox_temp);
+        all_outbox_temps_scrubbed = all_outbox_temps_scrubbed && outbox_temp_scrubbed;
+        std::cout << "Blocked cleanup lock row " << locked_store
+                  << ": refusal, locked target and final/coordinator cleanup passed; outbox temp retry "
+                  << (outbox_temp_scrubbed ? "passed" : "FAILED") << std::endl;
+        for (const auto& sentinel : sentinels) assert(std::filesystem::is_regular_file(sentinel));
+        assert(std::filesystem::exists(child));
+        assert(!restarted.open(path));
+        assert_refused();
+        // Preserve the refusal marker through every retry; then tear down this fixture only.
+        for (const auto& sidecar : owned_temps) { std::filesystem::remove(sidecar, ec); assert(!ec); }
+        for (const auto& sentinel : sentinels) assert(std::filesystem::remove(sentinel));
+        assert(std::filesystem::remove(child));
+        assert(std::filesystem::remove(directory));
+        assert(std::filesystem::remove(marker));
+    }
+    assert(all_outbox_temps_scrubbed);
+    assert(outbox_temp_lock_reported);
+}
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "storage-recovery-1a") { test_blocked_restart_retries_owned_payload_cleanup(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "review-scrub-both") { test_blocked_restart_scrubs_both_durable_payload_stores(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "review-expiry") { test_expired_regular_batch_cannot_return_after_fresh_restart(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "review-temps") { test_coordinator_crash_temporary_payloads_are_cleaned(); return 0; }
@@ -1188,6 +1323,7 @@ int main(int argc, char** argv) {
     test_blocked_restart_maintenance_scrubs_pending_payload();
     test_initial_state_write_failure_does_not_orphan_outbox();
     test_blocked_restart_scrubs_both_durable_payload_stores();
+    test_blocked_restart_retries_owned_payload_cleanup();
     std::cout << std::unitbuf;
     std::cout << "Running exam_telemetry_service_tests...\n";
     if (argc == 2 && std::string_view(argv[1]) == "expiry-marker") {

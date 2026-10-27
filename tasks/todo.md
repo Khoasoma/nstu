@@ -41,6 +41,13 @@ with shared/native3/3, browser63 and Root fast/strict49/49 checks. Server
 durability/ACK, required acceptance/peer evidence and runtime qualification still
 keep the integration incomplete for main.
 
+STORAGE-RECOVERY-1A is locally implemented and independently reviewed: owned
+numeric temporary cleanup includes blocked outbox copies, deletion failures
+retain obligations, and marker/authorization refusal persists. Root gates
+passed49/49 with zero warnings; exact published revision CI is checked separately.
+Remaining storage slices and existing acceptance/server/runtime dependencies
+remain pending; no historical checkbox is changed by this execution note.
+
 ## Task 0: Isolate the work
 
 **Description:** Keep Phase 4 out of PR #6. Human decision: merge PR #6 first, then branch from updated `main`. Merge/branch actions still require explicit authorization.

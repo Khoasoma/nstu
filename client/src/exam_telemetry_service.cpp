@@ -201,21 +201,31 @@ std::vector<std::byte> read_all(const std::filesystem::path& path) {
     return buffer;
 }
 
-bool clean_coordinator_temps(const std::filesystem::path& state_path) {
-    if (state_path.empty()) return true;
+bool clean_owned_temps(const std::filesystem::path& store_path, bool include_blocked_temps) {
+    if (store_path.empty()) return true;
     std::error_code ec;
-    const auto parent = state_path.parent_path();
+    const auto parent = store_path.parent_path();
     if (!std::filesystem::exists(parent, ec)) return !ec;
-    const auto base = state_path.filename().wstring();
+    const auto base = store_path.filename().wstring();
     const std::array prefixes{base + L".tmp-", base + L".blocked.tmp-"};
+    const auto prefix_count = include_blocked_temps ? prefixes.size() : std::size_t{1};
     std::filesystem::directory_iterator it(parent, ec), end;
     while (!ec && it != end) {
         const auto name = it->path().filename().wstring();
-        for (const auto& prefix : prefixes) {
+        for (std::size_t i = 0; i < prefix_count; ++i) {
+            const auto& prefix = prefixes[i];
             if (name.rfind(prefix, 0) != 0 || name.size() == prefix.size()) continue;
             const auto suffix = std::wstring_view(name).substr(prefix.size());
             if (!std::all_of(suffix.begin(), suffix.end(), [](wchar_t c) { return c >= L'0' && c <= L'9'; })) continue;
-            if (it->is_regular_file(ec) && !ec) std::filesystem::remove(it->path(), ec);
+            const auto status = it->symlink_status(ec);
+            if (!ec && std::filesystem::is_regular_file(status)) {
+#ifdef _WIN32
+                const auto attributes = GetFileAttributesW(it->path().c_str());
+                if (attributes == INVALID_FILE_ATTRIBUTES) return false;
+                if ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) break;
+#endif
+                std::filesystem::remove(it->path(), ec);
+            }
             break;
         }
         if (!ec) it.increment(ec);
@@ -582,10 +592,13 @@ bool ExamTelemetryServiceCoordinator::open(const std::filesystem::path& outbox_p
 
     impl_->outbox_path = outbox_path;
     impl_->state_path = outbox_path.wstring() + L".coord_state";
-    if (!clean_coordinator_temps(impl_->state_path)) return impl_->fail("coordinator temporary cleanup failed", error);
+    if (!clean_owned_temps(impl_->state_path, true)) return impl_->fail("coordinator temporary cleanup failed", error);
 
     std::error_code ec;
     const bool blocked = std::filesystem::exists(impl_->state_path.wstring() + L".blocked", ec);
+    if (!ec && blocked && !clean_owned_temps(impl_->outbox_path, false)) {
+        return impl_->fail("blocked outbox temporary cleanup failed", error);
+    }
     if (ec || blocked) return impl_->fail("coordinator revocation marker present; explicit storage recovery required", error);
     const bool had_state = std::filesystem::exists(impl_->state_path, ec);
     if (ec) return impl_->fail("coordinator state is unreadable", error);
@@ -960,10 +973,13 @@ std::size_t ExamTelemetryServiceCoordinator::prune_expired(std::uint64_t now_uni
 
 bool ExamTelemetryServiceCoordinator::maintain(std::uint64_t now_unix_ms, std::string* error) {
     std::scoped_lock lock(impl_->mutex);
-    if (!clean_coordinator_temps(impl_->state_path)) return impl_->fail("coordinator temporary cleanup failed", error);
+    if (!clean_owned_temps(impl_->state_path, true)) return impl_->fail("coordinator temporary cleanup failed", error);
     if (!impl_->is_open) {
         std::error_code ec;
         if (!impl_->state_path.empty() && std::filesystem::exists(impl_->state_path.wstring() + L".blocked", ec) && !ec) {
+            if (!clean_owned_temps(impl_->outbox_path, false)) {
+                return impl_->fail("blocked outbox temporary cleanup failed", error);
+            }
             // The durable marker continues to refuse every bind. Scrub the old
             // state, which may still carry an expired pending behavioral batch.
             std::filesystem::remove(impl_->outbox_path, ec);

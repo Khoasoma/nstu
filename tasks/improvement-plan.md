@@ -45,6 +45,12 @@ Native question-ID compatibility is now repaired with the existing shared
 128-byte limit; manifest admission remains96. Valid65/96-byte parser/live inputs
 round-trip without truncation, with original UTF-8/NUL/allowlist/generation checks.
 
+STORAGE-RECOVERY-1A now scrubs owned numeric outbox/coordinator temporaries on
+blocked restart and preserves deletion-failure retry/refusal. Focused lock rows
+4/4, service/outbox2/2, Root fast/strict49/49 and fresh review passed. Remaining
+barrier, mutation and pristine-bootstrap slices are planned separately in
+[storage-recovery-1.md](task-plans/storage-recovery-1.md).
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current
