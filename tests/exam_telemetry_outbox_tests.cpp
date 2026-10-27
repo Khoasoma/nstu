@@ -1299,6 +1299,345 @@ void test_tampered_protected_expiry_barrier_is_refused() {
     assert_invalid_protected_expiry_barrier("tampered_eight_byte_nonzero", plaintext, true);
 }
 
+std::span<const std::byte> mixed_cleanup_entropy() {
+    constexpr std::string_view text = "NSTU-Exam-Telemetry-Outbox-v1";
+    return {reinterpret_cast<const std::byte*>(text.data()), text.size()};
+}
+
+std::vector<std::byte> mixed_cleanup_time_bytes(std::uint64_t time) {
+    std::vector<std::byte> bytes;
+    for (std::size_t i = 0; i < 8; ++i) {
+        bytes.push_back(static_cast<std::byte>((time >> (8u * i)) & 0xffu));
+    }
+    return bytes;
+}
+
+struct MixedCleanupDiskState {
+    nstu::exam::SessionId active_session{};
+    std::vector<nstu::exam::TelemetryOutboxAggregateLoss> losses;
+    std::vector<std::vector<std::byte>> batches;
+    std::vector<std::uint64_t> arrivals;
+};
+
+MixedCleanupDiskState read_mixed_cleanup_disk(const std::filesystem::path& path) {
+    std::string error;
+    const auto plaintext = nstu::security::unprotect_machine_secret(
+        read_protected_fixture(path), mixed_cleanup_entropy(), &error);
+    assert(error.empty() && plaintext.size() > nstu::security::Sha256Digest{}.size());
+    const std::span<const std::byte> payload{plaintext.data(), plaintext.size() - nstu::security::Sha256Digest{}.size()};
+    const auto digest = nstu::security::sha256(payload);
+    assert(digest);
+    for (std::size_t i = 0; i < digest->size(); ++i) {
+        assert((*digest)[i] == plaintext[payload.size() + i]);
+    }
+    std::size_t offset = 0;
+    const auto number = [&](std::size_t width) {
+        assert(offset + width <= payload.size());
+        std::uint64_t value = 0;
+        for (std::size_t i = 0; i < width; ++i) {
+            value |= std::to_integer<std::uint64_t>(payload[offset++]) << (8u * i);
+        }
+        return value;
+    };
+    const auto session = [&] {
+        nstu::exam::SessionId id{};
+        assert(offset + id.size() <= payload.size());
+        for (auto& byte : id) byte = payload[offset++];
+        return id;
+    };
+    assert(number(4) == 0x544c4d4f);
+    assert(number(2) == 2);
+    assert(number(2) == 0);
+    MixedCleanupDiskState state;
+    state.active_session = session();
+    const auto loss_count = number(4);
+    assert(loss_count <= 2);
+    for (std::uint64_t i = 0; i < loss_count; ++i) {
+        nstu::exam::TelemetryOutboxAggregateLoss loss;
+        loss.session_id = session();
+        loss.rejected_batches = number(8);
+        loss.conflict_batches = number(8);
+        loss.expired_batches = number(8);
+        loss.first_recorded_unix_ms = number(8);
+        loss.last_updated_unix_ms = number(8);
+        state.losses.push_back(loss);
+    }
+    const auto batch_count = number(4);
+    assert(batch_count <= 4);
+    for (std::uint64_t i = 0; i < batch_count; ++i) {
+        const auto length = static_cast<std::size_t>(number(4));
+        assert(offset + length <= payload.size());
+        const auto encoded = payload.subspan(offset, length);
+        offset += length;
+        const auto batch = nstu::exam::decode_telemetry_batch(encoded, &error);
+        assert(batch && error.empty());
+        state.batches.emplace_back(encoded.begin(), encoded.end());
+        assert(nstu::exam::encode_telemetry_batch(*batch) == state.batches.back());
+        assert(number(2) == 0); // no retry in this fixture
+        assert(number(8) == 0); // immediately eligible
+        state.arrivals.push_back(number(8));
+        assert(state.arrivals.back() != 0);
+    }
+    assert(offset == payload.size());
+    return state;
+}
+
+void assert_mixed_cleanup_loss_equal(const nstu::exam::TelemetryOutboxAggregateLoss& actual,
+                                     const nstu::exam::TelemetryOutboxAggregateLoss& expected) {
+    assert(actual.session_id == expected.session_id);
+    assert(actual.rejected_batches == expected.rejected_batches);
+    assert(actual.conflict_batches == expected.conflict_batches);
+    assert(actual.expired_batches == expected.expired_batches);
+    assert(actual.first_recorded_unix_ms == expected.first_recorded_unix_ms);
+    assert(actual.last_updated_unix_ms == expected.last_updated_unix_ms);
+}
+
+struct MixedCleanupFixture {
+    const std::uint64_t time = wall_clock_ms();
+    const std::uint64_t boundary = time + 3600000ULL;
+    const std::uint64_t stale_stamp = boundary - nstu::exam::kTelemetryRetentionMilliseconds;
+    const nstu::exam::SessionId stale_session{std::byte{0x71}};
+    const nstu::exam::SessionId current_session{std::byte{0xcc}};
+    std::filesystem::path path, barrier, alternate_path, alternate_barrier, alternate_temp;
+    nstu::exam::TelemetryOutbox outbox;
+    std::vector<nstu::exam::TelemetryBatch> batches;
+    std::vector<std::vector<std::byte>> encodings;
+    std::vector<nstu::security::Sha256Digest> hashes;
+    std::vector<std::byte> original_payload, alternate_payload, alternate_barrier_bytes, alternate_temp_bytes;
+    std::filesystem::file_time_type original_write_time;
+    MixedCleanupDiskState original_disk;
+    nstu::exam::TelemetryBatch alternate_batch;
+    std::size_t original_bytes = 0, retained_bytes = 0;
+
+    explicit MixedCleanupFixture(const std::string& suffix) {
+        path = temp_test_path("mixed_cleanup_" + suffix);
+        barrier = std::filesystem::path(path.wstring() + L".expiry");
+        alternate_path = temp_test_path("mixed_cleanup_" + suffix + "_alternate");
+        alternate_barrier = std::filesystem::path(alternate_path.wstring() + L".expiry");
+        alternate_temp = std::filesystem::path(alternate_path.wstring() + L".tmp-91001-1");
+        std::error_code ec;
+        for (const auto& owned : {path, barrier, alternate_path, alternate_barrier, alternate_temp}) {
+            std::filesystem::remove(owned, ec);
+            assert(!ec);
+        }
+        assert(quarantine_files(path).empty() && quarantine_files(alternate_path).empty());
+        assert(outbox.open(path));
+        const auto terminal = [&](nstu::exam::TelemetryBatch batch,
+                                  nstu::exam::TelemetryAckStatus status, std::uint64_t stamp) {
+            assert(outbox.enqueue(batch));
+            const auto hash = nstu::exam::compute_telemetry_batch_hash(batch);
+            assert(hash);
+            const nstu::exam::TelemetryAck ack{batch.session_id, batch.producer_id, batch.sequence, *hash, stamp, status};
+            assert(outbox.acknowledge(ack, stamp) == nstu::exam::TelemetryAckApplyResult::deleted_terminal);
+        };
+        auto stale = make_batch(90, 1, time);
+        stale.session_id = stale_session;
+        terminal(stale, nstu::exam::TelemetryAckStatus::rejected, stale_stamp);
+        terminal(make_batch(91, 2, time), nstu::exam::TelemetryAckStatus::conflict, time);
+        batches = {make_batch(101, 2, stale_stamp), make_batch(102, 2, time),
+                   make_batch(103, 2, stale_stamp), make_batch(104, 2, time)};
+        for (std::size_t i = 0; i < batches.size(); ++i) {
+            assert(outbox.enqueue(batches[i]));
+            encodings.push_back(nstu::exam::encode_telemetry_batch(batches[i]));
+            const auto hash = nstu::exam::compute_telemetry_batch_hash(batches[i]);
+            assert(!encodings.back().empty() && hash);
+            hashes.push_back(*hash);
+            original_bytes += encodings.back().size();
+            if (i == 1 || i == 3) retained_bytes += encodings.back().size();
+        }
+        original_payload = read_protected_fixture(path);
+        original_write_time = std::filesystem::last_write_time(path);
+        assert(original_write_time > std::filesystem::file_time_type::clock::now() -
+            std::chrono::hours(24 * nstu::exam::kTelemetryRetentionDays));
+        original_disk = read_mixed_cleanup_disk(path);
+
+        nstu::exam::TelemetryOutbox alternate;
+        alternate_batch = make_batch(201, 3, time);
+        alternate_batch.session_id[0] = std::byte{0xd4};
+        assert(alternate.open(alternate_path));
+        assert(alternate.enqueue(alternate_batch));
+        assert(alternate.open(alternate_path)); // normalize its empty loss slot
+        assert(alternate.next_batch_to_send(time));
+        alternate.close();
+        alternate_payload = read_protected_fixture(alternate_path);
+        std::string error;
+        assert(nstu::security::save_machine_secret(alternate_barrier.wstring(),
+            mixed_cleanup_time_bytes(time), mixed_cleanup_entropy(), &error));
+        assert(error.empty());
+        alternate_barrier_bytes = read_protected_fixture(alternate_barrier);
+        assert(nstu::security::unprotect_machine_secret(alternate_barrier_bytes,
+            mixed_cleanup_entropy(), &error) == mixed_cleanup_time_bytes(time));
+        assert(error.empty());
+        {
+            std::ofstream stream(alternate_temp, std::ios::binary);
+            assert(stream.is_open());
+            stream << "owned alternate numeric temporary";
+            stream.flush();
+            assert(stream.good());
+        }
+        alternate_temp_bytes = read_protected_fixture(alternate_temp);
+    }
+
+    void assert_alternate_untouched() const {
+        assert(read_protected_fixture(alternate_path) == alternate_payload);
+        assert(read_protected_fixture(alternate_barrier) == alternate_barrier_bytes);
+        assert(read_protected_fixture(alternate_temp) == alternate_temp_bytes);
+        assert(quarantine_files(alternate_path).empty());
+    }
+
+    void assert_state(const nstu::exam::TelemetryOutbox& loaded, bool cleaned, bool stale_observed) const {
+        const auto pending = loaded.pending_batches();
+        const auto disk = read_mixed_cleanup_disk(path);
+        const std::vector<std::size_t> indices = cleaned ? std::vector<std::size_t>{1, 3} : std::vector<std::size_t>{0, 1, 2, 3};
+        assert(pending.size() == indices.size() && disk.batches.size() == indices.size());
+        assert(loaded.bytes() == (cleaned ? retained_bytes : original_bytes));
+        assert(disk.active_session == current_session);
+        for (std::size_t i = 0; i < indices.size(); ++i) {
+            const auto index = indices[i];
+            assert(nstu::exam::encode_telemetry_batch(pending[i]) == encodings[index]);
+            assert(nstu::exam::compute_telemetry_batch_hash(pending[i]) == hashes[index]);
+            assert(disk.batches[i] == encodings[index]);
+            assert(disk.arrivals[i] == original_disk.arrivals[index]);
+        }
+        assert(disk.losses.size() == (cleaned ? 1u : 2u));
+        for (const auto& loss : disk.losses) {
+            if (loss.session_id == current_session) {
+                assert(loss.rejected_batches == 0 && loss.conflict_batches == 1);
+                assert(loss.expired_batches == (cleaned ? 2u : 0u));
+                assert(loss.first_recorded_unix_ms == time);
+                assert_mixed_cleanup_loss_equal(loaded.aggregate_loss(current_session), loss);
+            } else {
+                assert(!cleaned && loss.session_id == stale_session);
+                assert(loss.rejected_batches == 1 && loss.conflict_batches == 0 && loss.expired_batches == 0);
+                assert(loss.first_recorded_unix_ms == stale_stamp && loss.last_updated_unix_ms == stale_stamp);
+            }
+        }
+        if (cleaned || stale_observed) {
+            assert_mixed_cleanup_loss_equal(loaded.aggregate_loss(stale_session), {});
+        } else {
+            assert(loaded.aggregate_loss(stale_session).rejected_batches == 1);
+        }
+        assert(quarantine_files(path).empty());
+    }
+
+    void finish() {
+        assert_alternate_untouched();
+        std::string error;
+        assert(outbox.open(alternate_path, boundary - 1, &error));
+        assert(error.empty() && outbox.is_open());
+        assert(!std::filesystem::exists(alternate_barrier) && !std::filesystem::exists(alternate_temp));
+        assert(read_protected_fixture(alternate_path) == alternate_payload);
+        const auto offered = outbox.next_batch_to_send(boundary - 1);
+        assert(offered && nstu::exam::encode_telemetry_batch(*offered) == nstu::exam::encode_telemetry_batch(alternate_batch));
+        assert(nstu::exam::compute_telemetry_batch_hash(*offered) == nstu::exam::compute_telemetry_batch_hash(alternate_batch));
+        outbox.close();
+        assert(std::filesystem::remove(path));
+        assert(std::filesystem::remove(alternate_path));
+        assert(!std::filesystem::exists(barrier));
+        assert(quarantine_files(path).empty() && quarantine_files(alternate_path).empty());
+    }
+};
+
+void run_mixed_expiry_cleanup_case(bool block_barrier_deletion) {
+    const std::string suffix = block_barrier_deletion ? "barrier_deletion" : "payload_replacement";
+    MixedCleanupFixture fixture(suffix);
+    fixture.assert_state(fixture.outbox, false, false);
+    HANDLE payload_lock = CreateFileW(fixture.path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                     nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(payload_lock != INVALID_HANDLE_VALUE);
+    std::string error;
+    assert(fixture.outbox.prune_expired(fixture.boundary, &error) == 0);
+    assert(error == "failed to atomically rename outbox file");
+    assert(read_protected_fixture(fixture.path) == fixture.original_payload);
+    assert(std::filesystem::last_write_time(fixture.path) == fixture.original_write_time);
+    const auto barrier_bytes = read_protected_fixture(fixture.barrier);
+    error.clear();
+    assert(nstu::security::unprotect_machine_secret(barrier_bytes, mixed_cleanup_entropy(), &error) ==
+        mixed_cleanup_time_bytes(fixture.boundary));
+    assert(error.empty());
+    fixture.assert_state(fixture.outbox, false, true);
+    HANDLE barrier_lock = INVALID_HANDLE_VALUE;
+    if (block_barrier_deletion) {
+        barrier_lock = CreateFileW(fixture.barrier.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        assert(barrier_lock != INVALID_HANDLE_VALUE);
+        assert(CloseHandle(payload_lock));
+        payload_lock = INVALID_HANDLE_VALUE;
+        error.clear();
+        // A zero public count with this error still leaves the cleaned store committed.
+        assert(fixture.outbox.prune_expired(fixture.boundary - 1, &error) == 0);
+        assert(error == "expiry barrier cleanup failed");
+        assert(read_protected_fixture(fixture.path) != fixture.original_payload);
+        fixture.assert_state(fixture.outbox, true, true);
+    }
+    const auto gated_payload = read_protected_fixture(fixture.path);
+    const auto gated_write_time = std::filesystem::last_write_time(fixture.path);
+    const auto gated_loss = fixture.outbox.aggregate_loss(fixture.current_session);
+    assert(!fixture.outbox.next_batch_to_send(fixture.boundary - 1));
+    error.clear();
+    assert(!fixture.outbox.enqueue(make_batch(105, 2, fixture.time), &error));
+    assert(error == (block_barrier_deletion ? "expiry barrier cleanup failed" : "failed to atomically rename outbox file"));
+    error.clear();
+    assert(!fixture.outbox.open(fixture.alternate_path, fixture.boundary - 1, &error));
+    assert(error == "observed expiry cleanup pending; cannot change outbox path");
+    assert(fixture.outbox.is_open());
+    fixture.assert_state(fixture.outbox, block_barrier_deletion, true);
+    assert_mixed_cleanup_loss_equal(fixture.outbox.aggregate_loss(fixture.current_session), gated_loss);
+    assert(read_protected_fixture(fixture.path) == gated_payload);
+    assert(std::filesystem::last_write_time(fixture.path) == gated_write_time);
+    assert(read_protected_fixture(fixture.barrier) == barrier_bytes);
+    fixture.assert_alternate_untouched();
+    if (block_barrier_deletion) {
+        nstu::exam::TelemetryOutbox closed_restart;
+        error.clear();
+        assert(!closed_restart.open(fixture.path, fixture.boundary - 1, &error));
+        assert(error == "expiry barrier cleanup failed");
+        assert(!closed_restart.is_open() && closed_restart.pending_batches().empty());
+        assert(!closed_restart.next_batch_to_send(fixture.boundary - 1));
+        assert(read_protected_fixture(fixture.path) == gated_payload);
+        assert(read_protected_fixture(fixture.barrier) == barrier_bytes);
+        assert(CloseHandle(barrier_lock));
+    } else {
+        assert(CloseHandle(payload_lock));
+    }
+    error.clear();
+    assert(fixture.outbox.open(fixture.path, fixture.boundary - 1, &error));
+    assert(error.empty());
+    fixture.assert_state(fixture.outbox, true, true);
+    assert(!std::filesystem::exists(fixture.barrier));
+    const auto recovered_payload = read_protected_fixture(fixture.path);
+    const auto recovered_loss = fixture.outbox.aggregate_loss(fixture.current_session);
+    if (block_barrier_deletion) {
+        assert(recovered_payload == gated_payload);
+        assert_mixed_cleanup_loss_equal(recovered_loss, gated_loss);
+    } else {
+        assert(recovered_payload != fixture.original_payload);
+    }
+    const auto offered = fixture.outbox.next_batch_to_send(fixture.boundary - 1);
+    assert(offered && nstu::exam::encode_telemetry_batch(*offered) == fixture.encodings[1]);
+    fixture.outbox.close();
+    nstu::exam::TelemetryOutbox restarted;
+    assert(restarted.open(fixture.path, fixture.boundary - 1, nullptr));
+    fixture.assert_state(restarted, true, true);
+    assert(restarted.open(fixture.path, fixture.boundary - 2, nullptr));
+    fixture.assert_state(restarted, true, true);
+    assert_mixed_cleanup_loss_equal(restarted.aggregate_loss(fixture.current_session), recovered_loss);
+    assert(read_protected_fixture(fixture.path) == recovered_payload);
+    assert(!std::filesystem::exists(fixture.barrier));
+    fixture.assert_alternate_untouched();
+    restarted.close();
+    fixture.finish();
+    std::cout << "Mixed expiry cleanup " << suffix << ": locks, durable state, rollback and alternate path passed.\n";
+}
+
+void test_mixed_expiry_payload_replacement_failure_preserves_state_and_path() {
+    run_mixed_expiry_cleanup_case(false);
+}
+
+void test_mixed_expiry_barrier_deletion_failure_preserves_committed_cleanup_and_path() {
+    run_mixed_expiry_cleanup_case(true);
+}
+
 nstu::exam::SessionId disjoint_loss_context_id(std::uint8_t bank, std::size_t index) {
     nstu::exam::SessionId id{};
     id[0] = static_cast<std::byte>(bank + 1u);
@@ -1603,6 +1942,11 @@ int main(int argc, char** argv) {
         if (selected == "zero-loss") { test_nonzero_loss_without_first_stamp_is_refused(); return 0; }
         if (selected == "concurrent") { test_expired_enqueue_cannot_race_a_send_offer(); return 0; }
 #ifdef _WIN32
+        if (selected == "mixed-cleanup") {
+            test_mixed_expiry_payload_replacement_failure_preserves_state_and_path();
+            test_mixed_expiry_barrier_deletion_failure_preserves_committed_cleanup_and_path();
+            return 0;
+        }
         if (selected == "protected-barriers") {
             test_protected_seven_byte_expiry_barrier_is_refused();
             test_protected_nine_byte_expiry_barrier_is_refused();
@@ -1650,6 +1994,8 @@ int main(int argc, char** argv) {
     test_nonzero_loss_without_first_stamp_is_refused();
     test_expired_enqueue_cannot_race_a_send_offer();
 #ifdef _WIN32
+    test_mixed_expiry_payload_replacement_failure_preserves_state_and_path();
+    test_mixed_expiry_barrier_deletion_failure_preserves_committed_cleanup_and_path();
     test_protected_seven_byte_expiry_barrier_is_refused();
     test_protected_nine_byte_expiry_barrier_is_refused();
     test_protected_zero_expiry_barrier_is_refused();

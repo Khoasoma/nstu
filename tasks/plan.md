@@ -177,18 +177,20 @@ derived product capability/task index is
 [product-execution-plan.md](product-execution-plan.md). Preserve this incomplete
 Phase 4 plan and the authoritative checklist while extending its follow-up work.
 
-The next corrective unit is
-[CAPTURE-CLOCK-1](task-plans/capture-clock-1.md): native generation-relative
-timing, a local WebView enable anchor, and an explicit native-owned initial
-delivery uncertainty in the previously unused collector-start numeric field.
-No telemetry codec, answer channel or service producer/sequence change is allowed.
-Clock-boundary, privacy, compatibility and failure behavior are specified before
-coding; bounded browser aggregation follows as a separate unit.
+CAPTURE-CLOCK-1, bounded browser aggregation, question-ID compatibility and the
+first two storage recovery units are published with exact-revision Windows CI.
+The active follow-up is
+[STORAGE-RECOVERY-1C-1](task-plans/storage-recovery-1c-1.md): mixed cleanup stages
+and path isolation. Its local tests and independent evidence must be reconciled
+before publication. Safe ACK retirement and purge/clear remain separate units in
+[storage-recovery-1c.md](task-plans/storage-recovery-1c.md); pristine interrupted
+initialization follows. No telemetry codec, answer channel or service
+producer/sequence change is allowed.
 
 `PRODUCT_ROADMAP_NSTU.md` is a private local source and must never be staged,
 committed or uploaded. Derived requirements may be recorded in scoped plans.
-Green CI alone does not clear the remaining capture bugs, unfinished server
-durability/ACK path or required acceptance/runtime evidence for main integration.
+Green CI alone does not complete the unfinished server durability/ACK path or
+supply required acceptance/runtime evidence for main integration.
 
 ## Out of scope
 

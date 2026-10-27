@@ -51,6 +51,14 @@ blocked restart and preserves deletion-failure retry/refusal. Focused lock rows
 barrier, mutation and pristine-bootstrap slices are planned separately in
 [storage-recovery-1.md](task-plans/storage-recovery-1.md).
 
+STORAGE-RECOVERY-1B is published as `0b535d1`: four real protected malformed/tampered
+barrier cases passed, preserving payload bytes, retry refusal, exact recovery and
+the original retention anchor. Fresh supporting review and independent Root
+fast/strict gates passed 49/49 with zero warnings; exact-revision Windows CI is
+tracked in local recovery evidence. No production defect or RED was fabricated.
+The next matrix is split in [storage-recovery-1c.md](task-plans/storage-recovery-1c.md),
+starting with [mixed cleanup and path isolation](task-plans/storage-recovery-1c-1.md).
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current
