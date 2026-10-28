@@ -369,9 +369,18 @@ void test_removed_authenticated_state_cannot_publish() {
 void test_authenticated_ownership_regressions() {
     // Selection permits separate real RED receipts; the ordinary gate executes
     // every new case as well as every original assertion in this binary.
-    const auto* selected = std::getenv("NSTU_AUTH_OWNERSHIP_CASE");
+    char selected_buffer[16]{};
+    const auto selected_length = GetEnvironmentVariableA(
+        "NSTU_AUTH_OWNERSHIP_CASE", selected_buffer,
+        static_cast<DWORD>(sizeof(selected_buffer)));
+    const std::string_view selected =
+        selected_length > 0 && selected_length < sizeof(selected_buffer)
+            ? std::string_view(selected_buffer, selected_length)
+            : std::string_view{};
+    const bool selected_known = selected == "fleet" || selected == "status" ||
+                                selected == "heartbeat" || selected == "removed";
     const auto run = [&](const char* name) {
-        return selected == nullptr || std::string_view(selected) == name;
+        return !selected_known || selected == name;
     };
     if (run("fleet")) test_stale_authenticated_registry_callback(
         nstu::protocol::CommandType::uwf_fleet_status);
