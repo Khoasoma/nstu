@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <filesystem>
@@ -1524,7 +1525,267 @@ void test_pristine_numeric_state_temporary_without_final_stores() {
 
 } // namespace
 
+namespace {
+
+class StopReadSharingLock {
+public:
+    explicit StopReadSharingLock(const std::filesystem::path& path)
+        : handle_(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr)) {
+        assert(handle_ != INVALID_HANDLE_VALUE);
+    }
+    ~StopReadSharingLock() { assert(CloseHandle(handle_)); }
+    StopReadSharingLock(const StopReadSharingLock&) = delete;
+    StopReadSharingLock& operator=(const StopReadSharingLock&) = delete;
+private:
+    HANDLE handle_;
+};
+
+DWORD stop_native_create_probe(const std::filesystem::path& path, bool should_succeed) {
+    const HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+    const DWORD creation_error = handle == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+    if (handle != INVALID_HANDLE_VALUE) {
+        const std::byte value{1};
+        DWORD written = 0;
+        assert(WriteFile(handle, &value, 1, &written, nullptr));
+        assert(written == 1);
+        assert(FlushFileBuffers(handle));
+        assert(CloseHandle(handle));
+    }
+    assert((handle != INVALID_HANDLE_VALUE) == should_succeed);
+    return creation_error;
+}
+
+void stop_remove_owned_file(const std::filesystem::path& path) {
+    std::error_code error;
+    (void)std::filesystem::remove(path, error);
+    assert(!error);
+}
+
+void test_stop_survives_state_and_marker_temp_failures() {
+    const auto plain_directory = std::filesystem::absolute(
+        std::filesystem::temp_directory_path() / L"nstu_stop_durability_tests" /
+        (L"case-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+         std::to_wstring(std::chrono::steady_clock::now().time_since_epoch().count()))).lexically_normal();
+    assert(plain_directory.has_root_name() && plain_directory.has_root_directory());
+    assert(plain_directory.native().size() >= 3 && plain_directory.native()[1] == L':');
+    assert(std::filesystem::create_directories(plain_directory));
+    const std::filesystem::path directory(std::wstring(LR"(\\?\)") + plain_directory.native());
+    std::array<wchar_t, MAX_PATH> volume{};
+    assert(GetVolumePathNameW(plain_directory.c_str(), volume.data(), static_cast<DWORD>(volume.size())));
+    DWORD maximum_component = 0;
+    assert(GetVolumeInformationW(volume.data(), nullptr, 0, nullptr,
+                                 &maximum_component, nullptr, nullptr, 0));
+    assert(maximum_component >= 64 && maximum_component <= 512);
+    const auto tick_digits = std::to_wstring(
+        std::chrono::steady_clock::now().time_since_epoch().count()).size();
+    const std::wstring state_suffix = L".coord_state";
+    const std::wstring marker_suffix = L".blocked";
+    const std::size_t temporary_suffix_size = 5 + tick_digits;
+    const auto base_size = static_cast<std::size_t>(maximum_component) -
+                           state_suffix.size() - temporary_suffix_size - 4;
+    std::wstring base_name = L"coordinator_stop_double_failure_";
+    assert(base_name.size() < base_size);
+    base_name.resize(base_size, L'a');
+    const auto path = directory / base_name;
+    const std::filesystem::path state = path.wstring() + state_suffix;
+    const std::filesystem::path marker = state.wstring() + marker_suffix;
+    const auto within_probe = directory / std::wstring(maximum_component - 4, L'p');
+    const auto above_probe = directory / std::wstring(maximum_component + 4, L'q');
+    const auto final_marker_probe = directory / std::wstring(marker.filename().native().size(), L'm');
+    const auto held_probe = directory / L"held-state-probe";
+    assert(stop_native_create_probe(within_probe, true) == ERROR_SUCCESS);
+    const auto component_error = stop_native_create_probe(above_probe, false);
+    assert(component_error == ERROR_FILENAME_EXCED_RANGE || component_error == ERROR_INVALID_NAME);
+    assert(stop_native_create_probe(final_marker_probe, true) == ERROR_SUCCESS);
+    assert(stop_native_create_probe(held_probe, true) == ERROR_SUCCESS);
+    DWORD replacement_error = ERROR_SUCCESS;
+    {
+        StopReadSharingLock held(held_probe);
+        const BOOL replaced = MoveFileExW(within_probe.c_str(), held_probe.c_str(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+        replacement_error = replaced ? ERROR_SUCCESS : GetLastError();
+        assert(!replaced);
+        assert(replacement_error == ERROR_SHARING_VIOLATION || replacement_error == ERROR_ACCESS_DENIED);
+    }
+    const BOOL unlocked_replacement = MoveFileExW(within_probe.c_str(), held_probe.c_str(),
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+    const DWORD unlocked_error = unlocked_replacement ? ERROR_SUCCESS : GetLastError();
+    std::cout << "STOP-DURABILITY locked replacement-error=" << replacement_error
+              << " unlocked-replaced=" << unlocked_replacement << " unlocked-error=" << unlocked_error << std::endl;
+    assert(unlocked_replacement && unlocked_error == ERROR_SUCCESS);
+    stop_remove_owned_file(within_probe);
+    stop_remove_owned_file(final_marker_probe);
+    stop_remove_owned_file(held_probe);
+    const auto now = test_now_ms();
+    const auto clock = [now] { return now; };
+    auto enable = make_enable("stop-durable-pkg", "stop-durable-candidate");
+    enable.server_time_unix_milliseconds = now;
+    auto coordinator = std::make_unique<Coordinator>(clock);
+    std::string error;
+    assert(coordinator->open(path, &error));
+    assert(coordinator->on_server_enable(enable, &error));
+    assert(coordinator->ingest_samples(std::vector{make_sample(151)}, now, &error));
+    assert(coordinator->outbox_size() == 1 && coordinator->next_sequence() == 2);
+    const auto producer = coordinator->active_producer_id();
+    const auto original_state = pristine_ciphertext(state);
+    const auto original_payload = pristine_checked_payload(state,
+        "NSTU-Exam-Telemetry-Service-Coordinator-v1",
+        157 + enable.package_id.size() + enable.candidate_id.size());
+    assert(original_payload.size() >= 12);
+    assert(std::all_of(original_payload.end() - 12, original_payload.end(),
+                       [](std::byte value) { return value == std::byte{}; })); // no pending intent
+    assert_pristine_markers_absent(path);
+    const auto digits_before_stop = std::to_wstring(
+        std::chrono::steady_clock::now().time_since_epoch().count()).size();
+    std::string stop_error;
+    {
+        StopReadSharingLock held(state);
+        coordinator->on_explicit_stop();
+        assert(coordinator->lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked);
+        assert(coordinator->outbox_size() == 0);
+        stop_error = coordinator->last_error();
+        assert(stop_error.find("revocation state") != std::string::npos);
+        assert(pristine_ciphertext(state) == original_state);
+        coordinator.reset(); // destroy without a successful retry while replacement remains blocked
+        assert(pristine_ciphertext(state) == original_state);
+    }
+    const auto digits_after_stop = std::to_wstring(
+        std::chrono::steady_clock::now().time_since_epoch().count()).size();
+    for (const auto digits : {digits_before_stop, digits_after_stop}) {
+        assert(base_size + state_suffix.size() + 5 + digits <= maximum_component);
+        assert(base_size + state_suffix.size() + marker_suffix.size() + 5 + digits > maximum_component);
+        assert(base_size + 5 + digits <= maximum_component);
+    }
+    const bool refusal_marker = std::filesystem::exists(marker);
+    const bool outbox_marker = std::filesystem::exists(path.wstring() + L".revoked");
+    assert(!outbox_marker);
+    assert_pristine_regular_file(path);
+    {
+        nstu::exam::TelemetryOutbox inspect;
+        assert(inspect.open(path, now, &error));
+        assert(inspect.size() == 0 && inspect.pending_batches().empty());
+        inspect.close();
+    }
+    error.clear();
+    Coordinator restarted(clock);
+    const bool reopened = restarted.open(path, &error);
+    const auto reopen_error = error;
+    error.clear();
+    const bool reenabled = reopened && restarted.on_server_enable(enable, &error);
+    const auto recovered_state = restarted.lifecycle_state();
+    const auto recovered_producer = restarted.active_producer_id();
+    std::cout << "STOP-DURABILITY component=" << maximum_component
+              << " tick-digits=" << tick_digits << " base-component=" << base_size
+              << " creation-error=" << component_error << " replace-error=" << replacement_error
+              << " marker=" << refusal_marker << " reopened=" << reopened
+              << " old-enable=" << reenabled << " state=" << static_cast<unsigned>(recovered_state)
+              << " same-producer=" << (recovered_producer == producer)
+              << " stop-error=" << stop_error << " reopen-error=" << reopen_error
+              << " enable-error=" << error << std::endl;
+    if (reopened) restarted.close();
+    stop_remove_owned_file(path);
+    stop_remove_owned_file(state);
+    stop_remove_owned_file(marker);
+    stop_remove_owned_file(path.wstring() + L".revoked");
+    stop_remove_owned_file(path.wstring() + L".expiry");
+    std::error_code cleanup_error;
+    assert(std::filesystem::remove(directory, cleanup_error));
+    assert(!cleanup_error);
+    if (!reopened) assert(refusal_marker && reopen_error.find("revocation") != std::string::npos);
+    if (reopened && !reenabled) assert(recovered_state == nstu::client::TelemetryLifecycleState::revoked);
+    assert(!reenabled); // explicit stop must survive the qualified double persistence failure
+}
+
+} // namespace
+
+namespace {
+
+void test_stop_repair_preserves_active_empty_recovery() {
+    const auto path = temp_outbox_path("stop_repair_active_empty");
+    const auto now = test_now_ms();
+    const auto clock = [now] { return now; };
+    auto enable = make_enable("active-empty-pkg", "active-empty-candidate");
+    enable.server_time_unix_milliseconds = now;
+    nstu::exam::ProducerId producer{};
+    {
+        Coordinator seed(clock);
+        assert(seed.open(path));
+        assert(seed.on_server_enable(enable));
+        producer = seed.active_producer_id();
+        assert(producer != nstu::exam::ProducerId{});
+        assert(seed.outbox_size() == 0 && seed.next_sequence() == 1);
+        seed.close();
+        assert(!seed.is_open());
+    }
+    Coordinator recovered(clock);
+    assert(recovered.open(path));
+    assert(recovered.lifecycle_state() == nstu::client::TelemetryLifecycleState::suspended);
+    assert(!recovered.next_batch_to_send(now));
+    assert(recovered.on_server_enable(enable));
+    assert(recovered.active_producer_id() == producer && recovered.generation_count() == 1);
+    assert(recovered.next_sequence() == 1 && recovered.outbox_size() == 0);
+    assert_pristine_markers_absent(path);
+    assert(recovered.ingest_samples(std::vector{make_sample(152)}, now));
+    const auto first = recovered.next_batch_to_send(now);
+    assert(first && first->sequence == 1 && first->producer_id == producer);
+    recovered.close();
+    assert(!recovered.is_open());
+}
+
+void test_stop_repair_keeps_existing_refusal_markers() {
+    for (const bool empty : {false, true}) {
+        const auto path = temp_outbox_path(empty ? "stop_marker_empty" : "stop_marker_existing");
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        const auto now = test_now_ms();
+        const auto clock = [now] { return now; };
+        auto seed = std::make_unique<Coordinator>(clock);
+        const auto enable = make_enable();
+        assert(seed->open(path));
+        assert(seed->on_server_enable(enable));
+        const HANDLE native_marker = CreateFileW(marker.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+        assert(native_marker != INVALID_HANDLE_VALUE);
+        const std::array<std::byte, 4> sentinel{std::byte{0x51}, std::byte{0x72}, std::byte{0x93}, std::byte{0xb4}};
+        if (!empty) {
+            DWORD written = 0;
+            assert(WriteFile(native_marker, sentinel.data(), static_cast<DWORD>(sentinel.size()), &written, nullptr));
+            assert(written == sentinel.size());
+        }
+        assert(FlushFileBuffers(native_marker));
+        assert(CloseHandle(native_marker));
+        const auto original_size = std::filesystem::file_size(marker);
+        std::vector<std::byte> original;
+        if (!empty) original = pristine_ciphertext(marker);
+        {
+            StopReadSharingLock held(state);
+            seed->on_explicit_stop();
+            assert(seed->lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked);
+            assert(std::filesystem::file_size(marker) == original_size);
+            if (!empty) assert(pristine_ciphertext(marker) == original);
+            seed.reset();
+        }
+        Coordinator recovered(clock);
+        std::string error;
+        assert(!recovered.open(path, &error));
+        assert(error.find("revocation") != std::string::npos);
+        assert(!recovered.on_server_enable(enable));
+        assert(std::filesystem::file_size(marker) == original_size);
+        if (!empty) assert(pristine_ciphertext(marker) == original);
+        std::cout << "STOP-DURABILITY existing-marker empty=" << empty << " preserved and refused.\n";
+        stop_remove_owned_file(path);
+        stop_remove_owned_file(state);
+        stop_remove_owned_file(marker);
+    }
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "stop-marker-controls") { test_stop_repair_preserves_active_empty_recovery(); test_stop_repair_keeps_existing_refusal_markers(); return 0; }
+    if (argc == 2 && std::string_view(argv[1]) == "stop-durability") { test_stop_survives_state_and_marker_temp_failures(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "pristine-final") { test_pristine_final_state_without_outbox(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "pristine-temporary") { test_pristine_numeric_state_temporary_without_final_stores(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "storage-recovery-1a") { test_blocked_restart_retries_owned_payload_cleanup(); return 0; }
@@ -1648,6 +1909,9 @@ int main(int argc, char** argv) {
     test_pending_expiry_is_observed_before_a_dirty_state_write();
     test_pristine_final_state_without_outbox();
     test_pristine_numeric_state_temporary_without_final_stores();
+    test_stop_survives_state_and_marker_temp_failures();
+    test_stop_repair_preserves_active_empty_recovery();
+    test_stop_repair_keeps_existing_refusal_markers();
     std::cout << "All exam_telemetry_service_tests passed successfully.\n";
     return 0;
 }

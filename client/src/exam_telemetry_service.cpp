@@ -187,6 +187,38 @@ bool write_atomic(const std::filesystem::path& path,
     return true;
 }
 
+// A refusal marker is existence-based: an empty/partial file already blocks
+// recovery. Create its final name exclusively so an avoidable temporary-name
+// failure cannot erase the only witness after protected-state publication fails.
+// Keep a created marker even when writing/flushing it cannot be confirmed.
+bool write_revocation_refusal_marker(const std::filesystem::path& path) {
+#ifdef _WIN32
+    const HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH |
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    const std::byte marker{1};
+    DWORD written = 0;
+    const BOOL write_ok = WriteFile(file, &marker, 1, &written, nullptr);
+    const DWORD write_error = write_ok ? ERROR_SUCCESS : GetLastError();
+    const BOOL flush_ok = FlushFileBuffers(file);
+    const DWORD flush_error = flush_ok ? ERROR_SUCCESS : GetLastError();
+    const BOOL close_ok = CloseHandle(file);
+    const DWORD close_error = close_ok ? ERROR_SUCCESS : GetLastError();
+    const bool persisted = write_ok && written == 1 && flush_ok && close_ok;
+    if (!persisted) {
+        const DWORD first_error = write_error != ERROR_SUCCESS ? write_error :
+            (flush_error != ERROR_SUCCESS ? flush_error : close_error);
+        if (first_error != ERROR_SUCCESS) SetLastError(first_error);
+    }
+    // No deletion on failure: coordinator.open must retain its refusal.
+    return persisted;
+#else
+    const std::array<std::byte, 1> marker{std::byte{1}};
+    return write_atomic(path, marker);
+#endif
+}
+
 std::vector<std::byte> read_all(const std::filesystem::path& path) {
     std::error_code ec;
     const auto file_size = std::filesystem::file_size(path, ec);
@@ -367,8 +399,7 @@ struct ExamTelemetryServiceCoordinator::Impl {
     bool persist_revocation_locked(std::string* error, std::uint64_t now) {
         // Every revocation uses the same durable fallback before payload cleanup.
         if (!persist_state_locked()) {
-            const std::array<std::byte, 1> marker{std::byte{1}};
-            if (!write_atomic(state_path.wstring() + L".blocked", marker)) {
+            if (!write_revocation_refusal_marker(state_path.wstring() + L".blocked")) {
                 fail("revocation state and marker persistence failed", error);
             } else {
                 fail("revocation state persistence failed; durable marker blocks restart", error);
