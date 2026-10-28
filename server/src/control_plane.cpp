@@ -90,6 +90,34 @@ using AuthPublicationHook = std::function<void(
 RegistryMutationHook g_registry_mutation_hook;
 AuthPublicationHook g_auth_publication_hook;
 
+enum class ExamAdmissionTestPoint { selected, before_send };
+using ExamAdmissionHook = std::function<void(
+    ExamAdmissionTestPoint, net::ConnectionId, std::uint64_t,
+    std::function<void()>)>;
+ExamAdmissionHook g_exam_admission_hook;
+std::function<void(net::ConnectionId)> g_auth_published_hook;
+
+void rendezvous_exam_admission(ExamAdmissionTestPoint point,
+                               net::ConnectionId connection,
+                               std::uint64_t registry_id,
+                               std::function<void()> close) {
+    ExamAdmissionHook hook;
+    {
+        std::scoped_lock lock(g_ownership_hook_mutex);
+        hook = g_exam_admission_hook;
+    }
+    if (hook) hook(point, connection, registry_id, std::move(close));
+}
+
+void rendezvous_auth_published(net::ConnectionId connection) {
+    std::function<void(net::ConnectionId)> hook;
+    {
+        std::scoped_lock lock(g_ownership_hook_mutex);
+        hook = g_auth_published_hook;
+    }
+    if (hook) hook(connection);
+}
+
 struct RegistryMutationRendezvous {
     RegistryMutationHook hook;
     net::ConnectionId connection;
@@ -592,19 +620,59 @@ public:
             set_error(error, "client is not authenticated");
             return false;
         }
-        // Exam authorization gate. This is server-side and fails closed: the
-        // client never sends a "protected" flag, and nothing about protection
-        // rides in ExamStartRequest. Only a fresh, boot-bound probe recorded in
-        // the registry can open it.
-        const auto registry_snapshot = registry_.snapshot();
-        const auto client_record = std::find_if(
-            registry_snapshot.begin(), registry_snapshot.end(),
-            [client_id](const ClientRecord& client) {
-                return client.id == client_id;
-            });
-        const bool protection_proven =
-            client_record != registry_snapshot.end() &&
-            client_record->uwf.proves_current_protection();
+        const auto payload = exam::encode_exam_start_request(request);
+        if (payload.empty()) {
+            set_error(error, "exam start request could not be encoded");
+            return false;
+        }
+        ActiveExamContext context;
+        context.client_id = request.client_id;
+        context.package_digest = request.package_digest;
+        context.session_id = request.session_id;
+        context.package_id = request.package_id;
+        context.candidate_id = request.candidate_id;
+
+        // Existing state/context serialization prevents inbound answer traffic
+        // from observing a half-started session. Take both locks before the
+        // short ownership scope; ownership must never wait for either mutex.
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        rendezvous_exam_admission(ExamAdmissionTestPoint::selected,
+            state->connection_id, client_id,
+            [this, id = state->connection_id] { dispatcher_.disconnect(id); });
+#endif
+        std::scoped_lock state_lock(state->mutex);
+        std::scoped_lock context_lock(exam_contexts_mutex_);
+        const auto created = telemetry_clock_now();
+        context.telemetry = {created.wall_ms, created.steady + std::chrono::hours(25), false};
+        const auto registry_id = state->registry_id.load();
+        bool protection_proven = false;
+        auto inserted_context = active_exam_contexts_.end();
+        bool inserted = false;
+        {
+            std::scoped_lock ownership_lock(states_mutex_);
+            if (!is_current_state_locked(*state) || registry_id != client_id ||
+                state->hello.client_id != request.client_id) {
+                set_error(error, "exam request identity does not match client");
+                return false;
+            }
+            // Re-read boot/operation-bound proof at the same ownership boundary
+            // that installs authorization. A pre-lock copy cannot authorize it.
+            const auto registry_snapshot = registry_.snapshot();
+            const auto client_record = std::find_if(
+                registry_snapshot.begin(), registry_snapshot.end(),
+                [registry_id](const ClientRecord& client) {
+                    return client.id == registry_id;
+                });
+            protection_proven = client_record != registry_snapshot.end() &&
+                client_record->uwf.proves_current_protection();
+            if (protection_proven || NSTU_DEV_UNPROTECTED_EXAM) {
+                const auto result = active_exam_contexts_.try_emplace(
+                    registry_id, std::move(context));
+                inserted_context = result.first;
+                inserted = result.second;
+            }
+        }
+        // No transport, telemetry, audit or rollback runs under ownership.
 #if NSTU_DEV_UNPROTECTED_EXAM
         if (!protection_proven) {
             // DEV (UNPROTECTED) build only. This is the single readiness gate
@@ -640,43 +708,15 @@ public:
             return false;
         }
 #endif
-        const auto payload = exam::encode_exam_start_request(request);
-        if (payload.empty()) {
-            set_error(error, "exam start request could not be encoded");
-            return false;
-        }
-
-        // Keep the connection lock held while the authorization record is
-        // installed and the command is queued.  Inbound answer/state traffic
-        // takes the same lock, so it cannot observe a half-started session.
-        std::scoped_lock state_lock(state->mutex);
-        if (state->stage != Stage::authenticated ||
-            state->hello.client_id != request.client_id ||
-            state->registry_id.load() == 0) {
-            set_error(error, "exam request identity does not match client");
-            return false;
-        }
-        const auto registry_id = state->registry_id.load();
-        std::scoped_lock context_lock(exam_contexts_mutex_);
-        if (active_exam_contexts_.find(registry_id) !=
-            active_exam_contexts_.end()) {
-            set_error(error, "client already has an active exam session");
-            return false;
-        }
-        ActiveExamContext context;
-        context.client_id = request.client_id;
-        context.package_digest = request.package_digest;
-        context.session_id = request.session_id;
-        context.package_id = request.package_id;
-        context.candidate_id = request.candidate_id;
-        const auto created = telemetry_clock_now();
-        context.telemetry = {created.wall_ms, created.steady + std::chrono::hours(25), false};
-        const auto [inserted_context, inserted] =
-            active_exam_contexts_.try_emplace(registry_id, std::move(context));
         if (!inserted) {
             set_error(error, "client already has an active exam session");
             return false;
         }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        rendezvous_exam_admission(ExamAdmissionTestPoint::before_send,
+            state->connection_id, client_id,
+            [this, id = state->connection_id] { dispatcher_.disconnect(id); });
+#endif
         if (!send_authenticated_locked(
                 *state, protocol::CommandType::exam_start,
                 next_request_id_.fetch_add(1), payload, error)) {
@@ -1139,19 +1179,21 @@ private:
         return live != states_.end() && live->second.get() == &state;
     }
 
+    bool is_current_state_locked(const ConnectionState& state) const {
+        const auto registry_id = state.registry_id.load();
+        const auto mapping = client_connections_.find(registry_id);
+        return is_live_state_locked(state) && state.stage == Stage::authenticated &&
+            registry_id != 0 && registry_id == registry_id_for(state.hello.client_id) &&
+            mapping != client_connections_.end() && mapping->second == state.connection_id;
+    }
+
     template <typename Mutation>
     bool mutate_current_registry(ConnectionState& state, Mutation&& mutation) {
         std::scoped_lock ownership_lock(states_mutex_);
-        const auto registry_id = state.registry_id.load();
-        const auto mapping = client_connections_.find(registry_id);
-        if (!is_live_state_locked(state) ||
-            state.stage != Stage::authenticated || registry_id == 0 ||
-            registry_id != registry_id_for(state.hello.client_id) ||
-            mapping == client_connections_.end() ||
-            mapping->second != state.connection_id) {
+        if (!is_current_state_locked(state)) {
             return false;
         }
-        return std::forward<Mutation>(mutation)(registry_id);
+        return std::forward<Mutation>(mutation)(state.registry_id.load());
     }
 
     bool send_authenticated_locked(ConnectionState& state,
@@ -1761,6 +1803,10 @@ private:
             (void)registry_.demote_uwf_verification(registry_id);
             registry_.upsert(std::move(record));
         }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        // Publication is complete, but the superseded transport is still open.
+        rendezvous_auth_published(state.connection_id);
+#endif
         dispatcher_.record_handshake_success(state.connection_id);
         if (previous_connection != 0 &&
             previous_connection != state.connection_id) {
@@ -2442,6 +2488,17 @@ std::size_t ServerControlPlane::authenticated_client_count() const noexcept {
 }
 
 #ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+void set_exam_admission_hook_for_testing(ExamAdmissionHook hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_exam_admission_hook = std::move(hook);
+}
+
+void set_auth_published_hook_for_testing(
+    std::function<void(net::ConnectionId)> hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_auth_published_hook = std::move(hook);
+}
+
 void set_registry_mutation_hook_for_testing(RegistryMutationHook hook) {
     std::scoped_lock lock(g_ownership_hook_mutex);
     g_registry_mutation_hook = std::move(hook);

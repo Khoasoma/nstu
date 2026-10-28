@@ -15,6 +15,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <optional>
@@ -389,6 +390,287 @@ void test_authenticated_ownership_regressions() {
     if (run("heartbeat")) test_stale_authenticated_registry_callback(
         nstu::protocol::CommandType::heartbeat);
     if (run("removed")) test_removed_authenticated_state_cannot_publish();
+}
+
+enum class AdmissionRoute { direct, raw, launch };
+
+struct AdmissionHooks {
+    ~AdmissionHooks() {
+        nstu::server::set_exam_admission_hook_for_testing({});
+        nstu::server::set_auth_published_hook_for_testing({});
+    }
+};
+
+struct AdmissionRequest {
+    nstu::exam::ExamStartRequest start;
+    AdmissionRoute route;
+
+    AdmissionRequest(const nstu::security::ClientId& id, AdmissionRoute selected)
+        : start(make_start(id)), route(selected) {
+        start.session_id.back() = static_cast<std::byte>(
+            0xd0u + static_cast<unsigned>(selected));
+    }
+    bool send(OwnershipFixture& fixture, std::string* error) const {
+        const auto registry_id = fixture.record().id;
+        if (route == AdmissionRoute::raw) {
+            return fixture.plane.send_command(registry_id,
+                nstu::protocol::CommandType::exam_start,
+                nstu::exam::encode_exam_start_request(start), error);
+        }
+        if (route == AdmissionRoute::launch) {
+            nstu::server::ExamLaunchRequest launch;
+            launch.package_root = start.package_root;
+            launch.web_root = start.web_root;
+            launch.user_data_root = start.user_data_root;
+            launch.package_id = start.package_id;
+            launch.candidate_id = start.candidate_id;
+            launch.package_digest = start.package_digest;
+            return fixture.plane.launch_exam(registry_id, launch, error);
+        }
+        return fixture.plane.start_exam(registry_id, start, error);
+    }
+    void receive(nstu::control::AuthenticatedControlChannel& channel) const {
+        std::string error;
+        const auto frame = channel.receive(&error);
+        assert(frame && frame->envelope.type == nstu::protocol::CommandType::exam_start);
+        const auto received = nstu::exam::decode_exam_start_request(frame->payload);
+        assert(received && received->client_id == start.client_id);
+        assert(received->package_id == start.package_id);
+        assert(received->candidate_id == start.candidate_id);
+        assert(received->package_digest == start.package_digest);
+        if (route == AdmissionRoute::launch) {
+            assert(std::any_of(received->session_id.begin(), received->session_id.end(),
+                [](std::byte value) { return value != std::byte{0}; }));
+        } else {
+            assert(received->session_id == start.session_id);
+        }
+    }
+    void verify_context(const OwnershipFixture& fixture) const {
+        const auto contexts = fixture.plane.exam_client_states();
+        assert(contexts.size() == 1);
+        assert(contexts.front().client_id == fixture.record().id);
+        assert(contexts.front().package_id == start.package_id);
+        assert(contexts.front().candidate_id == start.candidate_id);
+        assert(!contexts.front().ready);
+        assert(!contexts.front().begun);
+    }
+};
+
+void stop_admission(OwnershipFixture& fixture,
+                    nstu::control::AuthenticatedControlChannel& channel) {
+    assert(fixture.plane.stop_exam(fixture.record().id, &fixture.error));
+    const auto stopped = channel.receive(&fixture.error);
+    assert(stopped && stopped->envelope.type == nstu::protocol::CommandType::exam_stop);
+    assert(fixture.plane.exam_client_states().empty());
+}
+
+void test_superseded_exam_admission(AdmissionRoute route) {
+    OwnershipFixture fixture;
+    AdmissionHooks hooks;
+    fixture.proof(*fixture.a, std::byte{0xa1});
+    const auto registry_id = fixture.record().id;
+    assert(fixture.record().uwf.proves_current_protection());
+    assert(!fixture.plane.exam_active(registry_id));
+    const AdmissionRequest request(fixture.id, route);
+    OwnershipRendezvous admission;
+    admission.park = true;
+    std::atomic<bool> before_send{false};
+    nstu::server::set_exam_admission_hook_for_testing(
+        [&](nstu::server::ExamAdmissionTestPoint point, nstu::net::ConnectionId id,
+            std::uint64_t target, std::function<void()> close) {
+            assert(target == registry_id);
+            if (point == nstu::server::ExamAdmissionTestPoint::selected) {
+                admission.arrive(true, id, std::move(close));
+            } else {
+                before_send.store(true);
+            }
+        });
+    bool started = false;
+    std::string admission_error;
+    std::thread applicant([&] {
+        started = request.send(fixture, &admission_error);
+        admission.arrive(false, 0);
+    });
+    admission.wait_for_entry();
+
+    OwnershipRendezvous publication;
+    publication.park = true;
+    nstu::server::set_auth_published_hook_for_testing(
+        [&](nstu::net::ConnectionId id) { publication.arrive(true, id); });
+    nstu::server::set_auth_publication_hook_for_testing(
+        [&](bool before, nstu::net::ConnectionId id, std::function<void()>) {
+            if (!before) publication.arrive(false, id);
+        });
+    const auto disconnects = nstu::server::completed_disconnect_count_for_testing();
+    fixture.b = connect_channel(fixture.plane, fixture.id, 9, fixture.key, &fixture.error);
+    assert(fixture.b);
+    publication.wait_for_entry();
+    assert(publication.connection != admission.connection);
+    assert(!fixture.record().uwf.proves_current_protection());
+    assert(nstu::server::completed_disconnect_count_for_testing() == disconnects);
+
+    admission.release_and_wait();
+    applicant.join();
+    if (started) {
+        // B cannot disconnect A until released: this is a real received start
+        // on an open superseded transport, before the security assertion fails.
+        request.receive(*fixture.a);
+        std::fprintf(stderr, "AUTH-ADMISSION stale route=%u received actual A exam_start before old disconnect\n",
+                     static_cast<unsigned>(route));
+    }
+    publication.release_and_wait();
+    nstu::server::set_auth_publication_hook_for_testing({});
+    nstu::server::set_auth_published_hook_for_testing({});
+    nstu::server::set_exam_admission_hook_for_testing({});
+    assert(!started);
+    assert(!before_send.load());
+    assert(!fixture.plane.exam_active(registry_id));
+
+    fixture.status(*fixture.b, "ADMISSION-OWNER-B");
+    fixture.proof(*fixture.b, std::byte{0xb2});
+    assert(fixture.record().uwf.proves_current_protection());
+    assert(request.send(fixture, &fixture.error));
+    request.receive(*fixture.b);
+    request.verify_context(fixture);
+    assert(fixture.plane.exam_active(registry_id));
+    stop_admission(fixture, *fixture.b);
+    std::fprintf(stderr, "AUTH-ADMISSION stale route=%u denied; fresh B start-stop passed\n",
+                 static_cast<unsigned>(route));
+}
+
+void test_fleet_retirement_during_exam_admission() {
+    OwnershipFixture fixture;
+    AdmissionHooks hooks;
+    fixture.proof(*fixture.a, std::byte{0xa1});
+    const auto registry_id = fixture.record().id;
+    assert(fixture.record().uwf.proves_current_protection());
+    assert(!fixture.plane.exam_active(registry_id));
+    const AdmissionRequest request(fixture.id, AdmissionRoute::direct);
+    OwnershipRendezvous admission;
+    admission.park = true;
+    std::atomic<bool> before_send{false};
+    nstu::server::set_exam_admission_hook_for_testing(
+        [&](nstu::server::ExamAdmissionTestPoint point, nstu::net::ConnectionId id,
+            std::uint64_t target, std::function<void()> close) {
+            assert(target == registry_id);
+            if (point == nstu::server::ExamAdmissionTestPoint::selected) {
+                admission.arrive(true, id, std::move(close));
+            } else {
+                before_send.store(true);
+            }
+        });
+    bool started = false;
+    std::string admission_error;
+    std::thread applicant([&] {
+        started = request.send(fixture, &admission_error);
+        admission.arrive(false, 0);
+    });
+    admission.wait_for_entry();
+    assert(fixture.plane.configure_uwf_fleet(registry_id, true, false, &fixture.error));
+    const auto configure_frame = fixture.a->receive(&fixture.error);
+    assert(configure_frame && configure_frame->envelope.type ==
+        nstu::protocol::CommandType::uwf_fleet_configure);
+    const auto configure = nstu::control::decode_uwf_fleet_configure_request(configure_frame->payload);
+    assert(configure && configure->operation_id != 0);
+    assert(fixture.record().uwf.operation_id == configure->operation_id);
+    assert(fixture.record().uwf.phase == nstu::control::UwfFleetPhase::requested);
+    assert(!fixture.record().uwf.proves_current_protection());
+    admission.release_and_wait();
+    applicant.join();
+    nstu::server::set_exam_admission_hook_for_testing({});
+    if (started) {
+        request.receive(*fixture.a);
+        std::fprintf(stderr, "AUTH-ADMISSION retired operation=%llu received actual current A exam_start\n",
+                     static_cast<unsigned long long>(configure->operation_id));
+    }
+#if NSTU_DEV_UNPROTECTED_EXAM
+    // DEV intentionally bypasses readiness for the current authenticated owner.
+    assert(started);
+    assert(before_send.load());
+    stop_admission(fixture, *fixture.a);
+#else
+    assert(!started);
+    assert(!before_send.load());
+    assert(!fixture.plane.exam_active(registry_id));
+#endif
+    auto proof = verified_protection();
+    proof.operation_id = configure->operation_id;
+    proof.boot_id.fill(std::byte{0xa1});
+    proof.detail = "fresh current operation wire probe";
+    const auto proof_payload = nstu::control::encode_uwf_fleet_status_report(proof);
+    assert(!proof_payload.empty());
+    const auto decoded_proof = nstu::control::decode_uwf_fleet_status_report(proof_payload);
+    assert(decoded_proof && decoded_proof->operation_id == configure->operation_id);
+    assert(decoded_proof->boot_id == proof.boot_id);
+    fixture.send_and_wait(*fixture.a, nstu::protocol::CommandType::uwf_fleet_status,
+                         proof_payload);
+    assert(fixture.record().uwf.proves_current_protection());
+    assert(fixture.record().uwf.operation_id == configure->operation_id);
+    assert(request.send(fixture, &fixture.error));
+    request.receive(*fixture.a);
+    request.verify_context(fixture);
+    stop_admission(fixture, *fixture.a);
+    std::fprintf(stderr, "AUTH-ADMISSION retired proof policy checked; fresh operation wire proof/start-stop passed\n");
+}
+
+void test_exam_admission_send_failure_rolls_back_context() {
+    OwnershipFixture fixture;
+    AdmissionHooks hooks;
+    fixture.proof(*fixture.a, std::byte{0xa1});
+    const auto registry_id = fixture.record().id;
+    assert(fixture.record().uwf.proves_current_protection());
+    assert(!fixture.plane.exam_active(registry_id));
+    const AdmissionRequest request(fixture.id, AdmissionRoute::direct);
+    bool disconnected_after_insertion = false;
+    const auto disconnects = nstu::server::completed_disconnect_count_for_testing();
+    nstu::server::set_exam_admission_hook_for_testing(
+        [&](nstu::server::ExamAdmissionTestPoint point, nstu::net::ConnectionId,
+            std::uint64_t target, std::function<void()> close) {
+            assert(target == registry_id);
+            if (point != nstu::server::ExamAdmissionTestPoint::before_send) return;
+            assert(close);
+            // Real dispatcher removal reenters states_mutex_ synchronously.
+            // Ownership must be released; the existing context mutex stays held.
+            close();
+            assert(nstu::server::completed_disconnect_count_for_testing() == disconnects + 1);
+            disconnected_after_insertion = true;
+        });
+    assert(!request.send(fixture, &fixture.error));
+    nstu::server::set_exam_admission_hook_for_testing({});
+    assert(disconnected_after_insertion);
+    assert(!fixture.error.empty());
+    assert(!fixture.plane.exam_active(registry_id));
+    assert(fixture.plane.exam_client_states().empty());
+    assert(fixture.record().status == nstu::server::ClientStatus::offline);
+    assert(!fixture.record().uwf.proves_current_protection());
+    std::fprintf(stderr, "AUTH-ADMISSION actual after-insertion dispatcher disconnect completed; failed send rolled back context\n");
+
+    fixture.replace();
+    fixture.proof(*fixture.b, std::byte{0xb2});
+    assert(fixture.record().uwf.proves_current_protection());
+    assert(request.send(fixture, &fixture.error));
+    request.receive(*fixture.b);
+    request.verify_context(fixture);
+    assert(fixture.plane.exam_active(registry_id));
+    stop_admission(fixture, *fixture.b);
+}
+
+void test_exam_admission_regressions() {
+    char selected_buffer[32]{};
+    const auto selected_length = GetEnvironmentVariableA(
+        "NSTU_AUTH_ADMISSION_CASE", selected_buffer,
+        static_cast<DWORD>(sizeof(selected_buffer)));
+    const std::string_view selected =
+        selected_length > 0 && selected_length < sizeof(selected_buffer)
+            ? std::string_view(selected_buffer, selected_length) : std::string_view{};
+    const bool known = selected == "direct" || selected == "raw" || selected == "launch" ||
+                       selected == "fleet" || selected == "rollback";
+    const auto run = [&](std::string_view name) { return !known || selected == name; };
+    if (run("direct")) test_superseded_exam_admission(AdmissionRoute::direct);
+    if (run("raw")) test_superseded_exam_admission(AdmissionRoute::raw);
+    if (run("launch")) test_superseded_exam_admission(AdmissionRoute::launch);
+    if (run("fleet")) test_fleet_retirement_during_exam_admission();
+    if (run("rollback")) test_exam_admission_send_failure_rolls_back_context();
 }
 
 struct DeadlineFixture {
@@ -1075,5 +1357,6 @@ int main() {
     test_wall_expiry_then_rollback_preserves_answers();
     test_fixed_deadline_boundaries_and_wrong_client();
     test_authenticated_ownership_regressions();
+    test_exam_admission_regressions();
     return 0;
 }
