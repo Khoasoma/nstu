@@ -183,10 +183,11 @@ STORAGE-RECOVERY-1C-1 mixed cleanup/path isolation is published as `7ad7960` wit
 fresh supporting review, independent Root gates and all three Windows CI jobs.
 STORAGE-RECOVERY-1C-2 exact ACK retirement is published as `049a11e` with fresh
 supporting review, independent Root gates and all three Windows CI jobs.
+STORAGE-RECOVERY-1C-3A successful removal is published as `8c19cd1` with fresh
+supporting review, independent Root gates and all three Windows CI jobs.
 The active follow-up is
-[STORAGE-RECOVERY-1C-3A](task-plans/storage-recovery-1c-3a.md): successful purge/clear
-after cleaned publication while barrier deletion is blocked. Mixed replacement
-failure/revocation remains a separate 1C-3B unit under
+[STORAGE-RECOVERY-1C-3B](task-plans/storage-recovery-1c-3b.md): mixed replacement
+failure, durable revocation fallback and fresh-instance recovery under
 [storage-recovery-1c.md](task-plans/storage-recovery-1c.md); pristine interrupted
 initialization follows. No telemetry codec, answer channel or service
 producer/sequence change is allowed.

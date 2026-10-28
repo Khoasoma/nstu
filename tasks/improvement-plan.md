@@ -74,6 +74,14 @@ passed. Production code is unchanged. Removal is split into
 [1C-3A success](task-plans/storage-recovery-1c-3a.md) and a following 1C-3B mixed
 replacement-failure/revocation unit before pristine initialization.
 
+STORAGE-RECOVERY-1C-3A is published as `8c19cd1`. Both successful purge/clear cases
+passed after correcting two new expectations to the exact retained-loss contract;
+the initial failure/diagnosis remains recorded and production is unchanged.
+Fresh supporting review, independent Root fast/strict 49/49 with zero warnings
+and all three exact-revision Windows CI jobs passed. The next unit is
+[1C-3B mixed removal failure and revocation recovery](task-plans/storage-recovery-1c-3b.md),
+with first-error preservation specified before coding.
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current
