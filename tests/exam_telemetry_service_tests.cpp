@@ -1311,7 +1311,222 @@ void test_blocked_restart_retries_owned_payload_cleanup() {
     assert(outbox_temp_lock_reported);
 }
 
+namespace {
+
+void assert_pristine_regular_file(const std::filesystem::path& path) {
+    const auto attributes = GetFileAttributesW(path.c_str());
+    assert(attributes != INVALID_FILE_ATTRIBUTES);
+    assert((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0);
+}
+
+std::vector<std::byte> pristine_ciphertext(const std::filesystem::path& path) {
+    assert_pristine_regular_file(path);
+    const auto size = std::filesystem::file_size(path);
+    assert(size > 0 && size <= 4096);
+    std::vector<std::byte> bytes(static_cast<std::size_t>(size));
+    std::ifstream stream(path, std::ios::binary);
+    assert(stream.is_open());
+    stream.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    assert(stream.good());
+    return bytes;
+}
+
+std::vector<std::byte> pristine_checked_payload(
+    const std::filesystem::path& path, std::string_view entropy, std::size_t payload_size) {
+    (void)pristine_ciphertext(path);
+    auto plaintext = nstu::security::load_machine_secret(path.wstring(), entropy_bytes(entropy));
+    assert(plaintext.size() == payload_size + 32);
+    const auto digest = nstu::security::sha256(std::span<const std::byte>(plaintext).first(payload_size));
+    assert(digest);
+    assert(std::equal(digest->begin(), digest->end(),
+                      plaintext.begin() + static_cast<std::ptrdiff_t>(payload_size)));
+    plaintext.resize(payload_size);
+    return plaintext;
+}
+
+void assert_pristine_payload_fields(std::span<const std::byte> payload, bool coordinator) {
+    std::size_t offset = 0;
+    const auto number = [&](std::size_t width) {
+        assert(width <= 8 && offset <= payload.size() && width <= payload.size() - offset);
+        std::uint64_t value = 0;
+        for (std::size_t index = 0; index < width; ++index) {
+            value |= std::to_integer<std::uint64_t>(payload[offset + index]) << (index * 8);
+        }
+        offset += width;
+        return value;
+    };
+    const auto zeros = [&](std::size_t width) {
+        assert(offset <= payload.size() && width <= payload.size() - offset);
+        for (std::size_t index = 0; index < width; ++index) {
+            assert(payload[offset + index] == std::byte{});
+        }
+        offset += width;
+    };
+    assert(number(4) == (coordinator ? 0x544c4d53ULL : 0x544c4d4fULL));
+    assert(number(2) == (coordinator ? 3ULL : 2ULL));
+    assert(number(2) == 0);
+    if (coordinator) {
+        assert(number(4) == 0); // empty package ID
+        zeros(nstu::security::Sha256Digest{}.size());
+        zeros(nstu::security::ClientId{}.size());
+        zeros(nstu::exam::SessionId{}.size());
+        assert(number(4) == 0); // empty candidate ID
+        zeros(nstu::exam::ProducerId{}.size());
+        assert(number(8) == 1);
+        assert(number(4) == 0);
+        assert(number(1) == static_cast<std::uint8_t>(nstu::client::TelemetryLifecycleState::disabled));
+        for (unsigned counter = 0; counter < 4; ++counter) assert(number(8) == 0);
+        assert(number(4) == 0); // revoked identities
+        assert(number(8) == 0); // pending timestamp
+        assert(number(4) == 0); // pending bytes
+    } else {
+        zeros(nstu::exam::SessionId{}.size());
+        assert(number(4) == 0); // aggregate losses
+        assert(number(4) == 0); // batches
+    }
+    assert(offset == payload.size());
+}
+
+std::vector<std::byte> pristine_coordinator_payload(const std::filesystem::path& state) {
+    auto payload = pristine_checked_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1", 157);
+    assert_pristine_payload_fields(payload, true);
+    return payload;
+}
+
+void assert_pristine_outbox(const std::filesystem::path& path) {
+    const auto payload = pristine_checked_payload(path, "NSTU-Exam-Telemetry-Outbox-v1", 32);
+    assert_pristine_payload_fields(payload, false);
+}
+
+void assert_pristine_markers_absent(const std::filesystem::path& path) {
+    assert(!std::filesystem::exists(path.wstring() + L".coord_state.blocked"));
+    assert(!std::filesystem::exists(path.wstring() + L".revoked"));
+    assert(!std::filesystem::exists(path.wstring() + L".expiry"));
+}
+
+void assert_pristine_public_state(Coordinator& coordinator, std::uint64_t now) {
+    assert(coordinator.is_open());
+    assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::disabled);
+    assert(coordinator.context() == nstu::client::TelemetryContextIdentity{});
+    assert(coordinator.active_producer_id() == nstu::exam::ProducerId{});
+    assert(coordinator.generation_count() == 0 && coordinator.next_sequence() == 1);
+    assert(coordinator.outbox_size() == 0);
+    assert(coordinator.dropped_sample_count() == 0 && coordinator.dropped_batch_count() == 0);
+    assert(!coordinator.next_batch_to_send(now));
+}
+
+void run_pristine_interrupted_initialization(const std::string& tag, bool numeric_temporary) {
+    const auto path = temp_outbox_path(tag); // This is the only reset/path-helper call.
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const std::filesystem::path temporary = state.wstring() + L".tmp-123";
+    std::error_code ec;
+    (void)std::filesystem::remove(path.wstring() + L".expiry", ec);
+    assert(!ec);
+    const auto now = test_now_ms();
+    const auto clock = [now] { return now; };
+    std::string error;
+    {
+        Coordinator seed(clock);
+        assert(seed.open(path, &error));
+        assert_pristine_public_state(seed, now);
+        assert(seed.not_authorized_sample_count() == 0);
+        seed.close();
+        assert(!seed.is_open());
+    }
+    const auto original_ciphertext = pristine_ciphertext(state);
+    const auto original_payload = pristine_coordinator_payload(state);
+    assert_pristine_outbox(path);
+    assert_pristine_markers_absent(path);
+    if (numeric_temporary) {
+        std::filesystem::rename(state, temporary, ec);
+        assert(!ec);
+        assert(!std::filesystem::exists(state));
+        assert_pristine_regular_file(temporary);
+        assert(pristine_ciphertext(temporary) == original_ciphertext);
+        assert(pristine_coordinator_payload(temporary) == original_payload);
+    }
+    assert(std::filesystem::remove(path, ec));
+    assert(!ec && !std::filesystem::exists(path));
+    assert_pristine_markers_absent(path);
+    if (!numeric_temporary) {
+        assert(pristine_ciphertext(state) == original_ciphertext);
+        assert(pristine_coordinator_payload(state) == original_payload);
+    }
+    {
+        Coordinator recovered(clock);
+        assert(recovered.open(path, &error));
+        assert(!std::filesystem::exists(temporary));
+        assert_pristine_public_state(recovered, now);
+        assert(recovered.not_authorized_sample_count() == 0);
+        assert_pristine_outbox(path);
+        assert(pristine_coordinator_payload(state) == original_payload);
+        if (!numeric_temporary) assert(pristine_ciphertext(state) == original_ciphertext);
+        assert(recovered.maintain(now, &error));
+        assert_pristine_public_state(recovered, now);
+        assert(pristine_coordinator_payload(state) == original_payload);
+        if (!numeric_temporary) assert(pristine_ciphertext(state) == original_ciphertext);
+        assert_pristine_markers_absent(path);
+        recovered.close();
+        assert(!recovered.is_open());
+    }
+    Coordinator reopened(clock);
+    assert(reopened.open(path, &error));
+    assert_pristine_public_state(reopened, now);
+    assert(pristine_coordinator_payload(state) == original_payload);
+    if (!numeric_temporary) assert(pristine_ciphertext(state) == original_ciphertext);
+    assert_pristine_outbox(path);
+    const std::vector<nstu::exam::TelemetrySample> before_enable{make_sample(91)};
+    assert(!reopened.ingest_samples(before_enable, now, &error));
+    assert_pristine_public_state(reopened, now);
+    assert(reopened.not_authorized_sample_count() == 1);
+    assert_pristine_outbox(path);
+    auto enable = make_enable();
+    enable.server_time_unix_milliseconds = now;
+    assert(reopened.on_server_enable(enable, &error));
+    assert(reopened.context().matches(enable));
+    assert(reopened.lifecycle_state() == nstu::client::TelemetryLifecycleState::enabled);
+    const auto producer = reopened.active_producer_id();
+    assert(producer != nstu::exam::ProducerId{});
+    assert(reopened.generation_count() == 1 && reopened.next_sequence() == 1);
+    assert(reopened.outbox_size() == 0 && !reopened.next_batch_to_send(now));
+    const auto sample = make_sample(92);
+    const std::vector<nstu::exam::TelemetrySample> enabled_samples{sample};
+    assert(reopened.ingest_samples(enabled_samples, now, &error));
+    const auto first = reopened.next_batch_to_send(now);
+    assert(first && first->sequence == 1 && first->producer_id == producer);
+    assert(first->first_enqueued_at_unix_milliseconds == now);
+    assert(reopened.context().matches(*first));
+    assert(first->samples.size() == 1 && reopened.outbox_size() == 1);
+    auto expected = *first;
+    expected.samples = enabled_samples;
+    const auto expected_bytes = nstu::exam::encode_telemetry_batch(expected);
+    assert(!expected_bytes.empty());
+    assert(nstu::exam::encode_telemetry_batch(*first) == expected_bytes);
+    assert(reopened.next_sequence() == 2);
+    assert(reopened.on_server_enable(enable, &error));
+    assert(reopened.active_producer_id() == producer);
+    assert(reopened.generation_count() == 1 && reopened.next_sequence() == 2);
+    assert(reopened.outbox_size() == 1);
+    assert_pristine_markers_absent(path);
+    reopened.close();
+    assert(!reopened.is_open());
+}
+
+void test_pristine_final_state_without_outbox() {
+    run_pristine_interrupted_initialization("pristine_final_only", false);
+    std::cout << "Pristine final-state/missing-outbox recovery and first enabled sequence one passed.\n";
+}
+
+void test_pristine_numeric_state_temporary_without_final_stores() {
+    run_pristine_interrupted_initialization("pristine_numeric_only", true);
+    std::cout << "Pristine numeric-state-temp/no-final-stores recovery and first enabled sequence one passed.\n";
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "pristine-final") { test_pristine_final_state_without_outbox(); return 0; }
+    if (argc == 2 && std::string_view(argv[1]) == "pristine-temporary") { test_pristine_numeric_state_temporary_without_final_stores(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "storage-recovery-1a") { test_blocked_restart_retries_owned_payload_cleanup(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "review-scrub-both") { test_blocked_restart_scrubs_both_durable_payload_stores(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "review-expiry") { test_expired_regular_batch_cannot_return_after_fresh_restart(); return 0; }
@@ -1431,6 +1646,8 @@ int main(int argc, char** argv) {
     test_expired_intent_state_failure_blocks_fresh_restart_after_rollback();
     test_expired_intent_marker_cleanup_keeps_identity_revoked();
     test_pending_expiry_is_observed_before_a_dirty_state_write();
+    test_pristine_final_state_without_outbox();
+    test_pristine_numeric_state_temporary_without_final_stores();
     std::cout << "All exam_telemetry_service_tests passed successfully.\n";
     return 0;
 }
