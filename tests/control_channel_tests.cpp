@@ -7,14 +7,18 @@
 #include <windows.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <cassert>
+#include <chrono>
 #include <filesystem>
 #include <future>
+#include <iostream>
 #include <limits>
 #include <span>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -500,11 +504,234 @@ void test_send_deadlines() {
     }
 }
 
+struct NativeDeadlineSetupEvidence {
+    std::string failed_stage;
+    std::string wrapper_error;
+    int first_native_error{};
+    int pressure_error{};
+    int restore_error{};
+    int listener_rcvbuf{};
+    int sender_sndbuf{};
+    int accepted_rcvbuf{};
+    std::size_t accepted_bytes{};
+    std::size_t attempts{};
+    long long setup_start_ms{-1};
+    long long stall_ms{-1};
+    long long elapsed_ms{};
+    bool sender_nonblocking{};
+    bool actual_would_block{};
+    bool restore_fionbio_zero_ok{};
+    bool owners_closed{};
+};
+
+// Microsoft Winsock documents partial/nonblocking send and buffer readback:
+// https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-send
+// https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-getsockopt
+// This parked-peer profile proves setup pressure only, not target-frame progress.
+void test_native_deadline_setup_profile() {
+    nstu::security::Sha256Digest key{};
+    key.fill(std::byte{0x31});
+    constexpr std::size_t user_bytes = nstu::protocol::kMaxCommandPayload -
+        sizeof(std::uint64_t) - nstu::security::kControlAuthTagBytes;
+    constexpr std::uint64_t sequence = 0x0102030405060708ULL;
+    constexpr std::uint64_t request_id = 0x123456789abcdef0ULL;
+    const std::vector<std::byte> payload(user_bytes, std::byte{0x4d});
+    const nstu::protocol::CommandEnvelope envelope{
+        .version = nstu::protocol::kCommandVersion,
+        .type = nstu::protocol::CommandType::lock,
+        .payload_bytes = static_cast<std::uint32_t>(user_bytes),
+        .request_id = request_id,
+    };
+    const auto wire = nstu::control::encode_authenticated_command(key, envelope, sequence, payload);
+    assert(user_bytes == 65512U);
+    assert(wire.size() == 4U + nstu::protocol::kCommandHeaderBytes + nstu::protocol::kMaxCommandPayload);
+    assert(wire.size() == 65560U);
+    std::uint32_t prefix{};
+    for (unsigned index = 0; index != 4U; ++index) {
+        prefix |= static_cast<std::uint32_t>(std::to_integer<unsigned>(wire[index])) << (8U * index);
+    }
+    assert(prefix == wire.size() - 4U);
+    nstu::protocol::TcpFrameParser parser;
+    std::vector<nstu::protocol::TcpFrame> frames;
+    assert(parser.feed(wire, frames));
+    assert(frames.size() == 1U);
+    assert(frames.front().envelope.payload_bytes == nstu::protocol::kMaxCommandPayload);
+    std::string decode_error;
+    const auto decoded = nstu::control::decode_authenticated_command(key, frames.front(), &decode_error);
+    assert(decoded.has_value());
+    assert(decoded->envelope.version == envelope.version);
+    assert(decoded->envelope.type == envelope.type);
+    assert(decoded->envelope.payload_bytes == envelope.payload_bytes);
+    assert(decoded->envelope.request_id == request_id);
+    assert(decoded->sequence == sequence);
+    assert(decoded->payload == payload);
+
+    using Clock = std::chrono::steady_clock;
+    const auto fixture_start = Clock::now();
+    const auto startup_deadline = fixture_start + std::chrono::seconds(5);
+    const auto overall_deadline = fixture_start + std::chrono::seconds(15);
+    NativeDeadlineSetupEvidence evidence;
+    nstu::net::TcpSocket listener;
+    nstu::net::TcpSocket sender;
+    nstu::net::TcpSocket accepted;
+    auto elapsed = [&]() {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            Clock::now() - fixture_start).count());
+    };
+    auto fail = [&](std::string stage, int native_error = 0, std::string wrapper_error = {}) {
+        if (evidence.failed_stage.empty()) {
+            evidence.failed_stage = std::move(stage);
+            evidence.first_native_error = native_error;
+            evidence.wrapper_error = std::move(wrapper_error);
+        }
+        return false;
+    };
+    auto remaining_startup_ms = [&]() -> std::uint32_t {
+        const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::min(startup_deadline, overall_deadline) - Clock::now()).count();
+        return remaining > 0 ? static_cast<std::uint32_t>(remaining) : 0U;
+    };
+    auto native_handle = [](const nstu::net::TcpSocket& socket) {
+        return static_cast<SOCKET>(socket.native_handle());
+    };
+    auto profile = [&](nstu::net::TcpSocket& socket, int option, int& readback, const char* stage) {
+        constexpr int requested = 4096;
+        if (::setsockopt(native_handle(socket), SOL_SOCKET, option,
+            reinterpret_cast<const char*>(&requested), static_cast<int>(sizeof(requested))) == SOCKET_ERROR) {
+            const int error = ::WSAGetLastError();
+            return fail(std::string(stage) + " setsockopt", error);
+        }
+        int bytes = static_cast<int>(sizeof(readback));
+        if (::getsockopt(native_handle(socket), SOL_SOCKET, option,
+            reinterpret_cast<char*>(&readback), &bytes) == SOCKET_ERROR) {
+            const int error = ::WSAGetLastError();
+            return fail(std::string(stage) + " getsockopt", error);
+        }
+        return bytes == static_cast<int>(sizeof(readback)) && readback > 0
+            ? true : fail(std::string(stage) + " invalid readback");
+    };
+    auto mode = [&](nstu::net::TcpSocket& socket, u_long value, const char* stage, bool restoring = false) {
+        if (::ioctlsocket(native_handle(socket), FIONBIO, &value) == SOCKET_ERROR) {
+            const int error = ::WSAGetLastError();
+            if (restoring) evidence.restore_error = error;
+            return fail(stage, error);
+        }
+        if (restoring) evidence.restore_fionbio_zero_ok = true;
+        return true;
+    };
+    bool fixture_ok = false;
+    do {
+        std::string error;
+        if (!listener.listen(0, 4, &error)) { fail("listener listen wrapper", 0, error); break; }
+        if (!profile(listener, SO_RCVBUF, evidence.listener_rcvbuf, "listener") ||
+            !mode(listener, 1UL, "listener FIONBIO 1")) break;
+        error.clear();
+        const auto port = listener.local_port(&error);
+        if (port == 0) { fail("listener local_port wrapper", 0, error); break; }
+        auto timeout = remaining_startup_ms();
+        if (timeout == 0U) { fail("startup budget before connect"); break; }
+        error.clear();
+        if (!sender.connect_with_timeout("127.0.0.1", port, timeout, &error)) {
+            fail("sender connect_with_timeout wrapper", 0, error); break;
+        }
+        if (!profile(sender, SO_SNDBUF, evidence.sender_sndbuf, "sender")) break;
+        timeout = remaining_startup_ms();
+        if (timeout == 0U) { fail("startup budget before readiness"); break; }
+        error.clear();
+        if (!listener.wait_readable(timeout, &error)) { fail("listener wait_readable wrapper", 0, error); break; }
+        const SOCKET accepted_native = ::accept(native_handle(listener), nullptr, nullptr);
+        if (accepted_native == INVALID_SOCKET) {
+            const int native_error = ::WSAGetLastError();
+            fail("native accept", native_error); break;
+        }
+        accepted = nstu::net::TcpSocket(static_cast<std::uintptr_t>(accepted_native));
+        if (!profile(accepted, SO_RCVBUF, evidence.accepted_rcvbuf, "accepted")) break;
+        sockaddr_in peer{};
+        int peer_bytes = static_cast<int>(sizeof(peer));
+        if (::getpeername(native_handle(accepted), reinterpret_cast<sockaddr*>(&peer), &peer_bytes) == SOCKET_ERROR) {
+            const int native_error = ::WSAGetLastError();
+            fail("accepted getpeername", native_error); break;
+        }
+        error.clear();
+        const auto sender_port = sender.local_port(&error);
+        if (sender_port == 0) { fail("sender local_port wrapper", 0, error); break; }
+        if (peer_bytes != static_cast<int>(sizeof(peer)) || peer.sin_family != AF_INET ||
+            ::ntohl(peer.sin_addr.s_addr) != 0x7f000001UL || ::ntohs(peer.sin_port) != sender_port) {
+            fail("accepted peer identity"); break;
+        }
+        if (Clock::now() >= startup_deadline || Clock::now() >= overall_deadline) {
+            fail("startup absolute budget"); break;
+        }
+        if (!mode(sender, 1UL, "sender FIONBIO 1")) break;
+        evidence.sender_nonblocking = true;
+        const auto setup_start = Clock::now();
+        if (setup_start >= std::min(startup_deadline, overall_deadline)) {
+            fail("startup budget at setup transition"); break;
+        }
+        evidence.setup_start_ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            setup_start - fixture_start).count());
+        const auto setup_deadline = setup_start + std::chrono::seconds(5);
+        std::array<std::byte, 16384> setup_buffer{};
+        setup_buffer.fill(std::byte{0x7b});
+        constexpr std::size_t byte_cap = 4U * 1024U * 1024U;
+        while (true) {
+            if (Clock::now() >= std::min(setup_deadline, overall_deadline)) { fail("pressure absolute budget"); break; }
+            if (evidence.accepted_bytes >= byte_cap || evidence.attempts >= 4096U) {
+                fail("pressure cap without WSAEWOULDBLOCK"); break;
+            }
+            const int requested = static_cast<int>(std::min(setup_buffer.size(), byte_cap - evidence.accepted_bytes));
+            ++evidence.attempts;
+            const int sent = ::send(native_handle(sender), reinterpret_cast<const char*>(setup_buffer.data()), requested, 0);
+            if (sent == SOCKET_ERROR) {
+                const int native_error = ::WSAGetLastError();
+                const auto pressure_observed = Clock::now();
+                evidence.pressure_error = native_error;
+                if (native_error == WSAEWOULDBLOCK) {
+                    evidence.actual_would_block = true;
+                    evidence.stall_ms = static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                        pressure_observed - fixture_start).count());
+                    if (pressure_observed >= std::min(setup_deadline, overall_deadline)) {
+                        fail("pressure observation outside absolute budget");
+                    }
+                    if (evidence.accepted_bytes == 0U) fail("pressure stalled before positive prefix");
+                } else { fail("pressure send", native_error); }
+                break;
+            }
+            if (sent <= 0 || sent > requested) { fail("pressure invalid send count"); break; }
+            evidence.accepted_bytes += static_cast<std::size_t>(sent);
+        }
+        fixture_ok = evidence.failed_stage.empty() && evidence.actual_would_block && evidence.accepted_bytes > 0U;
+    } while (false);
+    if (evidence.sender_nonblocking && sender.is_open()) mode(sender, 0UL, "sender FIONBIO 0 restore", true);
+    accepted.close();
+    sender.close();
+    listener.close();
+    evidence.owners_closed = !accepted.is_open() && !sender.is_open() && !listener.is_open();
+    nstu::security::secure_zero(key);
+    evidence.elapsed_ms = elapsed();
+    if (Clock::now() >= overall_deadline) fail("overall fixture absolute budget");
+    std::cout << "NATIVE-DEADLINE-SETUP wire=" << wire.size() << " requested-buf=4096"
+              << " listener-rcvbuf=" << evidence.listener_rcvbuf << " sender-sndbuf=" << evidence.sender_sndbuf
+              << " accepted-rcvbuf=" << evidence.accepted_rcvbuf << " accepted-prefix=" << evidence.accepted_bytes
+              << " attempts=" << evidence.attempts << " setup-start-ms=" << evidence.setup_start_ms
+              << " stall-ms=" << evidence.stall_ms << " elapsed-ms=" << evidence.elapsed_ms
+              << " pressure-error=" << evidence.pressure_error << " restore-error=" << evidence.restore_error
+              << " restored=" << evidence.restore_fionbio_zero_ok << " owners-closed=" << evidence.owners_closed
+              << " failed-stage=" << evidence.failed_stage << " first-native-error=" << evidence.first_native_error
+              << " wrapper-error=" << evidence.wrapper_error << std::endl;
+    assert(fixture_ok && evidence.failed_stage.empty());
+    assert(evidence.actual_would_block && evidence.accepted_bytes > 0U);
+    assert(evidence.pressure_error == WSAEWOULDBLOCK);
+    assert(evidence.restore_fionbio_zero_ok && evidence.restore_error == 0);
+    assert(evidence.owners_closed && evidence.elapsed_ms < 15000);
+}
+
 } // namespace
 
 int main() {
     nstu::net::WinsockRuntime winsock;
     assert(winsock.ready());
+    test_native_deadline_setup_profile();
     test_deadline_mode_restore_failure();
     test_scripted_deadline_success_and_failures();
     test_deadline_wait_duration_bounds();
