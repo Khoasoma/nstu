@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
+#include <cstdlib>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -139,6 +141,245 @@ nstu::control::UwfFleetStatusReport verified_protection() {
     proof.probe.system_volume_current_protected = true;
     proof.boot_id.fill(std::byte{0xb1});
     return proof;
+}
+
+// Each barrier observes one real callback. Every park has a bounded release and
+// completion rendezvous before the plane or captured test state is destroyed.
+struct OwnershipRendezvous {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool park = false;
+    bool entered = false;
+    bool released = false;
+    bool completed = false;
+    nstu::net::ConnectionId connection = 0;
+    std::function<void()> close_server_socket;
+
+    void arrive(bool before, nstu::net::ConnectionId id,
+                std::function<void()> close = {}) {
+        std::unique_lock lock(mutex);
+        if (before) {
+            connection = id;
+            close_server_socket = std::move(close);
+            entered = true;
+            condition.notify_all();
+            if (park) {
+                assert(condition.wait_for(lock, std::chrono::seconds(5),
+                                          [&] { return released; }));
+            }
+        } else {
+            completed = true;
+            condition.notify_all();
+        }
+    }
+    void wait_for_entry() {
+        std::unique_lock lock(mutex);
+        assert(condition.wait_for(lock, std::chrono::seconds(5),
+                                  [&] { return entered; }));
+    }
+    void wait_for_completion() {
+        std::unique_lock lock(mutex);
+        assert(condition.wait_for(lock, std::chrono::seconds(5),
+                                  [&] { return completed; }));
+    }
+    void release_and_wait() {
+        {
+            std::scoped_lock lock(mutex);
+            released = true;
+        }
+        condition.notify_all();
+        wait_for_completion();
+    }
+    void watch(nstu::protocol::CommandType type, std::uint64_t request) {
+        nstu::server::set_registry_mutation_hook_for_testing(
+            [this, type, request](bool before, nstu::net::ConnectionId id,
+                                 nstu::protocol::CommandType actual_type,
+                                 std::uint64_t actual_request) {
+                if (actual_type == type && actual_request == request) {
+                    arrive(before, id);
+                }
+            });
+    }
+};
+
+struct OwnershipFixture {
+    nstu::security::ClientId id = client_id();
+    std::vector<std::byte> key = client_key();
+    nstu::security::KeyStore store;
+    nstu::server::ClientRegistry registry;
+    nstu::server::ServerControlPlane plane{registry, store};
+    std::optional<nstu::control::AuthenticatedControlChannel> a;
+    std::optional<nstu::control::AuthenticatedControlChannel> b;
+    std::function<void()> close_b_server_socket;
+    std::string error;
+    std::uint64_t request = 1000;
+
+    OwnershipFixture() {
+        assert(store.enroll(id, 9, key, &error));
+        nstu::server::ServerControlPlaneConfig config;
+        config.port = 0;
+        config.maximum_clients = 16;
+        assert(plane.start(std::move(config), &error));
+        a = connect_channel(plane, id, 9, key, &error);
+        assert(a);
+        status(*a, "OWNER-A");
+    }
+    ~OwnershipFixture() {
+        nstu::server::set_registry_mutation_hook_for_testing({});
+        nstu::server::set_auth_publication_hook_for_testing({});
+        nstu::server::set_disconnect_hold_for_testing(false);
+        (void)nstu::server::release_held_disconnects_for_testing();
+        if (b) b->close();
+        if (a) a->close();
+        plane.stop();
+        nstu::security::secure_zero(key);
+    }
+    nstu::server::ClientRecord record() const {
+        const auto records = registry.snapshot();
+        assert(records.size() == 1);
+        return records.front();
+    }
+    void replace() {
+        OwnershipRendezvous publication;
+        nstu::server::set_auth_publication_hook_for_testing(
+            [&](bool before, nstu::net::ConnectionId connection,
+                std::function<void()> close) {
+                publication.arrive(before, connection, std::move(close));
+            });
+        b = connect_channel(plane, id, 9, key, &error);
+        assert(b);
+        publication.wait_for_completion();
+        close_b_server_socket = std::move(publication.close_server_socket);
+        nstu::server::set_auth_publication_hook_for_testing({});
+        status(*b, "OWNER-B");
+    }
+    void send_and_wait(nstu::control::AuthenticatedControlChannel& channel,
+                       nstu::protocol::CommandType type,
+                       std::span<const std::byte> payload) {
+        OwnershipRendezvous completion;
+        completion.watch(type, ++request);
+        assert(channel.send(type, request, payload, &error));
+        completion.wait_for_completion();
+        nstu::server::set_registry_mutation_hook_for_testing({});
+    }
+    void status(nstu::control::AuthenticatedControlChannel& channel,
+                const std::string& hostname) {
+        nstu::control::ClientStatusReport report;
+        report.hostname = hostname;
+        send_and_wait(channel, nstu::protocol::CommandType::status_report,
+                      nstu::control::encode_status_report(report));
+    }
+    void proof(nstu::control::AuthenticatedControlChannel& channel,
+               std::byte boot) {
+        auto report = verified_protection();
+        report.boot_id.fill(boot);
+        report.detail = "current carrier wire probe";
+        send_and_wait(channel, nstu::protocol::CommandType::uwf_fleet_status,
+                      nstu::control::encode_uwf_fleet_status_report(report));
+    }
+};
+
+void test_stale_authenticated_registry_callback(
+    nstu::protocol::CommandType type) {
+    OwnershipFixture fixture;
+    fixture.proof(*fixture.a, std::byte{0xa1});
+    assert(fixture.record().uwf.proves_current_protection());
+    std::vector<std::byte> payload;
+    if (type == nstu::protocol::CommandType::uwf_fleet_status) {
+        auto report = verified_protection();
+        report.boot_id.fill(std::byte{0xa1});
+        report.detail = "parked old carrier wire probe";
+        payload = nstu::control::encode_uwf_fleet_status_report(report);
+    } else if (type == nstu::protocol::CommandType::status_report) {
+        nstu::control::ClientStatusReport report;
+        report.hostname = "STALE-OWNER-A";
+        payload = nstu::control::encode_status_report(report);
+    }
+    OwnershipRendezvous stale;
+    stale.park = true;
+    stale.watch(type, ++fixture.request);
+    assert(fixture.a->send(type, fixture.request, payload, &fixture.error));
+    stale.wait_for_entry();
+    nstu::server::set_disconnect_hold_for_testing(true);
+    fixture.replace();
+    const auto before = fixture.record();
+    assert(!before.uwf.proves_current_protection());
+    assert(before.hostname == "OWNER-B");
+    assert(nstu::server::held_disconnect_count_for_testing() == 1);
+    stale.release_and_wait();
+    const auto after = fixture.record();
+    assert(!after.uwf.proves_current_protection());
+    assert(after.uwf.observed_boot_id == before.uwf.observed_boot_id);
+    assert(after.hostname == before.hostname);
+    assert(after.last_seen == before.last_seen);
+
+    // Current B wire updates still work, and late A cleanup preserves B proof.
+    fixture.proof(*fixture.b, std::byte{0xb2});
+    fixture.status(*fixture.b, "OWNER-B-CURRENT");
+    assert(fixture.record().uwf.proves_current_protection());
+    const auto current = fixture.record();
+    fixture.send_and_wait(*fixture.b, nstu::protocol::CommandType::heartbeat, {});
+    assert(fixture.record().last_seen >= current.last_seen);
+    nstu::server::set_disconnect_hold_for_testing(false);
+    assert(nstu::server::release_held_disconnects_for_testing() == 1);
+    assert(fixture.record().hostname == "OWNER-B-CURRENT");
+    assert(fixture.record().status == nstu::server::ClientStatus::online);
+    assert(fixture.record().uwf.proves_current_protection());
+    // Server close runs removal synchronously while B's peer is still open.
+    // Closing the peer first could start an independent disconnect callback.
+    fixture.close_b_server_socket();
+    fixture.b->close();
+    assert(fixture.record().status == nstu::server::ClientStatus::offline);
+    assert(!fixture.record().uwf.proves_current_protection());
+}
+
+void test_removed_authenticated_state_cannot_publish() {
+    OwnershipFixture fixture;
+    fixture.proof(*fixture.a, std::byte{0xa1});
+    const auto before = fixture.record();
+    OwnershipRendezvous publication;
+    publication.park = true;
+    nstu::server::set_auth_publication_hook_for_testing(
+        [&](bool entering, nstu::net::ConnectionId id,
+            std::function<void()> close) {
+            publication.arrive(entering, id, std::move(close));
+        });
+    fixture.b = connect_channel(fixture.plane, fixture.id, 9, fixture.key,
+                                &fixture.error);
+    assert(fixture.b);
+    publication.wait_for_entry();
+    const auto disconnects = nstu::server::completed_disconnect_count_for_testing();
+    fixture.b->close();
+    // There is no posted receive while auth on_bytes is parked. Close its real
+    // server socket too, invoking the actual dispatcher disconnect/removal.
+    publication.close_server_socket();
+    assert(nstu::server::completed_disconnect_count_for_testing() == disconnects + 1);
+    publication.release_and_wait();
+    nstu::server::set_auth_publication_hook_for_testing({});
+    const auto after = fixture.record();
+    assert(after.hostname == before.hostname);
+    assert(after.last_seen == before.last_seen);
+    assert(after.uwf.proves_current_protection());
+    assert(after.uwf.verified_boot_id == before.uwf.verified_boot_id);
+    assert(fixture.plane.authenticated_client_count() == 1);
+    fixture.status(*fixture.a, "OWNER-A-PRESERVED");
+    assert(fixture.record().uwf.proves_current_protection());
+}
+
+void test_authenticated_ownership_regressions() {
+    // Selection permits separate real RED receipts; the ordinary gate executes
+    // every new case as well as every original assertion in this binary.
+    const auto* selected = std::getenv("NSTU_AUTH_OWNERSHIP_CASE");
+    const auto run = [&](const char* name) {
+        return selected == nullptr || std::string_view(selected) == name;
+    };
+    if (run("fleet")) test_stale_authenticated_registry_callback(
+        nstu::protocol::CommandType::uwf_fleet_status);
+    if (run("status")) test_stale_authenticated_registry_callback(
+        nstu::protocol::CommandType::status_report);
+    if (run("heartbeat")) test_stale_authenticated_registry_callback(
+        nstu::protocol::CommandType::heartbeat);
+    if (run("removed")) test_removed_authenticated_state_cannot_publish();
 }
 
 struct DeadlineFixture {
@@ -824,5 +1065,6 @@ int main() {
     std::filesystem::remove(lock_path, cleanup_error);
     test_wall_expiry_then_rollback_preserves_answers();
     test_fixed_deadline_boundaries_and_wrong_client();
+    test_authenticated_ownership_regressions();
     return 0;
 }

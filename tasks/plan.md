@@ -200,6 +200,15 @@ status/online readiness barrier before test protection-proof setup, preserving
 all existing assertions and production policy. Pristine initialization is prepared
 and waits for this observed CI blocker to be repaired and exactly qualified.
 
+CI-EXAM-AUTH-1 is published as `bc21bf8` with independent review/Root gates and
+all three exact-revision Windows CI jobs passed; the original failed run remains
+preserved. A separate source review confirmed a P1 current-connection proof/
+admission ownership defect. The active regression-first plan is
+[AUTH-ADMISSION-1A](task-plans/auth-admission-1a.md): coherent registry/proof
+ownership, followed by a separately frozen 1B admission/context revalidation
+unit. Three adversarial proposal cycles are complete. No runtime exploit or
+physical UWF/VM result is claimed; pristine initialization stays prepared.
+
 `PRODUCT_ROADMAP_NSTU.md` is a private local source and must never be staged,
 committed or uploaded. Derived requirements may be recorded in scoped plans.
 Green CI alone does not complete the unfinished server durability/ACK path or

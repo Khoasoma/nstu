@@ -79,6 +79,65 @@ std::mutex g_disconnect_hold_mutex;
 bool g_disconnect_hold = false;
 std::vector<std::function<void()>> g_held_disconnects;
 std::atomic<std::uint64_t> g_completed_disconnects{0};
+
+// One-shot test rendezvous around registry writers and auth publication. The
+// callbacks run without the ownership mutex; production has no such seams.
+std::mutex g_ownership_hook_mutex;
+using RegistryMutationHook = std::function<void(
+    bool, net::ConnectionId, protocol::CommandType, std::uint64_t)>;
+using AuthPublicationHook = std::function<void(
+    bool, net::ConnectionId, std::function<void()>)>;
+RegistryMutationHook g_registry_mutation_hook;
+AuthPublicationHook g_auth_publication_hook;
+
+struct RegistryMutationRendezvous {
+    RegistryMutationHook hook;
+    net::ConnectionId connection;
+    protocol::CommandType type;
+    std::uint64_t request;
+
+    RegistryMutationRendezvous(net::ConnectionId id,
+                               const control::AuthenticatedCommand& command)
+        : connection(id), type(command.envelope.type),
+          request(command.envelope.request_id) {
+        switch (type) {
+        case protocol::CommandType::heartbeat:
+        case protocol::CommandType::uwf_report:
+        case protocol::CommandType::uwf_fleet_status:
+        case protocol::CommandType::freeze_report:
+        case protocol::CommandType::status_report:
+        case protocol::CommandType::hello:
+        case protocol::CommandType::snapshot_frame:
+            {
+                std::scoped_lock lock(g_ownership_hook_mutex);
+                hook = g_registry_mutation_hook;
+            }
+            if (hook) hook(true, connection, type, request);
+            break;
+        default:
+            break;
+        }
+    }
+    ~RegistryMutationRendezvous() {
+        if (hook) hook(false, connection, type, request);
+    }
+};
+
+struct AuthPublicationRendezvous {
+    AuthPublicationHook hook;
+    net::ConnectionId connection;
+    AuthPublicationRendezvous(net::ConnectionId id, std::function<void()> close)
+        : connection(id) {
+        {
+            std::scoped_lock lock(g_ownership_hook_mutex);
+            hook = g_auth_publication_hook;
+        }
+        if (hook) hook(true, connection, std::move(close));
+    }
+    ~AuthPublicationRendezvous() {
+        if (hook) hook(false, connection, {});
+    }
+};
 #endif
 
 inline std::uint64_t current_server_time_ms() {
@@ -782,8 +841,16 @@ public:
         // pins the boot identity the request is issued against, which is what a
         // later "protected" report is checked against.
         const auto operation_id = next_uwf_operation_id_.fetch_add(1);
-        if (!registry_.begin_uwf_fleet_operation(client_id, operation_id,
-                                                 restart_requested)) {
+        bool recorded = false;
+        {
+            // Serialize proof retirement with carrier replacement and reports.
+            // An offline known client still records an operation before the
+            // existing send fails; no ownership lock may extend into transport.
+            std::scoped_lock ownership_lock(states_mutex_);
+            recorded = registry_.begin_uwf_fleet_operation(
+                client_id, operation_id, restart_requested);
+        }
+        if (!recorded) {
             set_error(error, "client is not known to the registry");
             return false;
         }
@@ -1065,6 +1132,28 @@ public:
     }
 
 private:
+    // Caller holds state.mutex before taking the short ownership lock. Never
+    // acquire a connection/context mutex, send, disconnect or persist inside it.
+    bool is_live_state_locked(const ConnectionState& state) const {
+        const auto live = states_.find(state.connection_id);
+        return live != states_.end() && live->second.get() == &state;
+    }
+
+    template <typename Mutation>
+    bool mutate_current_registry(ConnectionState& state, Mutation&& mutation) {
+        std::scoped_lock ownership_lock(states_mutex_);
+        const auto registry_id = state.registry_id.load();
+        const auto mapping = client_connections_.find(registry_id);
+        if (!is_live_state_locked(state) ||
+            state.stage != Stage::authenticated || registry_id == 0 ||
+            registry_id != registry_id_for(state.hello.client_id) ||
+            mapping == client_connections_.end() ||
+            mapping->second != state.connection_id) {
+            return false;
+        }
+        return std::forward<Mutation>(mutation)(registry_id);
+    }
+
     bool send_authenticated_locked(ConnectionState& state,
                                     protocol::CommandType type,
                                     std::uint64_t request_id,
@@ -1640,29 +1729,38 @@ private:
         state.receive_sequence.reset(0);
         state.send_sequence = 0;
         const auto registry_id = registry_id_for(state.hello.client_id);
-        state.registry_id = registry_id;
-        state.stage = Stage::authenticated;
 
-        net::ConnectionId previous_connection = 0;
-        {
-            std::scoped_lock lock(states_mutex_);
-            const auto previous = client_connections_.find(registry_id);
-            if (previous != client_connections_.end()) {
-                previous_connection = previous->second;
-            }
-            client_connections_[registry_id] = state.connection_id;
-        }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        AuthPublicationRendezvous publication_rendezvous(
+            state.connection_id, [this, id = state.connection_id] {
+                dispatcher_.disconnect(id);
+            });
+#endif
+
         ClientRecord record;
         record.id = registry_id;
         record.hostname = fallback_hostname(registry_id);
         record.address = state.source;
         record.status = ClientStatus::online;
         record.last_seen = std::chrono::steady_clock::now();
-        registry_.upsert(std::move(record));
-        // Current-session protection proof belongs to the connection that
-        // produced it. Reconnect first retires it; the client then sends a fresh
-        // boot-bound probe report.
-        (void)registry_.demote_uwf_verification(registry_id);
+        net::ConnectionId previous_connection = 0;
+        {
+            std::scoped_lock ownership_lock(states_mutex_);
+            // Auth acceptance can race transport removal. A shared in-flight
+            // state is not authority to republish an already disconnected peer.
+            if (!is_live_state_locked(state)) return false;
+            const auto previous = client_connections_.find(registry_id);
+            if (previous != client_connections_.end()) {
+                previous_connection = previous->second;
+            }
+            state.registry_id = registry_id;
+            state.stage = Stage::authenticated;
+            client_connections_[registry_id] = state.connection_id;
+            // Retire before publishing online state, including for registry
+            // snapshot readers that do not take the ownership mutex.
+            (void)registry_.demote_uwf_verification(registry_id);
+            registry_.upsert(std::move(record));
+        }
         dispatcher_.record_handshake_success(state.connection_id);
         if (previous_connection != 0 &&
             previous_connection != state.connection_id) {
@@ -1687,6 +1785,10 @@ private:
             dispatcher_.disconnect(state.connection_id);
             return false;
         }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        RegistryMutationRendezvous mutation_rendezvous(state.connection_id,
+                                                       *command);
+#endif
         if (command->envelope.type == protocol::CommandType::exam_answer_event) {
             return process_exam_answer_event(state, *command);
         }
@@ -1697,14 +1799,18 @@ private:
             return process_exam_ready(state, *command);
         }
         if (command->envelope.type == protocol::CommandType::heartbeat) {
-            (void)registry_.touch(state.registry_id.load());
+            (void)mutate_current_registry(state, [&](std::uint64_t id) {
+                return registry_.touch(id);
+            });
             return true;
         }
         if (command->envelope.type == protocol::CommandType::uwf_report) {
             const auto report =
                 control::decode_uwf_configure_report(command->payload);
-            if (!report || !registry_.set_uwf_report(
-                               state.registry_id.load(), *report)) {
+            if (!report || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_uwf_report(id, *report);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1714,8 +1820,10 @@ private:
             protocol::CommandType::uwf_fleet_status) {
             const auto report =
                 control::decode_uwf_fleet_status_report(command->payload);
-            if (!report || !registry_.set_uwf_fleet_status(
-                               state.registry_id.load(), *report)) {
+            if (!report || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_uwf_fleet_status(id, *report);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1771,8 +1879,10 @@ private:
             protocol::CommandType::freeze_report) {
             const auto frozen =
                 control::decode_freeze_state(command->payload);
-            if (!frozen || !registry_.set_frozen(
-                               state.registry_id.load(), *frozen)) {
+            if (!frozen || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_frozen(id, *frozen);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1802,15 +1912,21 @@ private:
             record.snapshot_interval_seconds =
                 report->snapshot_interval_seconds;
             record.last_seen = std::chrono::steady_clock::now();
-            registry_.upsert(std::move(record));
+            (void)mutate_current_registry(state, [&](std::uint64_t id) {
+                record.id = id;
+                registry_.upsert(std::move(record));
+                return true;
+            });
             return true;
         }
         if (command->envelope.type ==
             protocol::CommandType::snapshot_frame) {
             const auto snapshot =
                 control::decode_snapshot_frame(command->payload);
-            if (!snapshot || !registry_.update_snapshot(
-                                 state.registry_id.load(), *snapshot)) {
+            if (!snapshot || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.update_snapshot(id, *snapshot);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -2326,6 +2442,16 @@ std::size_t ServerControlPlane::authenticated_client_count() const noexcept {
 }
 
 #ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+void set_registry_mutation_hook_for_testing(RegistryMutationHook hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_registry_mutation_hook = std::move(hook);
+}
+
+void set_auth_publication_hook_for_testing(AuthPublicationHook hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_auth_publication_hook = std::move(hook);
+}
+
 void set_telemetry_clock_for_testing(std::optional<TelemetryClockSnapshot> value) {
     std::scoped_lock lock(g_telemetry_clock_mutex);
     g_frozen_telemetry_clock = std::move(value);

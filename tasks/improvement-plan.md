@@ -92,6 +92,16 @@ while 50 local unchanged Release repeats passed. Preserve that distinction.
 before installing proof; no launch retry, auth/UWF relaxation or deleted assertion.
 The prepared pristine-initialization unit remains postponed until exact new CI passes.
 
+The fixture repair `bc21bf8` passed independent review, Root 49/49 gates and all
+three exact Windows CI jobs. Unchanged 3B telemetry tests qualified in that new
+revision; original failed CI evidence is retained. A separate static review
+confirmed a P1 current-connection proof/admission ownership defect, with no
+runtime exploit/VM claim. The proposed coherent ownership design completed three
+fresh adversarial cycles, reconciling fleet retirement, erased-state publication
+and stale registry-update gaps. Implement
+[AUTH-ADMISSION-1A](task-plans/auth-admission-1a.md) first; admission revalidation
+part 1B remains separately required before main, then resume the prepared 1D unit.
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current
