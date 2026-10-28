@@ -347,6 +347,16 @@ int main() {
     assert(registry_snapshot.size() == 1);
     const auto registry_id = registry_snapshot.front().id;
 
+    // Handshake registration precedes UWF proof retirement. Authenticated hello
+    // runs afterward under the same connection mutex, so observe it before
+    // installing the current-session proof.
+    assert(wait_until([&] {
+        const auto peers = registry.snapshot();
+        return peers.size() == 1 && peers.front().id == registry_id &&
+               peers.front().hostname == status.hostname &&
+               peers.front().status == nstu::server::ClientStatus::online;
+    }));
+
     // The exam gate is server-side and fails closed. Prove current-session UWF
     // protection before any start_exam can succeed.
     nstu::control::UwfFleetStatusReport uwf_verified;

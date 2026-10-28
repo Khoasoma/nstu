@@ -82,6 +82,16 @@ and all three exact-revision Windows CI jobs passed. The next unit is
 [1C-3B mixed removal failure and revocation recovery](task-plans/storage-recovery-1c-3b.md),
 with first-error preservation specified before coding.
 
+STORAGE-RECOVERY-1C-3B is reviewed and published as `4ec7b31`: both fallback cases
+passed, with first-error/loss/revocation/restart proof, unchanged production and
+independent Root 49/49 gates. Exact Windows CI run 40606900983 failed the existing
+`control_plane_exam_auth` initial launch assertion; telemetry targets and both
+installer jobs passed. A feasible test setup race was independently identified,
+while 50 local unchanged Release repeats passed. Preserve that distinction.
+[CI-EXAM-AUTH-1](task-plans/ci-exam-auth-1.md) strengthens observable readiness
+before installing proof; no launch retry, auth/UWF relaxation or deleted assertion.
+The prepared pristine-initialization unit remains postponed until exact new CI passes.
+
 ## Resume the existing checklist
 
 1. Obtain the required fresh independent reviews for Tasks 5–11 on the current

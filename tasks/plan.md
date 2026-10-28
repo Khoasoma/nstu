@@ -192,6 +192,14 @@ failure, durable revocation fallback and fresh-instance recovery under
 initialization follows. No telemetry codec, answer channel or service
 producer/sequence change is allowed.
 
+3B is reviewed and published as `4ec7b31`, with passing local fallback tests and
+Root gates. Its exact Windows CI failed the existing auth integration test's
+initial launch assertion. The active corrective plan is
+[CI-EXAM-AUTH-1](task-plans/ci-exam-auth-1.md): add the missing authenticated
+status/online readiness barrier before test protection-proof setup, preserving
+all existing assertions and production policy. Pristine initialization is prepared
+and waits for this observed CI blocker to be repaired and exactly qualified.
+
 `PRODUCT_ROADMAP_NSTU.md` is a private local source and must never be staged,
 committed or uploaded. Derived requirements may be recorded in scoped plans.
 Green CI alone does not complete the unfinished server durability/ACK path or
