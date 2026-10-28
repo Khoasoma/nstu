@@ -419,6 +419,227 @@ bool validate_wire(const nstu::security::Sha256Digest& key, const std::vector<st
         decoded->envelope.payload_bytes == kUserBytes && decoded->envelope.request_id == kRequestId &&
         decoded->sequence == 0 && decoded->payload == payload;
 }
+struct PublicSchedule {
+    bool milestone_released{}, early_result{};
+    Clock::time_point released_at{};
+    std::size_t issued_setup{}, issued_target{};
+};
+
+void run_public_receiver(Socket peer, Receiver& receiver, PublicSchedule& schedule) noexcept {
+    auto& control = *receiver.control;
+    try {
+        do {
+            u_long enabled = 1UL;
+            Event mode{};
+            mode.kind = EventKind::mode;
+            mode.nonblocking = true;
+            mode.began = Clock::now();
+            const int result = ::ioctlsocket(native_socket(peer), FIONBIO, &enabled);
+            const int error = result == SOCKET_ERROR ? ::WSAGetLastError() : 0;
+            mode.ended = Clock::now();
+            mode.returned = result;
+            mode.native_error = error;
+            receiver.trace.append(mode);
+            if (result != 0) { receiver.fail("public-receiver-fionbio", error); break; }
+            Clock::time_point start{}, deadline{};
+            bool started = false;
+            {
+                std::unique_lock lock(control.mutex);
+                control.parked = true;
+                control.changed.notify_all();
+                while (!control.start && !control.stop && !control.result && !control.receiver_failed &&
+                       Clock::now() < receiver.overall_deadline)
+                    control.changed.wait_until(lock, std::min(Clock::now() + kReceiverSlice, receiver.overall_deadline));
+                schedule.early_result = control.result;
+                started = control.start && !control.stop && !control.result && !control.receiver_failed;
+                if (started) { start = control.target_start; deadline = control.target_deadline; }
+            }
+            if (!started) {
+                if (Clock::now() >= receiver.overall_deadline) receiver.fail("public-receiver-start-budget", 0);
+                break;
+            }
+            const auto milestone = start + std::chrono::milliseconds{50};
+            bool missed_milestone = false;
+            {
+                std::unique_lock lock(control.mutex);
+                while (!control.stop && !control.result && !control.receiver_failed &&
+                       Clock::now() < milestone && Clock::now() < receiver.overall_deadline)
+                    control.changed.wait_until(lock, std::min(Clock::now() + kReceiverSlice,
+                        std::min(milestone, receiver.overall_deadline)));
+                schedule.early_result = control.result;
+                if (control.stop || control.result || control.receiver_failed) break;
+                schedule.released_at = Clock::now();
+                missed_milestone = schedule.released_at < milestone || schedule.released_at >= deadline ||
+                    schedule.released_at >= receiver.overall_deadline;
+                if (!missed_milestone) {
+                    schedule.milestone_released = true;
+                    schedule.issued_setup = receiver.setup_expected;
+                    schedule.issued_target = kTargetQuota;
+                }
+            }
+            if (missed_milestone) { receiver.fail("public-receiver-milestone-budget", 0); break; }
+            // This case has no private target-stall observer or manufactured stall generations.
+            while (receiver.setup_received < receiver.setup_expected && Clock::now() < deadline && !receiver.stopping()) {
+                const auto grant = std::min(kSetupGrant, receiver.setup_expected - receiver.setup_received);
+                if (!receive_grant(peer, receiver, grant, false, start, deadline)) break;
+            }
+            if (receiver.setup_received == receiver.setup_expected) {
+                while (receiver.target_received < kTargetQuota && Clock::now() < deadline && !receiver.stopping()) {
+                    const auto grant = std::min(kTargetGrant, kTargetQuota - receiver.target_received);
+                    if (!receive_grant(peer, receiver, grant, true, start, deadline)) break;
+                }
+            }
+            // Deadline/quota exhaustion parks the peer until caller result snapshots are complete.
+            bool overall_expired = false;
+            {
+                std::unique_lock lock(control.mutex);
+                while (!control.stop && !control.result && !control.receiver_failed) {
+                    if (Clock::now() >= receiver.overall_deadline) { overall_expired = true; break; }
+                    control.changed.wait_until(lock, std::min(Clock::now() + kReceiverSlice, receiver.overall_deadline));
+                }
+            }
+            if (overall_expired) receiver.fail("public-receiver-completion-budget", 0);
+        } while (false);
+    } catch (...) { receiver.fail("public-receiver-exception", 0); }
+    peer.close();
+    receiver.closed_invalid = !peer.is_open();
+    receiver.completed = Clock::now();
+    control.changed.notify_all();
+}
+
+bool test_public_channel_deadline() {
+    nstu::security::Sha256Digest key{};
+    key.fill(std::byte{0x31});
+    const std::vector<std::byte> payload(kUserBytes, std::byte{0x4d});
+    const nstu::protocol::CommandEnvelope envelope{
+        .version = nstu::protocol::kCommandVersion, .type = nstu::protocol::CommandType::lock,
+        .payload_bytes = static_cast<std::uint32_t>(kUserBytes), .request_id = kRequestId};
+    const auto wire = nstu::control::encode_authenticated_command(key, envelope, 0, payload);
+    std::string framing_error;
+    const bool framed = validate_wire(key, payload, wire, framing_error);
+    if (!framed) {
+        nstu::security::secure_zero(key);
+        std::cerr << "PUBLIC-DEADLINE framing failed: " << framing_error << '\n';
+        assert(framed); return false;
+    }
+    Fixture fixture;
+    try {
+        const bool prepared = fixture.prepare();
+        const bool setup_ok = prepared && fixture.evidence().failed_stage.empty();
+        if (!setup_ok) {
+            fixture.finish(); nstu::security::secure_zero(key); fixture.record_completion();
+            print_fixture(fixture.evidence()); assert(setup_ok); return false;
+        }
+        nstu::control::AuthenticatedControlChannel channel(std::move(fixture.sender()), key);
+        std::array<Event, kEventCapacity> events{};
+        Control control;
+        Receiver receiver;
+        receiver.control = &control;
+        receiver.wire = wire;
+        receiver.overall_deadline = fixture.overall_deadline();
+        receiver.setup_expected = fixture.evidence().accepted_bytes;
+        receiver.trace.events = events;
+        PublicSchedule schedule;
+        std::string target_error, target_error_snapshot, ordinary_error, ordinary_error_snapshot;
+        target_error.reserve(128); target_error_snapshot.reserve(128);
+        ordinary_error.reserve(128); ordinary_error_snapshot.reserve(128);
+        const auto trace_start = Clock::now();
+        Clock::time_point target_start{}, target_deadline{}, target_return{};
+        bool invoked = false, target_ok = false, ordinary_ok = false, ordinary_invoked = false;
+        bool closed_before_control = false, closed_after_control = false, caller_exception = false;
+        const char* caller_failure = "";
+        std::jthread worker;
+        StopAndJoin stop_guard(control, worker);
+        try {
+            worker = std::jthread([peer = fixture.take_peer(), &receiver, &schedule]() mutable noexcept {
+                run_public_receiver(std::move(peer), receiver, schedule);
+            });
+            {
+                std::unique_lock lock(control.mutex);
+                const auto park_deadline = receiver.overall_deadline - kTargetDuration - kCleanupBudget;
+                while (!control.parked && !control.receiver_failed && Clock::now() < park_deadline)
+                    control.changed.wait_until(lock, std::min(Clock::now() + kReceiverSlice, park_deadline));
+                const auto now = Clock::now();
+                if (control.parked && !control.receiver_failed && now + kTargetDuration + kCleanupBudget < receiver.overall_deadline) {
+                    target_start = now; target_deadline = now + kTargetDuration;
+                    control.target_start = target_start; control.target_deadline = target_deadline; control.start = true;
+                } else caller_failure = "public-start-budget";
+            }
+            control.changed.notify_all();
+            if (target_start != Clock::time_point{}) {
+                invoked = true;
+                target_ok = channel.send_with_deadline(nstu::protocol::CommandType::lock, kRequestId,
+                    payload, target_deadline, &target_error);
+                target_return = Clock::now();
+                target_error_snapshot = target_error;
+                closed_before_control = !channel.is_open();
+                if (closed_before_control) {
+                    ordinary_invoked = true;
+                    ordinary_ok = channel.send(nstu::protocol::CommandType::lock, kRequestId + 1,
+                        std::span<const std::byte>{}, &ordinary_error);
+                    ordinary_error_snapshot = ordinary_error;
+                    closed_after_control = !channel.is_open();
+                } else caller_failure = "public-target-left-channel-open";
+            }
+        } catch (...) { caller_exception = true; caller_failure = "public-caller-exception"; }
+        {
+            std::lock_guard lock(control.mutex);
+            control.result_at = target_return == Clock::time_point{} ? Clock::now() : target_return;
+            control.result = true;
+        }
+        control.changed.notify_all();
+        const auto stop_began = Clock::now();
+        stop_guard.stop_and_join();
+        const auto joined_at = Clock::now();
+        if (channel.is_open()) channel.close(); // After captured closure/control outcomes, never a proof substitute.
+        fixture.finish(); nstu::security::secure_zero(key); fixture.record_completion();
+        const auto finished_at = Clock::now();
+        const bool timing_ok = invoked && target_return >= target_start + kTargetDuration &&
+            target_return < target_start + std::chrono::milliseconds{800} && schedule.milestone_released &&
+            !schedule.early_result && schedule.released_at >= target_start + std::chrono::milliseconds{50} &&
+            schedule.released_at < target_deadline;
+        const bool receipt_ok = schedule.issued_setup == receiver.setup_expected && schedule.issued_target == kTargetQuota &&
+            receiver.setup_received == receiver.setup_expected && receiver.qualifying_received > 0 &&
+            receiver.qualifying_received <= receiver.target_received && receiver.target_received <= kTargetQuota &&
+            receiver.qualifying_received + receiver.late_received == receiver.target_received &&
+            receiver.first_qualifying >= target_start && receiver.first_qualifying < target_deadline &&
+            receiver.last_qualifying >= receiver.first_qualifying && receiver.last_qualifying < target_deadline;
+        const bool channel_ok = !target_ok && target_error_snapshot == "TCP send deadline expired" &&
+            closed_before_control && ordinary_invoked && !ordinary_ok &&
+            ordinary_error_snapshot == "authenticated channel cannot send" && closed_after_control;
+        const bool cleanup_ok = receiver.closed_invalid && receiver.completed != Clock::time_point{} &&
+            receiver.completed <= joined_at && receiver.completed - stop_began < kCleanupBudget &&
+            joined_at - stop_began < kCleanupBudget && finished_at - stop_began < kCleanupBudget &&
+            finished_at < receiver.overall_deadline && fixture.evidence().owners_closed && fixture.evidence().failed_stage.empty();
+        const bool passed = timing_ok && receipt_ok && channel_ok && cleanup_ok && !caller_exception &&
+            !control.receiver_failed && receiver.failure_phase == nullptr && !receiver.trace.overflow;
+        std::cerr << "PUBLIC-DEADLINE passed=" << passed
+            << " milestone_us=" << (schedule.milestone_released ? relative_us(schedule.released_at, target_start) : -1LL)
+            << " return_us=" << (target_return != Clock::time_point{} ? relative_us(target_return, target_start) : -1LL)
+            << " setup_issued=" << schedule.issued_setup << " setup_actual=" << receiver.setup_received
+            << " target_issued=" << schedule.issued_target << " target_actual=" << receiver.target_received
+            << " qualifying_prefix=" << receiver.qualifying_received << " late=" << receiver.late_received
+            << " first_qualifying_us=" << (receiver.qualifying_received ? relative_us(receiver.first_qualifying, target_start) : -1LL)
+            << " last_qualifying_us=" << (receiver.qualifying_received ? relative_us(receiver.last_qualifying, target_start) : -1LL)
+            << " target_ok=" << target_ok << " error=" << target_error_snapshot << " closed_before_control=" << closed_before_control
+            << " ordinary_invoked=" << ordinary_invoked
+            << " ordinary_result=" << (ordinary_invoked ? (ordinary_ok ? "1" : "0") : "unobserved")
+            << " ordinary_error=" << (ordinary_invoked ? ordinary_error_snapshot : "unobserved")
+            << " closed_after_control=" << (ordinary_invoked ? (closed_after_control ? "1" : "0") : "unobserved")
+            << " receiver_closed=" << receiver.closed_invalid << " cleanup_us=" << relative_us(finished_at, stop_began)
+            << " caller_phase=" << caller_failure << " receiver_phase=" << (receiver.failure_phase ? receiver.failure_phase : "")
+            << " native_error=" << receiver.failure_native_error << '\n';
+        print_trace("public receiver", receiver.trace, invoked ? target_start : trace_start);
+        print_fixture(fixture.evidence());
+        assert(passed);
+        return passed;
+    } catch (...) {
+        fixture.finish(); nstu::security::secure_zero(key); fixture.record_completion();
+        std::cerr << "PUBLIC-DEADLINE orchestration exception\n";
+        print_fixture(fixture.evidence()); assert(false); return false;
+    }
+}
+
 } // namespace
 
 int main() {
@@ -539,5 +760,6 @@ int main() {
     print_trace("sender", adapter.trace, target_start);
     print_trace("receiver", receiver.trace, target_start);
     assert(passed);
+    if (passed && !test_public_channel_deadline()) return 1;
     return passed ? 0 : 1;
 }
