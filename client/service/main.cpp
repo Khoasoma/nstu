@@ -13,6 +13,7 @@
 #include "nstu/exam_sync.hpp"
 #include "nstu/exam_telemetry_router.hpp"
 #include "nstu/exam_telemetry_service.hpp"
+#include "nstu/exam_telemetry_stop_reporting.hpp"
 #include "nstu/session.hpp"
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
@@ -565,6 +566,30 @@ void report_telemetry_result(TelemetryOperation operation, bool succeeded,
             OutputDebugStringA("NSTU telemetry failure reporting unavailable.\n");
         }
     }
+}
+
+void report_telemetry_stop(
+    const nstu::client::TelemetryStopDispatchResult& snapshot) noexcept {
+    static std::atomic_flag initialization_failed = ATOMIC_FLAG_INIT;
+    nstu::client::ExamTelemetryStopReporter* reporter = nullptr;
+    try {
+        static nstu::client::ExamTelemetryStopReporter instance(
+            [](const nstu::audit::Event& event) {
+                return g_audit_spool.emit(event);
+            },
+            [](const std::string& line) {
+                OutputDebugStringA(line.c_str());
+            });
+        reporter = &instance;
+        initialization_failed.clear(std::memory_order_relaxed);
+    } catch (...) {
+        if (!initialization_failed.test_and_set(std::memory_order_relaxed)) {
+            OutputDebugStringA(
+                "NSTU exam telemetry stop: reporter initialization unavailable.\n");
+        }
+        return;
+    }
+    (void)reporter->report(snapshot);
 }
 
 void queue_outbound_message(nstu::protocol::CommandType type,
@@ -1775,7 +1800,9 @@ void handle_server_command(
     case nstu::protocol::CommandType::exam_stop:
         if (command.payload.empty()) {
             queue_exam_stop();
-            g_exam_telemetry_router.handle_explicit_stop();
+            const auto snapshot =
+                g_exam_telemetry_router.handle_explicit_stop_with_outcome();
+            report_telemetry_stop(snapshot);
         }
         break;
     case nstu::protocol::CommandType::exam_telemetry_enable: {
