@@ -49,6 +49,9 @@ ExamTelemetryRouter::ExamTelemetryRouter(
         .queue_agent_enable = std::move(queue_agent_enable),
         .next_batch_to_send = [&coordinator](std::uint64_t now_ms, std::uint64_t timeout_ms) {
             return coordinator.next_batch_to_send(now_ms, timeout_ms);
+        },
+        .on_explicit_stop_with_outcome = [&coordinator]() {
+            return coordinator.on_explicit_stop_with_outcome();
         }
     } {}
 
@@ -123,10 +126,20 @@ exam::TelemetryAckApplyResult ExamTelemetryRouter::handle_server_ack(const exam:
     return callbacks_.on_ack(ack, now_unix_ms, error);
 }
 
-void ExamTelemetryRouter::handle_explicit_stop() {
+TelemetryStopDispatchResult ExamTelemetryRouter::handle_explicit_stop_with_outcome() {
+    if (callbacks_.on_explicit_stop_with_outcome) {
+        auto outcome = callbacks_.on_explicit_stop_with_outcome();
+        return {TelemetryStopDispatch::outcome_callback_invoked, std::move(outcome)};
+    }
     if (callbacks_.on_explicit_stop) {
         callbacks_.on_explicit_stop();
+        return {TelemetryStopDispatch::legacy_callback_invoked, std::nullopt};
     }
+    return {};
+}
+
+void ExamTelemetryRouter::handle_explicit_stop() {
+    (void)handle_explicit_stop_with_outcome();
 }
 
 void ExamTelemetryRouter::handle_disconnect() {

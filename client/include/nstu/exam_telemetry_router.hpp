@@ -20,6 +20,16 @@
 
 namespace nstu::client {
 
+// Dispatch identifies callback invocation; the outcome describes stop and cleanup facts.
+enum class TelemetryStopDispatch : std::uint8_t {
+    not_configured, legacy_callback_invoked, outcome_callback_invoked
+};
+
+struct TelemetryStopDispatchResult {
+    TelemetryStopDispatch dispatch = TelemetryStopDispatch::not_configured;
+    std::optional<TelemetryStopOutcome> outcome = std::nullopt;
+};
+
 struct ExamTelemetryRouterCallbacks {
     std::function<bool(const exam::TelemetryEnable& enable, std::string* error)> on_enable;
     std::function<bool(const std::vector<exam::TelemetrySample>& samples, std::uint64_t now_ms, std::string* error)> ingest_samples;
@@ -31,6 +41,7 @@ struct ExamTelemetryRouterCallbacks {
     std::function<bool(std::uint64_t now_ms, std::string* error)> on_maintenance;
     std::function<void(std::span<const std::byte> enable_payload)> queue_agent_enable;
     std::function<std::optional<exam::TelemetryBatch>(std::uint64_t now_ms, std::uint64_t timeout_ms)> next_batch_to_send;
+    std::function<TelemetryStopOutcome()> on_explicit_stop_with_outcome = {};
 };
 
 class ExamTelemetryRouter {
@@ -67,6 +78,9 @@ public:
                                                    std::uint64_t now_unix_ms,
                                                    std::string* error = nullptr);
 
+    // Typed callback takes precedence; absent/legacy callbacks leave the outcome empty.
+    // Exceptions propagate. Callback invocation does not guarantee completed cleanup.
+    [[nodiscard]] TelemetryStopDispatchResult handle_explicit_stop_with_outcome();
     void handle_explicit_stop();
     void handle_disconnect();
     void handle_shutdown();
