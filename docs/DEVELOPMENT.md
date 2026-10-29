@@ -13,6 +13,16 @@ NSTU hiện là engineering MVP dùng để phát triển và kiểm thử kiế
 phải bản triển khai production hoàn chỉnh cho trường học. Các giới hạn thực tế
 được ghi trong [ROADMAP.md](ROADMAP.md).
 
+## INDEV function status
+
+`INDEV` means the function is merged into `main` for ongoing development and
+testing. Its verified implementation remains in development; this label does
+not certify the full application for production deployment.
+
+| Function | Status | Main integration | Verification |
+|---|---|---|---|
+| [Authenticated control-channel deadline send](../common/include/nstu/control_channel.hpp) (`send_with_deadline`) | **INDEV** | `07af8b6` | Native/public deadline and ordinary-send controls passed; fast/strict 46/46 and all three exact-main MSVC Release CI jobs passed |
+
 ## Tính năng hiện tại
 
 - Protocol nhị phân versioned, little-endian, có giới hạn kích thước và parser
