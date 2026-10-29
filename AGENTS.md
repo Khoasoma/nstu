@@ -104,3 +104,13 @@ video/    DORMANT H.264 stack — zero production consumers; do not extend
 - A black Focus/remote surface on the test VM means a **disconnected RDP
   session**, not a bug — capture returns black when nothing composites.
 - Test VM `192.168.1.237`; host `192.168.1.37`. Those credentials are test-only.
+
+
+## Human full task-branch INDEV integration rule - October 29, 2026
+
+The human explicitly authorized merging ALL committed current task-branch work
+to main and marking it INDEV. This supersedes the completed-function-only rule
+for this integration. Preserve existing tests/assertions, privacy/SAS and relevant
+merged-tree CI/review checks. INDEV does not pass pending task/checkpoint, real
+VM/peer/runtime or production acceptance, and does not authorize uploading private
+original roadmaps or unrelated uncommitted work.

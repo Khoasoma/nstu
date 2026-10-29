@@ -7,6 +7,7 @@
 #include "nstu/enrollment.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
+#include "nstu/exam_telemetry.hpp"
 #include "nstu/keyring.hpp"
 #include "nstu/pairing.hpp"
 
@@ -16,14 +17,29 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace nstu::server {
+namespace telemetry_detail {
+struct ClockSnapshot {
+    std::uint64_t wall_ms = 0;
+    std::chrono::steady_clock::time_point steady{};
+};
+struct Authorization {
+    std::uint64_t created_wall_ms = 0;
+    std::chrono::steady_clock::time_point deadline{};
+    bool expired = false;
+};
+} // namespace telemetry_detail
 namespace {
+using TelemetryClockSnapshot = telemetry_detail::ClockSnapshot;
+using TelemetryAuthorization = telemetry_detail::Authorization;
 
 // A pairing request occupies a socket and a slot until the teacher answers it,
 // so both are bounded. The window is long enough to walk to the machine and
@@ -49,6 +65,151 @@ std::uint64_t unix_milliseconds_now() {
         std::chrono::milliseconds>(std::chrono::system_clock::now()
                                        .time_since_epoch())
                                           .count());
+}
+
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+std::atomic<std::int64_t> g_telemetry_clock_offset_ms{0};
+std::mutex g_telemetry_clock_mutex;
+std::optional<TelemetryClockSnapshot> g_frozen_telemetry_clock;
+
+// Test-only disconnect ordering hooks. While the hold is set, disconnect
+// callbacks are queued instead of run, so a test can force a superseded
+// connection's disconnect to land after the replacement recorded fresh proof.
+std::mutex g_disconnect_hold_mutex;
+bool g_disconnect_hold = false;
+std::vector<std::function<void()>> g_held_disconnects;
+std::atomic<std::uint64_t> g_completed_disconnects{0};
+
+// One-shot test rendezvous around registry writers and auth publication. The
+// callbacks run without the ownership mutex; production has no such seams.
+std::mutex g_ownership_hook_mutex;
+using RegistryMutationHook = std::function<void(
+    bool, net::ConnectionId, protocol::CommandType, std::uint64_t)>;
+using AuthPublicationHook = std::function<void(
+    bool, net::ConnectionId, std::function<void()>)>;
+RegistryMutationHook g_registry_mutation_hook;
+AuthPublicationHook g_auth_publication_hook;
+
+enum class ExamAdmissionTestPoint { selected, before_send };
+using ExamAdmissionHook = std::function<void(
+    ExamAdmissionTestPoint, net::ConnectionId, std::uint64_t,
+    std::function<void()>)>;
+ExamAdmissionHook g_exam_admission_hook;
+std::function<void(net::ConnectionId)> g_auth_published_hook;
+
+void rendezvous_exam_admission(ExamAdmissionTestPoint point,
+                               net::ConnectionId connection,
+                               std::uint64_t registry_id,
+                               std::function<void()> close) {
+    ExamAdmissionHook hook;
+    {
+        std::scoped_lock lock(g_ownership_hook_mutex);
+        hook = g_exam_admission_hook;
+    }
+    if (hook) hook(point, connection, registry_id, std::move(close));
+}
+
+void rendezvous_auth_published(net::ConnectionId connection) {
+    std::function<void(net::ConnectionId)> hook;
+    {
+        std::scoped_lock lock(g_ownership_hook_mutex);
+        hook = g_auth_published_hook;
+    }
+    if (hook) hook(connection);
+}
+
+struct RegistryMutationRendezvous {
+    RegistryMutationHook hook;
+    net::ConnectionId connection;
+    protocol::CommandType type;
+    std::uint64_t request;
+
+    RegistryMutationRendezvous(net::ConnectionId id,
+                               const control::AuthenticatedCommand& command)
+        : connection(id), type(command.envelope.type),
+          request(command.envelope.request_id) {
+        switch (type) {
+        case protocol::CommandType::heartbeat:
+        case protocol::CommandType::uwf_report:
+        case protocol::CommandType::uwf_fleet_status:
+        case protocol::CommandType::freeze_report:
+        case protocol::CommandType::status_report:
+        case protocol::CommandType::hello:
+        case protocol::CommandType::snapshot_frame:
+            {
+                std::scoped_lock lock(g_ownership_hook_mutex);
+                hook = g_registry_mutation_hook;
+            }
+            if (hook) hook(true, connection, type, request);
+            break;
+        default:
+            break;
+        }
+    }
+    ~RegistryMutationRendezvous() {
+        if (hook) hook(false, connection, type, request);
+    }
+};
+
+struct AuthPublicationRendezvous {
+    AuthPublicationHook hook;
+    net::ConnectionId connection;
+    AuthPublicationRendezvous(net::ConnectionId id, std::function<void()> close)
+        : connection(id) {
+        {
+            std::scoped_lock lock(g_ownership_hook_mutex);
+            hook = g_auth_publication_hook;
+        }
+        if (hook) hook(true, connection, std::move(close));
+    }
+    ~AuthPublicationRendezvous() {
+        if (hook) hook(false, connection, {});
+    }
+};
+#endif
+
+inline std::uint64_t current_server_time_ms() {
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+    const auto real_now = unix_milliseconds_now();
+    const auto offset = g_telemetry_clock_offset_ms.load();
+    // Unsigned arithmetic only: negating INT64_MIN, or adding a huge offset in
+    // int64, is undefined. The magnitude is taken modulo 2^64 and the result
+    // saturates at both ends.
+    const auto magnitude = offset < 0
+                               ? std::uint64_t{0} - static_cast<std::uint64_t>(offset)
+                               : static_cast<std::uint64_t>(offset);
+    if (offset < 0) {
+        return magnitude >= real_now ? std::uint64_t{0} : real_now - magnitude;
+    }
+    constexpr auto kMax = std::numeric_limits<std::uint64_t>::max();
+    return magnitude > kMax - real_now ? kMax : real_now + magnitude;
+#else
+    return unix_milliseconds_now();
+#endif
+}
+
+inline constexpr std::uint64_t kTelemetryMaxActiveContextHours = 25;
+inline constexpr std::uint64_t kTelemetryMaxActiveContextMs =
+    kTelemetryMaxActiveContextHours * 60ULL * 60ULL * 1000ULL;
+
+TelemetryClockSnapshot telemetry_clock_now() {
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+    std::scoped_lock lock(g_telemetry_clock_mutex);
+    if (g_frozen_telemetry_clock) return *g_frozen_telemetry_clock;
+#endif
+    return {current_server_time_ms(), std::chrono::steady_clock::now()};
+}
+
+bool telemetry_is_eligible(TelemetryAuthorization& authorization,
+                           const TelemetryClockSnapshot& now) noexcept {
+    if (authorization.expired || authorization.created_wall_ms == 0) return false;
+    if (now.steady >= authorization.deadline ||
+        (now.wall_ms >= authorization.created_wall_ms &&
+         now.wall_ms - authorization.created_wall_ms >= kTelemetryMaxActiveContextMs)) {
+        authorization.expired = true;
+        return false;
+    }
+    return now.wall_ms >= authorization.created_wall_ms;
 }
 
 std::uint32_t read_u32_le(std::span<const std::byte> bytes) {
@@ -199,7 +360,31 @@ public:
         bool ready = false;
         bool begun = false;
         std::uint64_t server_start_unix_milliseconds = 0;
+        TelemetryAuthorization telemetry;
     };
+
+    void send_telemetry_enable_locked(ConnectionState& state, ActiveExamContext& context) {
+        if (config_.exam_journal_path.empty()) return;
+        const auto now = telemetry_clock_now();
+        if (!telemetry_is_eligible(context.telemetry, now)) return;
+        const exam::TelemetryEnable enable{context.package_id, context.package_digest,
+            context.client_id, context.session_id, context.candidate_id, now.wall_ms};
+        const auto payload = exam::encode_telemetry_enable(enable);
+        std::string error;
+        if (payload.empty() || !send_authenticated_locked(state,
+                protocol::CommandType::exam_telemetry_enable, next_request_id_.fetch_add(1),
+                payload, &error)) {
+            audit::Event event;
+            event.category = audit::Category::exam;
+            event.severity = audit::Severity::warning;
+            event.component = "exam_telemetry";
+            event.action = "enable";
+            event.result = "failed";
+            event.client_id = state.registry_id.load();
+            event.detail = "telemetry enable unavailable; answer authorization retained";
+            audit_emit(std::move(event));
+        }
+    }
 
     bool start(ServerControlPlaneConfig config, std::string* error) {
         if (dispatcher_.running()) {
@@ -260,7 +445,22 @@ public:
                 on_bytes(id, std::move(bytes));
             };
             value.on_disconnected = [this](net::ConnectionId id) {
-                on_disconnected(id);
+                auto run = [this, id] {
+                    on_disconnected(id);
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+                    g_completed_disconnects.fetch_add(1);
+#endif
+                };
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+                {
+                    std::scoped_lock hold_lock(g_disconnect_hold_mutex);
+                    if (g_disconnect_hold) {
+                        g_held_disconnects.emplace_back(std::move(run));
+                        return;
+                    }
+                }
+#endif
+                run();
             };
             return value;
         };
@@ -276,7 +476,12 @@ public:
         // ephemeral pair, which is what actually breaks the conflict. A
         // configured port keeps a single attempt, so a genuine conflict there
         // still fails fast instead of being retried 32 times.
-        constexpr int maximum_ephemeral_attempts = 32;
+        // Windows hands out TCP ephemeral ports roughly in sequence, while UDP
+        // exclusion blocks (Hyper-V/WinNAT) are reserved 100 at a time and are
+        // often adjacent, so the budget must walk past several of them.
+        // ponytail: fixed walk budget; pick random candidates from the dynamic
+        // range if exclusions ever grow wider than this.
+        constexpr int maximum_ephemeral_attempts = 1024;
         const int attempts = config_.port == 0 ? maximum_ephemeral_attempts : 1;
         bool started = false;
         std::string start_error;
@@ -415,19 +620,59 @@ public:
             set_error(error, "client is not authenticated");
             return false;
         }
-        // Exam authorization gate. This is server-side and fails closed: the
-        // client never sends a "protected" flag, and nothing about protection
-        // rides in ExamStartRequest. Only a fresh, boot-bound probe recorded in
-        // the registry can open it.
-        const auto registry_snapshot = registry_.snapshot();
-        const auto client_record = std::find_if(
-            registry_snapshot.begin(), registry_snapshot.end(),
-            [client_id](const ClientRecord& client) {
-                return client.id == client_id;
-            });
-        const bool protection_proven =
-            client_record != registry_snapshot.end() &&
-            client_record->uwf.proves_current_protection();
+        const auto payload = exam::encode_exam_start_request(request);
+        if (payload.empty()) {
+            set_error(error, "exam start request could not be encoded");
+            return false;
+        }
+        ActiveExamContext context;
+        context.client_id = request.client_id;
+        context.package_digest = request.package_digest;
+        context.session_id = request.session_id;
+        context.package_id = request.package_id;
+        context.candidate_id = request.candidate_id;
+
+        // Existing state/context serialization prevents inbound answer traffic
+        // from observing a half-started session. Take both locks before the
+        // short ownership scope; ownership must never wait for either mutex.
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        rendezvous_exam_admission(ExamAdmissionTestPoint::selected,
+            state->connection_id, client_id,
+            [this, id = state->connection_id] { dispatcher_.disconnect(id); });
+#endif
+        std::scoped_lock state_lock(state->mutex);
+        std::scoped_lock context_lock(exam_contexts_mutex_);
+        const auto created = telemetry_clock_now();
+        context.telemetry = {created.wall_ms, created.steady + std::chrono::hours(25), false};
+        const auto registry_id = state->registry_id.load();
+        bool protection_proven = false;
+        auto inserted_context = active_exam_contexts_.end();
+        bool inserted = false;
+        {
+            std::scoped_lock ownership_lock(states_mutex_);
+            if (!is_current_state_locked(*state) || registry_id != client_id ||
+                state->hello.client_id != request.client_id) {
+                set_error(error, "exam request identity does not match client");
+                return false;
+            }
+            // Re-read boot/operation-bound proof at the same ownership boundary
+            // that installs authorization. A pre-lock copy cannot authorize it.
+            const auto registry_snapshot = registry_.snapshot();
+            const auto client_record = std::find_if(
+                registry_snapshot.begin(), registry_snapshot.end(),
+                [registry_id](const ClientRecord& client) {
+                    return client.id == registry_id;
+                });
+            protection_proven = client_record != registry_snapshot.end() &&
+                client_record->uwf.proves_current_protection();
+            if (protection_proven || NSTU_DEV_UNPROTECTED_EXAM) {
+                const auto result = active_exam_contexts_.try_emplace(
+                    registry_id, std::move(context));
+                inserted_context = result.first;
+                inserted = result.second;
+            }
+        }
+        // No transport, telemetry, audit or rollback runs under ownership.
 #if NSTU_DEV_UNPROTECTED_EXAM
         if (!protection_proven) {
             // DEV (UNPROTECTED) build only. This is the single readiness gate
@@ -463,47 +708,22 @@ public:
             return false;
         }
 #endif
-        const auto payload = exam::encode_exam_start_request(request);
-        if (payload.empty()) {
-            set_error(error, "exam start request could not be encoded");
-            return false;
-        }
-
-        // Keep the connection lock held while the authorization record is
-        // installed and the command is queued.  Inbound answer/state traffic
-        // takes the same lock, so it cannot observe a half-started session.
-        std::scoped_lock state_lock(state->mutex);
-        if (state->stage != Stage::authenticated ||
-            state->hello.client_id != request.client_id ||
-            state->registry_id.load() == 0) {
-            set_error(error, "exam request identity does not match client");
-            return false;
-        }
-        const auto registry_id = state->registry_id.load();
-        std::scoped_lock context_lock(exam_contexts_mutex_);
-        if (active_exam_contexts_.find(registry_id) !=
-            active_exam_contexts_.end()) {
-            set_error(error, "client already has an active exam session");
-            return false;
-        }
-        ActiveExamContext context;
-        context.client_id = request.client_id;
-        context.package_digest = request.package_digest;
-        context.session_id = request.session_id;
-        context.package_id = request.package_id;
-        context.candidate_id = request.candidate_id;
-        const auto [inserted_context, inserted] =
-            active_exam_contexts_.try_emplace(registry_id, std::move(context));
         if (!inserted) {
             set_error(error, "client already has an active exam session");
             return false;
         }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        rendezvous_exam_admission(ExamAdmissionTestPoint::before_send,
+            state->connection_id, client_id,
+            [this, id = state->connection_id] { dispatcher_.disconnect(id); });
+#endif
         if (!send_authenticated_locked(
                 *state, protocol::CommandType::exam_start,
                 next_request_id_.fetch_add(1), payload, error)) {
             active_exam_contexts_.erase(inserted_context);
             return false;
         }
+        send_telemetry_enable_locked(*state, inserted_context->second);
         audit::Event started;
         started.category = audit::Category::exam;
         started.severity =
@@ -661,8 +881,16 @@ public:
         // pins the boot identity the request is issued against, which is what a
         // later "protected" report is checked against.
         const auto operation_id = next_uwf_operation_id_.fetch_add(1);
-        if (!registry_.begin_uwf_fleet_operation(client_id, operation_id,
-                                                 restart_requested)) {
+        bool recorded = false;
+        {
+            // Serialize proof retirement with carrier replacement and reports.
+            // An offline known client still records an operation before the
+            // existing send fails; no ownership lock may extend into transport.
+            std::scoped_lock ownership_lock(states_mutex_);
+            recorded = registry_.begin_uwf_fleet_operation(
+                client_id, operation_id, restart_requested);
+        }
+        if (!recorded) {
             set_error(error, "client is not known to the registry");
             return false;
         }
@@ -944,6 +1172,30 @@ public:
     }
 
 private:
+    // Caller holds state.mutex before taking the short ownership lock. Never
+    // acquire a connection/context mutex, send, disconnect or persist inside it.
+    bool is_live_state_locked(const ConnectionState& state) const {
+        const auto live = states_.find(state.connection_id);
+        return live != states_.end() && live->second.get() == &state;
+    }
+
+    bool is_current_state_locked(const ConnectionState& state) const {
+        const auto registry_id = state.registry_id.load();
+        const auto mapping = client_connections_.find(registry_id);
+        return is_live_state_locked(state) && state.stage == Stage::authenticated &&
+            registry_id != 0 && registry_id == registry_id_for(state.hello.client_id) &&
+            mapping != client_connections_.end() && mapping->second == state.connection_id;
+    }
+
+    template <typename Mutation>
+    bool mutate_current_registry(ConnectionState& state, Mutation&& mutation) {
+        std::scoped_lock ownership_lock(states_mutex_);
+        if (!is_current_state_locked(state)) {
+            return false;
+        }
+        return std::forward<Mutation>(mutation)(state.registry_id.load());
+    }
+
     bool send_authenticated_locked(ConnectionState& state,
                                     protocol::CommandType type,
                                     std::uint64_t request_id,
@@ -1519,33 +1771,53 @@ private:
         state.receive_sequence.reset(0);
         state.send_sequence = 0;
         const auto registry_id = registry_id_for(state.hello.client_id);
-        state.registry_id = registry_id;
-        state.stage = Stage::authenticated;
 
-        net::ConnectionId previous_connection = 0;
-        {
-            std::scoped_lock lock(states_mutex_);
-            const auto previous = client_connections_.find(registry_id);
-            if (previous != client_connections_.end()) {
-                previous_connection = previous->second;
-            }
-            client_connections_[registry_id] = state.connection_id;
-        }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        AuthPublicationRendezvous publication_rendezvous(
+            state.connection_id, [this, id = state.connection_id] {
+                dispatcher_.disconnect(id);
+            });
+#endif
+
         ClientRecord record;
         record.id = registry_id;
         record.hostname = fallback_hostname(registry_id);
         record.address = state.source;
         record.status = ClientStatus::online;
         record.last_seen = std::chrono::steady_clock::now();
-        registry_.upsert(std::move(record));
-        // Current-session protection proof belongs to the connection that
-        // produced it. Reconnect first retires it; the client then sends a fresh
-        // boot-bound probe report.
-        (void)registry_.demote_uwf_verification(registry_id);
+        net::ConnectionId previous_connection = 0;
+        {
+            std::scoped_lock ownership_lock(states_mutex_);
+            // Auth acceptance can race transport removal. A shared in-flight
+            // state is not authority to republish an already disconnected peer.
+            if (!is_live_state_locked(state)) return false;
+            const auto previous = client_connections_.find(registry_id);
+            if (previous != client_connections_.end()) {
+                previous_connection = previous->second;
+            }
+            state.registry_id = registry_id;
+            state.stage = Stage::authenticated;
+            client_connections_[registry_id] = state.connection_id;
+            // Retire before publishing online state, including for registry
+            // snapshot readers that do not take the ownership mutex.
+            (void)registry_.demote_uwf_verification(registry_id);
+            registry_.upsert(std::move(record));
+        }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        // Publication is complete, but the superseded transport is still open.
+        rendezvous_auth_published(state.connection_id);
+#endif
         dispatcher_.record_handshake_success(state.connection_id);
         if (previous_connection != 0 &&
             previous_connection != state.connection_id) {
             dispatcher_.disconnect(previous_connection);
+        }
+        if (!config_.exam_journal_path.empty()) {
+            std::scoped_lock context_lock(exam_contexts_mutex_);
+            const auto found_ctx = active_exam_contexts_.find(registry_id);
+            if (found_ctx != active_exam_contexts_.end()) {
+                send_telemetry_enable_locked(state, found_ctx->second);
+            }
         }
         return true;
     }
@@ -1559,6 +1831,10 @@ private:
             dispatcher_.disconnect(state.connection_id);
             return false;
         }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        RegistryMutationRendezvous mutation_rendezvous(state.connection_id,
+                                                       *command);
+#endif
         if (command->envelope.type == protocol::CommandType::exam_answer_event) {
             return process_exam_answer_event(state, *command);
         }
@@ -1569,14 +1845,18 @@ private:
             return process_exam_ready(state, *command);
         }
         if (command->envelope.type == protocol::CommandType::heartbeat) {
-            (void)registry_.touch(state.registry_id.load());
+            (void)mutate_current_registry(state, [&](std::uint64_t id) {
+                return registry_.touch(id);
+            });
             return true;
         }
         if (command->envelope.type == protocol::CommandType::uwf_report) {
             const auto report =
                 control::decode_uwf_configure_report(command->payload);
-            if (!report || !registry_.set_uwf_report(
-                               state.registry_id.load(), *report)) {
+            if (!report || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_uwf_report(id, *report);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1586,8 +1866,10 @@ private:
             protocol::CommandType::uwf_fleet_status) {
             const auto report =
                 control::decode_uwf_fleet_status_report(command->payload);
-            if (!report || !registry_.set_uwf_fleet_status(
-                               state.registry_id.load(), *report)) {
+            if (!report || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_uwf_fleet_status(id, *report);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1643,8 +1925,10 @@ private:
             protocol::CommandType::freeze_report) {
             const auto frozen =
                 control::decode_freeze_state(command->payload);
-            if (!frozen || !registry_.set_frozen(
-                               state.registry_id.load(), *frozen)) {
+            if (!frozen || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_frozen(id, *frozen);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1674,15 +1958,21 @@ private:
             record.snapshot_interval_seconds =
                 report->snapshot_interval_seconds;
             record.last_seen = std::chrono::steady_clock::now();
-            registry_.upsert(std::move(record));
+            (void)mutate_current_registry(state, [&](std::uint64_t id) {
+                record.id = id;
+                registry_.upsert(std::move(record));
+                return true;
+            });
             return true;
         }
         if (command->envelope.type ==
             protocol::CommandType::snapshot_frame) {
             const auto snapshot =
                 control::decode_snapshot_frame(command->payload);
-            if (!snapshot || !registry_.update_snapshot(
-                                 state.registry_id.load(), *snapshot)) {
+            if (!snapshot || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.update_snapshot(id, *snapshot);
+                    })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;
             }
@@ -1800,7 +2090,6 @@ private:
 
     void on_disconnected(net::ConnectionId id) {
         std::shared_ptr<ConnectionState> state;
-        bool owned_mapping = false;
         {
             std::scoped_lock lock(states_mutex_);
             const auto found = states_.find(id);
@@ -1813,24 +2102,22 @@ private:
             if (registry_id != 0) {
                 const auto mapping = client_connections_.find(
                     registry_id);
+                // Act only when this disconnect still owns the registry
+                // mapping. On a reconnect the replacement connection has
+                // already claimed it and may have reported a fresh
+                // current-session UWF proof; a late disconnect from the
+                // superseded connection must not mark the client offline or
+                // retire that new proof. The registry update stays under
+                // states_mutex_ so a replacement handshake cannot claim the
+                // mapping between this ownership check and the demotion.
                 if (mapping != client_connections_.end() &&
                     mapping->second == id) {
                     client_connections_.erase(mapping);
-                    owned_mapping = true;
+                    (void)registry_.set_status(registry_id,
+                                               ClientStatus::offline);
+                    (void)registry_.demote_uwf_verification(registry_id);
                 }
             }
-        }
-        const auto registry_id = state->registry_id.load();
-        // Act only when this disconnect still owned the registry mapping. On a
-        // reconnect the replacement connection has already claimed the mapping
-        // and may have reported a fresh current-session UWF proof; a late
-        // disconnect from the superseded connection must not mark the client
-        // offline or retire that new proof, which would close the exam gate
-        // until the next probe for no reason.
-        if (registry_id != 0 && owned_mapping) {
-            (void)registry_.set_status(registry_id,
-                                       ClientStatus::offline);
-            (void)registry_.demote_uwf_verification(registry_id);
         }
         drop_pending_pairings_for(id);
     }
@@ -2199,5 +2486,69 @@ std::uint16_t ServerControlPlane::local_port() const noexcept {
 std::size_t ServerControlPlane::authenticated_client_count() const noexcept {
     return impl_->authenticated_client_count();
 }
+
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+void set_exam_admission_hook_for_testing(ExamAdmissionHook hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_exam_admission_hook = std::move(hook);
+}
+
+void set_auth_published_hook_for_testing(
+    std::function<void(net::ConnectionId)> hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_auth_published_hook = std::move(hook);
+}
+
+void set_registry_mutation_hook_for_testing(RegistryMutationHook hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_registry_mutation_hook = std::move(hook);
+}
+
+void set_auth_publication_hook_for_testing(AuthPublicationHook hook) {
+    std::scoped_lock lock(g_ownership_hook_mutex);
+    g_auth_publication_hook = std::move(hook);
+}
+
+void set_telemetry_clock_for_testing(std::optional<TelemetryClockSnapshot> value) {
+    std::scoped_lock lock(g_telemetry_clock_mutex);
+    g_frozen_telemetry_clock = std::move(value);
+}
+
+void set_telemetry_clock_offset_for_testing(std::chrono::milliseconds offset) noexcept {
+    g_telemetry_clock_offset_ms.store(offset.count());
+}
+
+// ponytail: process-global test hooks, single control plane per test binary.
+// Release every held disconnect before stop(); held callbacks capture the plane.
+void set_disconnect_hold_for_testing(bool hold) noexcept {
+    std::scoped_lock lock(g_disconnect_hold_mutex);
+    g_disconnect_hold = hold;
+}
+
+std::size_t held_disconnect_count_for_testing() noexcept {
+    std::scoped_lock lock(g_disconnect_hold_mutex);
+    return g_held_disconnects.size();
+}
+
+std::size_t release_held_disconnects_for_testing() {
+    std::vector<std::function<void()>> held;
+    {
+        std::scoped_lock lock(g_disconnect_hold_mutex);
+        held.swap(g_held_disconnects);
+    }
+    for (auto& run : held) {
+        run();
+    }
+    return held.size();
+}
+
+std::uint64_t completed_disconnect_count_for_testing() noexcept {
+    return g_completed_disconnects.load();
+}
+
+std::uint64_t telemetry_server_time_ms_for_testing() noexcept {
+    return current_server_time_ms();
+}
+#endif
 
 } // namespace nstu::server

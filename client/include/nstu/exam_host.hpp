@@ -1,15 +1,22 @@
 #pragma once
 
 #include "nstu/agent_protocol.hpp"
+#include "nstu/exam_bridge.hpp"
+#include "nstu/exam_telemetry.hpp"
 
 #include <windows.h>
 
+#include <chrono>
 #include <filesystem>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
+#include <set>
+#include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace nstu::client {
 
@@ -102,6 +109,106 @@ struct ExamLockdownPolicy {
     const std::filesystem::path& user_data_root,
     std::string* error = nullptr);
 
+// Parses and validates raw browser telemetry samples JSON against strict limits.
+// Overrides browser-claimed identity/source and binds the native collector ID.
+// Rejects hostile JSON, oversized messages, disallowed fields, invalid reasons,
+// stale collector IDs, and bursts exceeding quota.
+[[nodiscard]] bool parse_browser_telemetry_samples(
+    std::string_view json,
+    std::uint64_t native_collector_id,
+    const std::set<std::string>& allowed_question_ids,
+    std::vector<nstu::exam::TelemetrySample>& out_samples,
+    std::string* error = nullptr);
+
+// IPC payload serialization for AgentMessageType::exam_telemetry_samples.
+[[nodiscard]] std::vector<std::byte> encode_exam_telemetry_samples_payload(
+    std::span<const nstu::exam::TelemetrySample> samples);
+
+[[nodiscard]] std::optional<std::vector<nstu::exam::TelemetrySample>>
+decode_exam_telemetry_samples_payload(
+    std::span<const std::byte> payload,
+    std::string* error = nullptr);
+
+// Helper for testing blocked shortcut recording outside of the Win32 hook.
+void record_blocked_shortcut_for_testing(std::uint32_t count = 1) noexcept;
+
+// Drains recorded blocked shortcuts into a coalesced TelemetrySample.
+// Returns std::nullopt if count is 0.
+[[nodiscard]] std::optional<nstu::exam::TelemetrySample>
+drain_blocked_shortcuts(std::uint64_t collector_id,
+                        std::uint64_t monotonic_elapsed_ms,
+                        std::uint64_t client_time_unix_ms) noexcept;
+
+// UI-thread telemetry state used by the native host independently of browser
+// creation. Only a validated bound tuple can enable its atomic shortcut gate.
+inline constexpr std::uint64_t kMaximumExamCollectorId = (1ULL << 53) - 1;
+// Random process origin, then monotonically allocated IDs for every host and
+// document generation. Zero means allocation unavailable; never wrap or reuse.
+[[nodiscard]] std::uint64_t allocate_exam_telemetry_collector_id() noexcept;
+
+// Local WebView JSON only; the existing wire and IPC codecs are unchanged.
+[[nodiscard]] std::string make_exam_telemetry_enable_json(
+    const exam::TelemetryEnable& enable, std::uint64_t collector_id,
+    std::uint64_t collector_elapsed_milliseconds, bool startup_retry = false);
+
+class ExamHostTelemetryState {
+public:
+    using Clock = std::chrono::steady_clock;
+    // Explicit IDs allow deterministic state tests. Production uses the native
+    // allocator. A valid context still starts if its ID is unavailable, with
+    // collection disabled, so telemetry cannot block an otherwise valid exam.
+    [[nodiscard]] bool start(exam::StateRequest context,
+        std::uint64_t collector_id = allocate_exam_telemetry_collector_id(),
+        Clock::time_point origin = Clock::now()) noexcept;
+    void stop() noexcept;
+    [[nodiscard]] bool apply_enable(const exam::TelemetryEnable& enable) noexcept;
+    void advance_collector(
+        std::uint64_t collector_id = allocate_exam_telemetry_collector_id(),
+        Clock::time_point origin = Clock::now()) noexcept;
+    // The posting callback is the real WebView publication boundary. Only a
+    // successful post establishes a generation-bound pending anchor.
+    [[nodiscard]] bool post_browser_enable(
+        const std::function<bool(std::string_view)>& post,
+        Clock::time_point now = Clock::now());
+    // UI maintenance retries the original pending startup at most once/second,
+    // with three attempts. Successful mapping ends retry scheduling.
+    [[nodiscard]] bool maintain_browser_startup(
+        const std::function<bool(std::string_view)>& post,
+        Clock::time_point now = Clock::now());
+    [[nodiscard]] std::optional<std::uint64_t> native_elapsed(
+        Clock::time_point now = Clock::now()) noexcept;
+    [[nodiscard]] bool forward_browser_samples(
+        std::string_view json, const std::set<std::string>& allowed_question_ids,
+        Clock::time_point receipt, std::vector<exam::TelemetrySample>& samples,
+        std::string* error = nullptr);
+    void record_blocked_shortcuts(std::uint32_t count = 1) noexcept;
+    [[nodiscard]] std::optional<exam::TelemetrySample> drain_blocked_shortcuts(
+        std::uint64_t monotonic_elapsed_ms, std::uint64_t client_time_unix_ms) noexcept;
+
+    [[nodiscard]] bool enabled() const noexcept { return active_enable_.has_value(); }
+    [[nodiscard]] std::uint64_t collector_id() const noexcept { return collector_id_; }
+    [[nodiscard]] const std::optional<exam::TelemetryEnable>& active_enable() const noexcept {
+        return active_enable_;
+    }
+
+private:
+    exam::StateRequest context_{};
+    std::uint64_t collector_id_ = 0;
+    std::optional<exam::TelemetryEnable> active_enable_;
+    ExamShortcutCounter shortcuts_;
+    Clock::time_point generation_origin_{};
+    std::optional<Clock::time_point> last_native_observation_;
+    std::optional<std::uint64_t> pending_browser_anchor_;
+    std::optional<std::uint64_t> last_browser_elapsed_;
+    bool browser_clock_bound_ = false;
+    std::optional<Clock::time_point> last_startup_attempt_;
+    unsigned startup_retry_attempts_ = 0;
+    // Quota belongs to the host lifetime, so document reload never resets it.
+    std::optional<Clock::time_point> browser_rate_window_start_;
+    std::uint32_t browser_rate_samples_ = 0;
+    void clear_browser_clock() noexcept;
+};
+
 class ExamHost {
 public:
     ExamHost();
@@ -112,16 +219,29 @@ public:
     // Must be called on the agent's UI/STA thread.  WebView2 initialization is
     // asynchronous; success means the kiosk window and validation completed,
     // while the state may remain `initializing` until the browser is ready.
+    // Agent command publications preserve enables for subsequently queued
+    // operations. The default publication is for standalone callers.
     [[nodiscard]] bool start(HWND owner, const ExamHostOptions& options,
                              ExamHostCallbacks callbacks,
-                             std::string* error = nullptr);
-    void stop() noexcept;
+                             std::string* error = nullptr,
+                             std::uint64_t command_publication = 0);
+    // A queued stop clears only through its publication; a standalone stop
+    // (publication zero) clears the entire pending enable slot.
+    void stop(std::uint64_t command_publication = 0) noexcept;
     void drain_bridge();
     void enforce_foreground() noexcept;
 
     [[nodiscard]] bool active() const noexcept;
     [[nodiscard]] ExamHostState state() const noexcept;
     [[nodiscard]] HWND window() const noexcept;
+    [[nodiscard]] std::uint64_t command_publication() const noexcept;
+
+    // Applies matching telemetry enable from service. Idempotent on duplicate.
+    // Stale or wrong-context enable is rejected/ignored.
+    [[nodiscard]] bool apply_telemetry_enable(
+        const nstu::exam::TelemetryEnable& enable) noexcept;
+    [[nodiscard]] bool telemetry_enabled() const noexcept;
+    [[nodiscard]] std::uint64_t telemetry_collector_id() const noexcept;
 
     // Routes messages from the agent window procedure.  Returns true when the
     // message belongs to the exam host and sets `result`.

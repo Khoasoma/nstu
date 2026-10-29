@@ -4,6 +4,9 @@
 
 # Project NSTU
 
+> **INDEV — nhánh công việc Phase 4:** Toàn bộ công việc đã commit của `feature/phase4-telemetry` được tích hợp vào `main` để tiếp tục phát triển và kiểm thử. Các tiêu chí lifecycle, runtime/VM và production vẫn chưa hoàn tất. Xem [trạng thái INDEV](docs/INDEV_STATUS.md).
+
+
 [English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Chẩn đoán tùy chọn](docs/TELEMETRY.vi.md) | [Thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)

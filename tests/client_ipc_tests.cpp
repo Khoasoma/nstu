@@ -14,6 +14,31 @@
 #include <vector>
 
 int main() {
+    {
+        using nstu::client::AgentMessage;
+        using nstu::client::AgentMessageType;
+        nstu::client::AgentServiceQueue queue(2);
+        queue.push({AgentMessageType::exam_answer_event, {std::byte{1}}});
+        queue.push({AgentMessageType::exam_ready, {std::byte{2}}});
+        for (unsigned i = 0; i < 256; ++i) queue.push({AgentMessageType::exam_telemetry_samples, {std::byte{3}}});
+        auto pending = queue.take_pending();
+        assert(pending.size() == 3);
+        assert(pending[0].type == AgentMessageType::exam_answer_event);
+        assert(pending[0].payload == std::vector{std::byte{1}});
+        assert(pending[1].type == AgentMessageType::exam_ready);
+        assert(pending[2].type == AgentMessageType::exam_telemetry_samples);
+        // Failed IPC retries keep their original order and stay ahead of
+        // telemetry received while the transport was stalled.
+        queue.push({AgentMessageType::exam_state_request, {std::byte{4}}});
+        queue.push(std::move(pending.back()), true); pending.pop_back();
+        while (!pending.empty()) { queue.push(std::move(pending.back()), true); pending.pop_back(); }
+        auto retry = queue.take_pending();
+        assert(retry.size() == 3);
+        assert(retry[0].type == AgentMessageType::exam_answer_event);
+        assert(retry[1].type == AgentMessageType::exam_ready);
+        assert(retry[2].type == AgentMessageType::exam_telemetry_samples);
+        assert(queue.take_pending().size() <= 1);
+    }
     const std::wstring pipe_name = L"\\\\.\\pipe\\nstu-test-" +
                                    std::to_wstring(GetCurrentProcessId());
     nstu::client::NamedPipe server;
@@ -177,6 +202,40 @@ int main() {
         assert(alive_decoded.has_value());
         assert(alive_decoded->type == nstu::client::AgentMessageType::exam_alive);
         assert(alive_decoded->payload.empty());
+    }
+
+    // Telemetry IPC message types (service <-> agent).
+    // Type 36 (exam_telemetry_enable) and Type 37 (exam_telemetry_samples).
+    for (const auto telemetry_type :
+         {nstu::client::AgentMessageType::exam_telemetry_enable,
+          nstu::client::AgentMessageType::exam_telemetry_samples}) {
+        const std::vector<std::byte> payload{std::byte{0xde}, std::byte{0xad}, std::byte{0xbe}, std::byte{0xef}};
+        const auto telem_wire = nstu::client::encode_agent_message({telemetry_type, payload});
+        assert(!telem_wire.empty());
+        const auto telem_decoded = nstu::client::decode_agent_message(telem_wire);
+        assert(telem_decoded.has_value());
+        assert(telem_decoded->type == telemetry_type);
+        assert(telem_decoded->payload == payload);
+    }
+
+    // Bound checks: 37 is accepted, 38 and above must be rejected, 0 must be rejected.
+    {
+        const auto valid_wire = nstu::client::encode_agent_message(
+            {nstu::client::AgentMessageType::exam_telemetry_samples, {}});
+        assert(!valid_wire.empty());
+        assert(nstu::client::decode_agent_message(valid_wire).has_value());
+
+        // Type 38 (just above bound) must be rejected
+        auto wire38 = valid_wire;
+        wire38[6] = std::byte{38};
+        wire38[7] = std::byte{0};
+        assert(!nstu::client::decode_agent_message(wire38).has_value());
+
+        // Type 0 (below bound) must be rejected
+        auto wire0 = valid_wire;
+        wire0[6] = std::byte{0};
+        wire0[7] = std::byte{0};
+        assert(!nstu::client::decode_agent_message(wire0).has_value());
     }
 
     auto corrupt = status_wire;

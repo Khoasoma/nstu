@@ -120,11 +120,7 @@ std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
 nstu::screen::BgraImage g_broadcast_image;
 std::mutex g_service_queue_mutex;
-std::deque<nstu::client::AgentMessage> g_service_queue;
-constexpr std::size_t kMaximumQueuedServiceMessages = 128;
-std::mutex g_exam_command_mutex;
-std::deque<nstu::client::AgentMessage> g_exam_commands;
-constexpr std::size_t kMaximumQueuedExamCommands = 4;
+nstu::client::AgentServiceQueue g_service_queue;
 bool g_exam_controls_suppressed = false;
 bool g_chat_was_visible_for_exam = false;
 bool g_lock_was_visible_for_exam = false;
@@ -157,13 +153,7 @@ void queue_service_message(nstu::client::AgentMessage message) noexcept {
     }
     try {
         std::scoped_lock lock(g_service_queue_mutex);
-        if (g_service_queue.size() >= kMaximumQueuedServiceMessages) {
-            // Answer/state messages are durable in the service outbox. Keep
-            // the queue bounded and discard the oldest volatile transport
-            // copy if the service is unavailable for an extended period.
-            g_service_queue.pop_front();
-        }
-        g_service_queue.push_back(std::move(message));
+        g_service_queue.push(std::move(message));
     } catch (...) {
         OutputDebugStringA("NSTU could not queue an exam service message\n");
     }
@@ -240,47 +230,16 @@ void hide_pairing_view() {
     notify_pairing_view();
 }
 
-void queue_exam_command_for_ui(nstu::client::AgentMessage message) noexcept {
-    try {
-        std::scoped_lock lock(g_exam_command_mutex);
-        if (message.type == nstu::client::AgentMessageType::exam_stop) {
-            // A stop supersedes any not-yet-started request. This prevents a
-            // delayed start from resurrecting a session after disconnect.
-            g_exam_commands.clear();
-        } else {
-            std::erase_if(g_exam_commands, [](const auto& queued) {
-                return queued.type ==
-                       nstu::client::AgentMessageType::exam_start;
-            });
-        }
-        if (g_exam_commands.size() >= kMaximumQueuedExamCommands) {
-            g_exam_commands.pop_front();
-        }
-        g_exam_commands.push_back(std::move(message));
-    } catch (...) {
+bool queue_exam_command_for_ui(nstu::client::AgentMessage message) noexcept {
+    if (!nstu::client::exam_bridge().publish_exam_command(std::move(message))) {
         OutputDebugStringA("NSTU could not queue an exam UI command\n");
+        return false;
     }
+    return true;
 }
 
-std::optional<nstu::client::AgentMessage> pop_exam_command_for_ui() noexcept {
-    try {
-        std::scoped_lock lock(g_exam_command_mutex);
-        if (g_exam_commands.empty()) return std::nullopt;
-        auto result = std::move(g_exam_commands.front());
-        g_exam_commands.pop_front();
-        return result;
-    } catch (...) {
-        return std::nullopt;
-    }
-}
-
-void clear_exam_commands_for_ui() noexcept {
-    try {
-        std::scoped_lock lock(g_exam_command_mutex);
-        g_exam_commands.clear();
-    } catch (...) {
-        OutputDebugStringA("NSTU could not clear queued exam commands\n");
-    }
+std::optional<nstu::client::QueuedExamCommand> pop_exam_command_for_ui() noexcept {
+    return nstu::client::exam_bridge().try_pop_exam_command();
 }
 
 std::string bytes_to_hex(std::span<const std::byte> bytes) {
@@ -326,7 +285,7 @@ bool flush_service_messages(nstu::client::NamedPipe& pipe) noexcept {
     std::deque<nstu::client::AgentMessage> pending;
     {
         std::scoped_lock lock(g_service_queue_mutex);
-        pending.swap(g_service_queue);
+        pending = g_service_queue.take_pending();
     }
     while (!pending.empty()) {
         auto message = std::move(pending.front());
@@ -338,17 +297,11 @@ bool flush_service_messages(nstu::client::NamedPipe& pipe) noexcept {
         // The already-sent prefix must not be replayed here; the service's
         // durable outbox handles duplicate answer events separately.
         std::scoped_lock lock(g_service_queue_mutex);
-        if (g_service_queue.size() >= kMaximumQueuedServiceMessages) {
-            g_service_queue.pop_back();
-        }
-        g_service_queue.push_front(std::move(message));
         while (!pending.empty()) {
-            if (g_service_queue.size() >= kMaximumQueuedServiceMessages) {
-                g_service_queue.pop_back();
-            }
-            g_service_queue.push_front(std::move(pending.back()));
+            g_service_queue.push(std::move(pending.back()), true);
             pending.pop_back();
         }
+        g_service_queue.push(std::move(message), true);
         return false;
     }
     return true;
@@ -433,12 +386,14 @@ void restore_control_window_order() {
 // layer supplies the already validated package options; this function only
 // wires the UI-owned host to the bounded, asynchronous pipe queue.
 [[maybe_unused]] bool start_exam_host_ui(
-    HWND owner, const nstu::client::ExamHostOptions& options) {
+    HWND owner, const nstu::client::ExamHostOptions& options,
+    std::uint64_t command_publication = 0) {
     if (g_exam_host.window() != nullptr) {
-        if (g_exam_host.active()) {
+        if (g_exam_host.active() &&
+            g_exam_host.command_publication() == command_publication) {
             return true;
         }
-        g_exam_host.stop();
+        // start() owns teardown while preserving its pending matching enable.
     }
     nstu::client::ExamHostCallbacks callbacks;
     callbacks.send_to_service = [](nstu::client::AgentMessage message) {
@@ -456,14 +411,14 @@ void restore_control_window_order() {
     };
     std::string error;
     const bool started = g_exam_host.start(owner, options, std::move(callbacks),
-                                           &error);
+                                           &error, command_publication);
     if (!started || g_exam_host.state() == nstu::client::ExamHostState::failed) {
         if (!error.empty()) {
             const std::string line = "NSTU exam host start failed: " + error +
                                      "\n";
             OutputDebugStringA(line.c_str());
         }
-        g_exam_host.stop();
+        g_exam_host.stop(command_publication);
         restore_control_window_order();
         return false;
     }
@@ -472,7 +427,8 @@ void restore_control_window_order() {
 }
 
 bool start_exam_from_command_ui(
-    HWND owner, const nstu::client::AgentMessage& message) {
+    HWND owner, const nstu::client::AgentMessage& message,
+    std::uint64_t command_publication = 0) {
     const auto request = nstu::exam::decode_exam_start_request(message.payload);
     if (!request) {
         OutputDebugStringA("NSTU rejected malformed exam start command\n");
@@ -583,7 +539,7 @@ bool start_exam_from_command_ui(
     options.context_json = context;
     options.expected_digest_hex = bytes_to_hex(request->package_digest);
     options.require_digest = true;
-    return start_exam_host_ui(owner, options);
+    return start_exam_host_ui(owner, options, command_publication);
 }
 
 std::uint64_t unix_milliseconds_now() {
@@ -918,6 +874,15 @@ void pipe_control_loop(HWND overlay) {
                         PostMessageW(overlay, kExamBridgeMessage, 0, 0);
                     }
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::exam_telemetry_enable) {
+                    // Telemetry enable is routed to the independent coalesced
+                    // bridge state so it cannot evict answer traffic or be
+                    // blocked behind queued answer responses.
+                    if (nstu::client::exam_bridge().publish_telemetry_enable(
+                            std::move(*message))) {
+                        PostMessageW(overlay, kExamBridgeMessage, 0, 0);
+                    }
+                } else if (message->type ==
                                nstu::client::AgentMessageType::exam_start ||
                            message->type ==
                                nstu::client::AgentMessageType::exam_stop) {
@@ -1085,13 +1050,14 @@ void pipe_control_loop(HWND overlay) {
         if (pipe_failed && !g_agent_stopping.load()) {
             // Fail closed for exams. The host owns the WebView2 controller and
             // must be stopped by the UI thread, never from this pipe thread.
-            queue_exam_command_for_ui(
+            const bool stop_queued = queue_exam_command_for_ui(
                 {nstu::client::AgentMessageType::exam_stop, {}});
             PostMessageW(overlay, kAgentCommandMessage,
                          static_cast<WPARAM>(
                              nstu::client::AgentMessageType::exam_start),
                          0);
-            PostMessageW(overlay, kExamServiceDisconnectedMessage, 0, 0);
+            PostMessageW(overlay, kExamServiceDisconnectedMessage,
+                         stop_queued ? 0 : 1, 0);
         }
     }
 }
@@ -1904,15 +1870,16 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             g_stream_fps = 0;
         } else if (type == nstu::client::AgentMessageType::exam_start) {
             while (const auto command = pop_exam_command_for_ui()) {
-                if (command->type ==
+                if (command->message.type ==
                     nstu::client::AgentMessageType::exam_stop) {
-                    g_exam_host.stop();
+                    g_exam_host.stop(command->publication);
                     restore_control_window_order();
                     continue;
                 }
-                if (command->type ==
+                if (command->message.type ==
                     nstu::client::AgentMessageType::exam_start) {
-                    (void)start_exam_from_command_ui(window, *command);
+                    (void)start_exam_from_command_ui(window, command->message,
+                                                    command->publication);
                 }
                 // Preserve command ordering: the queue coalesces starts and
                 // makes stop terminal, so one pass is enough in normal use.
@@ -1931,15 +1898,17 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         // The service is the authenticated control authority. If its pipe
         // disappears, stop the kiosk immediately; browser/service durable
         // queues retain answers for the next authenticated connection.
-        clear_exam_commands_for_ui();
-        if (g_exam_host.window() != nullptr) {
+        // The serialized queued stop owns teardown. A later reconnect/start
+        // may already have been processed before this notification arrives.
+        // Only a failed command publication requires an unconditional fallback.
+        if (wparam != 0 && g_exam_host.window() != nullptr) {
             g_exam_host.stop();
-            restore_control_window_order();
         }
+        restore_control_window_order();
         return 0;
     case kExamHostStatusMessage:
         if (g_exam_host.state() == nstu::client::ExamHostState::failed) {
-            g_exam_host.stop();
+            g_exam_host.stop(g_exam_host.command_publication());
             restore_control_window_order();
         }
         return 0;

@@ -100,6 +100,64 @@ int main() {
     assert(coalesced_parser.feed(coalesced, coalesced_frames));
     assert(coalesced_frames.size() == 2);
 
+    // Verify Phase 4 telemetry CommandTypes (55, 56, 57) and TCP framing.
+    static_assert(static_cast<std::uint16_t>(CommandType::exam_telemetry_enable) == 55);
+    static_assert(static_cast<std::uint16_t>(CommandType::exam_telemetry_batch) == 56);
+    static_assert(static_cast<std::uint16_t>(CommandType::exam_telemetry_ack) == 57);
+
+    for (const auto cmd_type : {CommandType::exam_telemetry_enable,
+                                CommandType::exam_telemetry_batch,
+                                CommandType::exam_telemetry_ack}) {
+        const CommandEnvelope telem_env{
+            .version = kVersion,
+            .type = cmd_type,
+            .payload_bytes = 4,
+            .request_id = 12345,
+        };
+        const auto env_wire = encode_command_header(telem_env);
+        const auto decoded_env = decode_command_header(env_wire);
+        assert(decoded_env.has_value());
+        assert(decoded_env->type == cmd_type);
+        assert(decoded_env->payload_bytes == 4);
+        assert(decoded_env->request_id == 12345);
+
+        const std::vector<std::byte> telem_payload{
+            std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+        const auto telem_tcp_wire = encode_tcp_frame(telem_env, telem_payload);
+        TcpFrameParser telem_parser;
+        std::vector<TcpFrame> parsed_frames;
+        assert(telem_parser.feed(telem_tcp_wire, parsed_frames));
+        assert(parsed_frames.size() == 1);
+        assert(parsed_frames[0].envelope.type == cmd_type);
+        assert(parsed_frames[0].payload == telem_payload);
+    }
+
+    // Characterize unknown-command handling for old peers:
+    // Future/unknown command types preserve framing and envelope fields without stream desync.
+    {
+        const CommandEnvelope unknown_env{
+            .version = kVersion,
+            .type = static_cast<CommandType>(99),
+            .payload_bytes = 3,
+            .request_id = 999,
+        };
+        const auto unknown_hdr_wire = encode_command_header(unknown_env);
+        const auto decoded_unknown = decode_command_header(unknown_hdr_wire);
+        assert(decoded_unknown.has_value());
+        assert(static_cast<std::uint16_t>(decoded_unknown->type) == 99);
+        assert(decoded_unknown->payload_bytes == 3);
+        assert(decoded_unknown->request_id == 999);
+
+        const std::vector<std::byte> unknown_payload{std::byte{'U'}, std::byte{'N'}, std::byte{'K'}};
+        const auto unknown_frame_wire = encode_tcp_frame(unknown_env, unknown_payload);
+        TcpFrameParser unknown_parser;
+        std::vector<TcpFrame> unknown_frames;
+        assert(unknown_parser.feed(unknown_frame_wire, unknown_frames));
+        assert(unknown_frames.size() == 1);
+        assert(static_cast<std::uint16_t>(unknown_frames[0].envelope.type) == 99);
+        assert(unknown_frames[0].payload == unknown_payload);
+    }
+
     auto malformed = frame_wire;
     malformed[sizeof(std::uint32_t)] = std::byte{0xff};
     TcpFrameParser malformed_parser;

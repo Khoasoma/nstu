@@ -9,6 +9,30 @@
 #include <type_traits>
 
 namespace nstu::client {
+
+void AgentServiceQueue::push(AgentMessage message, bool front) {
+    const bool telemetry = message.type == AgentMessageType::exam_telemetry_samples;
+    auto& queue = telemetry ? telemetry_ : protected_;
+    const auto capacity = telemetry ? std::size_t{8} : capacity_;
+    if (capacity == 0 || message.payload.size() > kMaximumAgentPayloadBytes) return;
+    if (queue.size() >= capacity) {
+        if (front) queue.pop_back();
+        else queue.pop_front();
+    }
+    if (front) queue.push_front(std::move(message));
+    else queue.push_back(std::move(message));
+}
+
+std::deque<AgentMessage> AgentServiceQueue::take_pending() {
+    std::deque<AgentMessage> pending;
+    pending.swap(protected_);
+    if (!telemetry_.empty()) {
+        pending.push_back(std::move(telemetry_.front()));
+        telemetry_.pop_front();
+    }
+    return pending;
+}
+
 namespace {
 
 inline constexpr std::uint32_t kAgentMagic = 0x4350494eu; // "NIPC"
@@ -46,7 +70,7 @@ bool read_le(std::span<const std::byte> input, std::size_t& offset, T& value) {
 
 bool valid_type(AgentMessageType type) noexcept {
     return type >= AgentMessageType::lock &&
-           type <= AgentMessageType::exam_alive;
+           type <= AgentMessageType::exam_telemetry_samples;
 }
 
 // Pairing text reaches the agent from the network and lands directly on a

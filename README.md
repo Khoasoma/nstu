@@ -4,6 +4,9 @@
 
 # Project NSTU
 
+> **INDEV — Phase 4 task branch:** The full committed `feature/phase4-telemetry` work is integrated into `main` for continued development and testing. Lifecycle, runtime/VM and production acceptance remain open. See [INDEV status](docs/INDEV_STATUS.md).
+
+
 [English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Optional diagnostics](docs/TELEMETRY.md) | [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-20%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
