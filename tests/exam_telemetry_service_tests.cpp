@@ -1783,7 +1783,286 @@ void test_stop_repair_keeps_existing_refusal_markers() {
 
 } // namespace
 
+
+namespace {
+
+using StopOutcome = nstu::client::TelemetryStopOutcome;
+using StopApplicability = nstu::client::TelemetryStopApplicability;
+using StopRevocation = nstu::client::TelemetryStopMemoryRevocation;
+using StopWitness = nstu::client::TelemetryStopDurableWitness;
+using StopCleanup = nstu::client::TelemetryStopCleanup;
+using StopError = nstu::client::TelemetryStopError;
+static_assert(noexcept(std::declval<Coordinator&>().on_explicit_stop_with_outcome()));
+static_assert(noexcept(std::declval<Coordinator&>().on_explicit_stop()));
+static_assert(std::is_same_v<decltype(StopOutcome{}.applicability), StopApplicability>);
+static_assert(std::is_same_v<decltype(StopOutcome{}.memory_revocation), StopRevocation>);
+static_assert(std::is_same_v<decltype(StopOutcome{}.durable_witness), StopWitness>);
+static_assert(std::is_same_v<decltype(StopOutcome{}.cleanup), StopCleanup>);
+static_assert(std::is_same_v<decltype(StopOutcome{}.error), StopError>);
+
+void assert_stop_outcome(const StopOutcome& result, StopApplicability applicability,
+                         StopRevocation memory, StopWitness witness,
+                         StopCleanup cleanup, StopError error) {
+    assert(result.applicability == applicability);
+    assert(result.memory_revocation == memory);
+    assert(result.durable_witness == witness);
+    assert(result.cleanup == cleanup);
+    assert(result.error == error);
+}
+
+void assert_stop_revoked_fixture(const std::filesystem::path& path,
+                                 const nstu::exam::TelemetryEnable& enable) {
+    const auto payload = coordinator_fixture_payload(path);
+    const auto offset = sequence_fixture_offset(enable);
+    assert(offset + 13 <= payload.size());
+    assert(payload[offset + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::revoked));
+}
+
+void assert_stop_restart_refuses_old(const std::filesystem::path& path,
+                                    const nstu::exam::TelemetryEnable& enable,
+                                    std::uint64_t now) {
+    Coordinator restarted([now] { return now; });
+    assert(restarted.open(path));
+    assert(restarted.lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked);
+    assert(!restarted.on_server_enable(enable));
+    assert(!restarted.next_batch_to_send(now));
+    assert(restarted.outbox_size() == 0);
+}
+
+void test_stop_outcomes_normal_repeated_and_nonapplicable() {
+    const auto now = test_now_ms();
+    Coordinator closed([now] { return now; });
+    assert_stop_outcome(closed.on_explicit_stop_with_outcome(), StopApplicability::closed,
+        StopRevocation::not_applicable, StopWitness::not_attempted, StopCleanup::not_needed, StopError::none);
+    const auto path = temp_outbox_path("stop_outcomes_normal");
+    assert(closed.open(path));
+    const auto unbound_state = pristine_ciphertext(path.wstring() + L".coord_state");
+    const auto unbound_payload = pristine_ciphertext(path);
+    assert_stop_outcome(closed.on_explicit_stop_with_outcome(), StopApplicability::unbound,
+        StopRevocation::not_applicable, StopWitness::not_attempted, StopCleanup::not_needed, StopError::none);
+    assert(pristine_ciphertext(path.wstring() + L".coord_state") == unbound_state);
+    assert(pristine_ciphertext(path) == unbound_payload);
+    assert_pristine_markers_absent(path);
+    const auto enable = make_enable("stop-outcome-normal");
+    assert(closed.on_server_enable(enable));
+    assert(closed.ingest_samples(std::vector{make_sample(171)}, now));
+    assert_stop_outcome(closed.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+        StopRevocation::revoked_now, StopWitness::protected_state_confirmed, StopCleanup::complete, StopError::none);
+    assert_stop_revoked_fixture(path, enable);
+    assert(closed.outbox_size() == 0 && !closed.next_batch_to_send(now));
+    assert_stop_outcome(closed.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+        StopRevocation::already_revoked, StopWitness::protected_state_confirmed, StopCleanup::complete, StopError::none);
+    closed.on_explicit_stop(); // Additive API retains the existing void entry point.
+    assert(!closed.on_server_enable(enable));
+    closed.close();
+    assert(!closed.is_open());
+    assert_stop_outcome(closed.on_explicit_stop_with_outcome(), StopApplicability::closed,
+        StopRevocation::not_applicable, StopWitness::not_attempted, StopCleanup::not_needed, StopError::none);
+    assert_stop_restart_refuses_old(path, enable, now);
+}
+
+void test_stop_outcomes_marker_fallback_and_error_priority() {
+    for (const bool block_payload : {false, true}) {
+        const auto path = temp_outbox_path(block_payload ? "stop_outcomes_fallback_cleanup" : "stop_outcomes_fallback");
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        const auto now = test_now_ms();
+        Coordinator coordinator([now] { return now; });
+        const auto enable = make_enable();
+        assert(coordinator.open(path));
+        assert(coordinator.on_server_enable(enable));
+        assert(coordinator.ingest_samples(std::vector{make_sample(172)}, now));
+        const auto original_state = pristine_ciphertext(state);
+        const auto original_payload = pristine_ciphertext(path);
+        {
+            LockedFile state_lock(state);
+            std::unique_ptr<LockedFile> payload_lock;
+            if (block_payload) payload_lock = std::make_unique<LockedFile>(path);
+            assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+                StopRevocation::revoked_now, StopWitness::refusal_marker_confirmed, StopCleanup::pending,
+                StopError::protected_state_failed);
+            assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked);
+            assert(pristine_ciphertext(state) == original_state);
+            assert_pristine_regular_file(marker);
+            assert(pristine_ciphertext(marker) == std::vector<std::byte>{std::byte{1}});
+            if (block_payload) assert(pristine_ciphertext(path) == original_payload);
+            else {
+                nstu::exam::TelemetryOutbox inspect;
+                assert(inspect.open(path, now, nullptr));
+                assert(inspect.size() == 0);
+            }
+            Coordinator restarted([now] { return now; });
+            assert(!restarted.open(path));
+            assert(!restarted.on_server_enable(enable));
+            assert(!restarted.next_batch_to_send(now));
+        }
+        const auto history = coordinator.last_error();
+        assert(!history.empty());
+        assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+            StopRevocation::already_revoked, StopWitness::protected_state_confirmed, StopCleanup::complete, StopError::none);
+        assert(coordinator.last_error() == history); // Current success does not erase historical diagnostics.
+        assert(!std::filesystem::exists(marker));
+        assert(!coordinator.next_batch_to_send(now));
+        coordinator.close();
+        assert_stop_restart_refuses_old(path, enable, now);
+    }
+}
+
+void test_stop_outcomes_existing_markers_are_unconfirmed() {
+    for (const bool empty : {false, true}) {
+        const auto path = temp_outbox_path(empty ? "stop_outcomes_marker_empty" : "stop_outcomes_marker_bytes");
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        const auto now = test_now_ms();
+        Coordinator coordinator([now] { return now; });
+        const auto enable = make_enable();
+        assert(coordinator.open(path));
+        assert(coordinator.on_server_enable(enable));
+        assert(coordinator.ingest_samples(std::vector{make_sample(173)}, now));
+        const HANDLE file = CreateFileW(marker.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
+        assert(file != INVALID_HANDLE_VALUE);
+        const std::array<std::byte, 3> sentinel{std::byte{0x24}, std::byte{0x68}, std::byte{0xac}};
+        if (!empty) {
+            DWORD written = 0;
+            assert(WriteFile(file, sentinel.data(), static_cast<DWORD>(sentinel.size()), &written, nullptr));
+            assert(written == sentinel.size());
+        }
+        assert(FlushFileBuffers(file));
+        assert(CloseHandle(file));
+        const auto original_state = pristine_ciphertext(state);
+        const auto marker_size = std::filesystem::file_size(marker);
+        std::vector<std::byte> original_marker;
+        if (!empty) original_marker = pristine_ciphertext(marker);
+        {
+            LockedFile state_lock(state);
+            LockedFile payload_lock(path); // Unconfirmed witness outranks the simultaneous purge failure.
+            assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+                StopRevocation::revoked_now, StopWitness::unconfirmed, StopCleanup::pending,
+                StopError::revocation_witness_unconfirmed);
+            assert(pristine_ciphertext(state) == original_state);
+            assert(std::filesystem::file_size(marker) == marker_size);
+            if (!empty) assert(pristine_ciphertext(marker) == original_marker);
+            Coordinator restarted([now] { return now; });
+            assert(!restarted.open(path));
+            assert(!restarted.on_server_enable(enable));
+            assert(!restarted.next_batch_to_send(now));
+            assert(std::filesystem::file_size(marker) == marker_size);
+            if (!empty) assert(pristine_ciphertext(marker) == original_marker);
+        }
+        assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+            StopRevocation::already_revoked, StopWitness::protected_state_confirmed, StopCleanup::complete, StopError::none);
+        assert(!std::filesystem::exists(marker) && !coordinator.next_batch_to_send(now));
+        coordinator.close();
+        assert_stop_restart_refuses_old(path, enable, now);
+    }
+}
+
+void test_stop_outcomes_purge_and_marker_removal_failures() {
+    for (const bool block_marker : {false, true}) {
+        const auto path = temp_outbox_path(block_marker ? "stop_outcomes_marker_cleanup" : "stop_outcomes_purge");
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        const auto now = test_now_ms();
+        Coordinator coordinator([now] { return now; });
+        const auto enable = make_enable();
+        assert(coordinator.open(path));
+        assert(coordinator.on_server_enable(enable));
+        assert(coordinator.ingest_samples(std::vector{make_sample(174)}, now));
+        const auto original_payload = pristine_ciphertext(path);
+        if (block_marker) assert(stop_native_create_probe(marker, true) == ERROR_SUCCESS);
+        const auto locked_path = block_marker ? marker : path;
+        {
+            LockedFile cleanup_lock(locked_path);
+            assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+                StopRevocation::revoked_now, StopWitness::protected_state_confirmed, StopCleanup::pending, StopError::cleanup_failed);
+            assert_stop_revoked_fixture(path, enable);
+            if (block_marker) {
+                assert(pristine_ciphertext(marker) == std::vector<std::byte>{std::byte{1}});
+                nstu::exam::TelemetryOutbox inspect;
+                assert(inspect.open(path, now, nullptr));
+                assert(inspect.size() == 0);
+            } else assert(pristine_ciphertext(path) == original_payload);
+            assert(!coordinator.next_batch_to_send(now));
+            assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+                StopRevocation::already_revoked, StopWitness::protected_state_confirmed, StopCleanup::pending, StopError::cleanup_failed);
+        }
+        assert(coordinator.maintain(now));
+        assert(!coordinator.next_batch_to_send(now) && coordinator.outbox_size() == 0);
+        assert(!std::filesystem::exists(marker));
+        assert_stop_outcome(coordinator.on_explicit_stop_with_outcome(), StopApplicability::applicable,
+            StopRevocation::already_revoked, StopWitness::protected_state_confirmed, StopCleanup::complete, StopError::none);
+        coordinator.close();
+        assert_stop_restart_refuses_old(path, enable, now);
+    }
+}
+
+void test_stop_outcomes_second_state_write_failure_retains_first_witness() {
+    const auto path = temp_outbox_path("stop_outcomes_second_state");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms();
+    const auto aged = now + nstu::exam::kTelemetryRetentionMilliseconds;
+    bool armed = false;
+    unsigned stop_clock_calls = 0;
+    std::unique_ptr<LockedFile> state_lock;
+    Coordinator coordinator([&] {
+        if (!armed) return now;
+        ++stop_clock_calls;
+        if (stop_clock_calls == 1) return std::uint64_t{0};
+        assert(stop_clock_calls == 2);
+        state_lock = std::make_unique<LockedFile>(state); // Flush fallback occurs after initial publication.
+        return aged;
+    });
+    const auto enable = make_enable();
+    assert(coordinator.open(path));
+    assert(coordinator.on_server_enable(enable));
+    coordinator.on_disconnect();
+    assert(!coordinator.ingest_samples(std::vector{make_sample(175)}, now));
+    assert(coordinator.not_authorized_sample_count() == 1);
+    assert(coordinator.on_server_enable(enable));
+    assert(coordinator.ingest_samples(std::vector{make_sample(176)}, now));
+    const auto original_payload = pristine_ciphertext(path);
+    const auto before = coordinator_fixture_payload(path);
+    const auto offset = sequence_fixture_offset(enable);
+    assert(before[offset + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::enabled));
+    assert(before[offset + 29] == std::byte{1}); // Persisted unauthorized count before stop.
+    armed = true;
+    const auto result = coordinator.on_explicit_stop_with_outcome();
+    armed = false;
+    assert(stop_clock_calls == 2 && state_lock);
+    assert_stop_outcome(result, StopApplicability::applicable, StopRevocation::revoked_now,
+        StopWitness::protected_state_confirmed, StopCleanup::pending, StopError::protected_state_failed);
+    const auto published = coordinator_fixture_payload(path);
+    assert(published[offset + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::revoked));
+    assert(std::equal(before.begin() + offset + 13, before.begin() + offset + 45,
+                      published.begin() + offset + 13)); // Initial publication retains old loss window/counters.
+    assert(coordinator.not_authorized_sample_count() == 0);
+    assert(coordinator.dropped_sample_count() == 0 && coordinator.dropped_batch_count() == 0);
+    assert(pristine_ciphertext(path) == original_payload);
+    assert(!std::filesystem::exists(state.wstring() + L".blocked")); // No new fallback after second write failure.
+    state_lock.reset();
+    assert(coordinator.maintain(aged));
+    assert(!coordinator.next_batch_to_send(aged) && coordinator.outbox_size() == 0);
+    const auto recovered = coordinator_fixture_payload(path);
+    assert(std::all_of(recovered.begin() + offset + 13, recovered.begin() + offset + 45,
+                       [](std::byte value) { return value == std::byte{0}; }));
+    coordinator.close();
+    assert_stop_restart_refuses_old(path, enable, aged);
+}
+
+void run_stop_outcome_tests() {
+    test_stop_outcomes_normal_repeated_and_nonapplicable();
+    test_stop_outcomes_marker_fallback_and_error_priority();
+    test_stop_outcomes_existing_markers_are_unconfirmed();
+    test_stop_outcomes_purge_and_marker_removal_failures();
+    test_stop_outcomes_second_state_write_failure_retains_first_witness();
+    std::cout << "Stop outcome native state/marker/cleanup/recovery controls passed.\n";
+}
+
+} // namespace
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "stop-outcomes") { run_stop_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "stop-marker-controls") { test_stop_repair_preserves_active_empty_recovery(); test_stop_repair_keeps_existing_refusal_markers(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "stop-durability") { test_stop_survives_state_and_marker_temp_failures(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "pristine-final") { test_pristine_final_state_without_outbox(); return 0; }
@@ -1912,6 +2191,7 @@ int main(int argc, char** argv) {
     test_stop_survives_state_and_marker_temp_failures();
     test_stop_repair_preserves_active_empty_recovery();
     test_stop_repair_keeps_existing_refusal_markers();
+    run_stop_outcome_tests();
     std::cout << "All exam_telemetry_service_tests passed successfully.\n";
     return 0;
 }

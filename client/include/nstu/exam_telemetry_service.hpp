@@ -19,6 +19,25 @@ namespace nstu::client {
 inline constexpr std::size_t kMaximumLifetimeProducerGenerations = 16;
 inline constexpr std::size_t kMaximumBatchSamplesLimit = 32;
 
+// Current explicit-stop facts contain no identity, payload, or historical diagnostics.
+enum class TelemetryStopApplicability : std::uint8_t { closed, unbound, applicable };
+enum class TelemetryStopMemoryRevocation : std::uint8_t { not_applicable, revoked_now, already_revoked };
+enum class TelemetryStopDurableWitness : std::uint8_t {
+    not_attempted, protected_state_confirmed, refusal_marker_confirmed, unconfirmed
+};
+enum class TelemetryStopCleanup : std::uint8_t { not_needed, complete, pending };
+enum class TelemetryStopError : std::uint8_t {
+    none, protected_state_failed, revocation_witness_unconfirmed, cleanup_failed
+};
+
+struct TelemetryStopOutcome {
+    TelemetryStopApplicability applicability = TelemetryStopApplicability::closed;
+    TelemetryStopMemoryRevocation memory_revocation = TelemetryStopMemoryRevocation::not_applicable;
+    TelemetryStopDurableWitness durable_witness = TelemetryStopDurableWitness::not_attempted;
+    TelemetryStopCleanup cleanup = TelemetryStopCleanup::not_needed;
+    TelemetryStopError error = TelemetryStopError::none;
+};
+
 // Callable service coordinator that encapsulates telemetry batching,
 // lifecycle, producer identity generation, monotonic sequencing, and
 // outbox management without relying on global service variables.
@@ -57,7 +76,15 @@ public:
     // Service shutting down: suspends collection, retains active outbox.
     void on_service_shutdown() noexcept;
 
-    // Explicit stop command received: revokes context and purges outbox immediately.
+    // Explicit stop command received: revokes context and attempts durable cleanup.
+    // Facts are observed in this call under the coordinator lock; cleanup may need retry.
+    // Confirmed witnesses require this invocation's successful writer; an existing
+    // refusal marker alone is unconfirmed. A later loss-counter write can fail,
+    // leaving protected_state_confirmed together with protected_state_failed.
+    // Cleanup is complete only after payload cleanup and marker removal clear
+    // the pending cleanup state. Error priority is witness uncertainty, state write, cleanup.
+    [[nodiscard]] TelemetryStopOutcome on_explicit_stop_with_outcome() noexcept;
+    // Compatibility entry point explicitly discards the current operation outcome.
     void on_explicit_stop() noexcept;
 
     // Ingests raw samples from agent IPC:

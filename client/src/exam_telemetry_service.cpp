@@ -23,6 +23,17 @@ constexpr std::uint32_t kCoordinatorStateMagic = 0x544c4d53; // "TLMS"
 constexpr std::uint16_t kCoordinatorStateVersion = 3;
 constexpr char kCoordinatorEntropyText[] = "NSTU-Exam-Telemetry-Service-Coordinator-v1";
 
+void record_stop_error(TelemetryStopOutcome* outcome, TelemetryStopError error) noexcept {
+    if (outcome == nullptr) return;
+    // Witness uncertainty outranks a state-write failure, which outranks cleanup.
+    if (outcome->error == TelemetryStopError::none ||
+        error == TelemetryStopError::revocation_witness_unconfirmed ||
+        (error == TelemetryStopError::protected_state_failed &&
+         outcome->error == TelemetryStopError::cleanup_failed)) {
+        outcome->error = error;
+    }
+}
+
 inline void set_error(std::string* error, std::string_view message) {
     if (error != nullptr && error->empty()) {
         *error = message;
@@ -396,20 +407,27 @@ struct ExamTelemetryServiceCoordinator::Impl {
         return true;
     }
 
-    bool persist_revocation_locked(std::string* error, std::uint64_t now) {
+    bool persist_revocation_locked(std::string* error, std::uint64_t now,
+                                   TelemetryStopOutcome* outcome = nullptr) {
         // Every revocation uses the same durable fallback before payload cleanup.
         if (!persist_state_locked()) {
+            record_stop_error(outcome, TelemetryStopError::protected_state_failed);
             if (!write_revocation_refusal_marker(state_path.wstring() + L".blocked")) {
+                if (outcome != nullptr) outcome->durable_witness = TelemetryStopDurableWitness::unconfirmed;
+                record_stop_error(outcome, TelemetryStopError::revocation_witness_unconfirmed);
                 fail("revocation state and marker persistence failed", error);
             } else {
+                if (outcome != nullptr) outcome->durable_witness = TelemetryStopDurableWitness::refusal_marker_confirmed;
                 fail("revocation state persistence failed; durable marker blocks restart", error);
             }
             if (!outbox.purge()) {
+                record_stop_error(outcome, TelemetryStopError::cleanup_failed);
                 fail("revocation persistence and payload cleanup failed; restart blocked when marker is durable", error);
             }
             return false;
         }
-        return flush_locked(error, now);
+        if (outcome != nullptr) outcome->durable_witness = TelemetryStopDurableWitness::protected_state_confirmed;
+        return flush_locked(error, now, outcome);
     }
 
     bool pending_has_expired(std::uint64_t now) const noexcept {
@@ -462,13 +480,15 @@ struct ExamTelemetryServiceCoordinator::Impl {
         return true;
     }
 
-    bool flush_locked(std::string* error = nullptr, std::uint64_t now = 0) {
+    bool flush_locked(std::string* error = nullptr, std::uint64_t now = 0,
+                      TelemetryStopOutcome* outcome = nullptr) {
         if (now == 0) now = current_time_ms();
         expire_loss_locked(now);
         if (pending_has_expired(now)) {
             return revoke_pending_locked("pending telemetry expired; context revoked", error, now);
         }
         if (state_dirty && !persist_state_locked()) {
+            record_stop_error(outcome, TelemetryStopError::protected_state_failed);
             return fail("coordinator state persistence failed", error);
         }
         if (cleanup_pending) {
@@ -476,13 +496,23 @@ struct ExamTelemetryServiceCoordinator::Impl {
                 // A failed purge latches the old instance closed. A fresh instance
                 // follows its durable revoked marker without ever authorizing replay.
                 outbox = exam::TelemetryOutbox{};
-                if (!outbox.open(outbox_path, error)) return fail("revoked payload cleanup reopen failed", error);
+                if (!outbox.open(outbox_path, error)) {
+                    record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                    return fail("revoked payload cleanup reopen failed", error);
+                }
             }
-            if (!outbox.purge(error)) return fail("revoked payload cleanup failed", error);
+            if (!outbox.purge(error)) {
+                record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                return fail("revoked payload cleanup failed", error);
+            }
             std::error_code ec;
             std::filesystem::remove(state_path.wstring() + L".blocked", ec);
-            if (ec) return fail("revocation marker cleanup failed", error);
+            if (ec) {
+                record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                return fail("revocation marker cleanup failed", error);
+            }
             cleanup_pending = false;
+            if (outcome != nullptr) outcome->cleanup = TelemetryStopCleanup::complete;
         }
         return finish_pending_locked(error, now);
     }
@@ -809,16 +839,29 @@ void ExamTelemetryServiceCoordinator::on_service_shutdown() noexcept {
     (void)impl_->flush_locked();
 }
 
-void ExamTelemetryServiceCoordinator::on_explicit_stop() noexcept {
+TelemetryStopOutcome ExamTelemetryServiceCoordinator::on_explicit_stop_with_outcome() noexcept {
     std::scoped_lock lock(impl_->mutex);
-    if (!impl_->is_open) return;
-    if (!impl_->context.bound()) return;
+    TelemetryStopOutcome outcome;
+    if (!impl_->is_open) return outcome;
+    if (!impl_->context.bound()) {
+        outcome.applicability = TelemetryStopApplicability::unbound;
+        return outcome;
+    }
+    outcome.applicability = TelemetryStopApplicability::applicable;
+    outcome.memory_revocation = impl_->lifecycle.is_revoked()
+        ? TelemetryStopMemoryRevocation::already_revoked : TelemetryStopMemoryRevocation::revoked_now;
     (void)impl_->lifecycle.on_explicit_stop();
     impl_->pending_batch.reset();
     impl_->pending_started_ms = 0;
     impl_->cleanup_pending = true;
     impl_->state_dirty = true;
-    (void)impl_->persist_revocation_locked(nullptr, impl_->current_time_ms());
+    outcome.cleanup = TelemetryStopCleanup::pending;
+    (void)impl_->persist_revocation_locked(nullptr, impl_->current_time_ms(), &outcome);
+    return outcome;
+}
+
+void ExamTelemetryServiceCoordinator::on_explicit_stop() noexcept {
+    (void)on_explicit_stop_with_outcome();
 }
 
 bool ExamTelemetryServiceCoordinator::ingest_samples(
