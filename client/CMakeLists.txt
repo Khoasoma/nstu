@@ -12,6 +12,7 @@ add_library(nstu_client_platform STATIC
     src/exam_telemetry_lifecycle.cpp
     src/exam_telemetry_router.cpp
     src/exam_telemetry_service.cpp
+    src/exam_telemetry_stop_reporting.cpp
     src/named_pipe.cpp
     src/session.cpp
     src/service_install.cpp
