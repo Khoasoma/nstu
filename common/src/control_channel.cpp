@@ -459,6 +459,22 @@ bool AuthenticatedControlChannel::send(protocol::CommandType type,
                                        std::uint64_t request_id,
                                        std::span<const std::byte> payload,
                                        std::string* error) {
+    return send_impl(type, request_id, payload, std::nullopt, error);
+}
+
+bool AuthenticatedControlChannel::send(
+    protocol::CommandType type, std::uint64_t request_id,
+    std::span<const std::byte> payload,
+    std::chrono::steady_clock::time_point deadline,
+    std::string* error) {
+    return send_impl(type, request_id, payload, deadline, error);
+}
+
+bool AuthenticatedControlChannel::send_impl(
+    protocol::CommandType type, std::uint64_t request_id,
+    std::span<const std::byte> payload,
+    std::optional<std::chrono::steady_clock::time_point> deadline,
+    std::string* error) {
     if (!socket_.is_open() || send_exhausted_ || is_handshake_command(type)) {
         set_error(error, "authenticated channel cannot send");
         return false;
@@ -471,8 +487,16 @@ bool AuthenticatedControlChannel::send(protocol::CommandType type,
     };
     const auto wire = encode_authenticated_command(
         session_key_, envelope, send_sequence_, payload);
-    if (wire.empty() || socket_.send_all(wire, error) !=
-                            static_cast<int>(wire.size())) {
+    if (wire.empty()) {
+        if (deadline) set_error(error, "authenticated command encoding failed");
+        return false;
+    }
+    const int sent = deadline ? socket_.send_all(wire, *deadline, error)
+                              : socket_.send_all(wire, error);
+    if (sent != static_cast<int>(wire.size())) {
+        // Preserve ordinary-send failure behavior; deadline failures invalidate
+        // the stream and securely close the authenticated channel.
+        if (deadline) close();
         return false;
     }
     if (send_sequence_ == std::numeric_limits<std::uint64_t>::max()) {
@@ -481,6 +505,14 @@ bool AuthenticatedControlChannel::send(protocol::CommandType type,
         ++send_sequence_;
     }
     return true;
+}
+
+bool AuthenticatedControlChannel::send_with_deadline(
+    protocol::CommandType type, std::uint64_t request_id,
+    std::span<const std::byte> payload,
+    std::chrono::steady_clock::time_point deadline,
+    std::string* error) {
+    return send(type, request_id, payload, deadline, error);
 }
 
 std::optional<AuthenticatedCommand> AuthenticatedControlChannel::receive(

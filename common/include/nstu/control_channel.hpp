@@ -60,6 +60,7 @@ struct AuthenticatedCommand {
     std::span<const std::byte> session_key,
     const protocol::TcpFrame& wire_frame, std::string* error = nullptr);
 
+// Socket I/O and command sequence state have one owner thread at a time.
 class AuthenticatedControlChannel {
 public:
     AuthenticatedControlChannel(net::TcpSocket socket,
@@ -76,6 +77,17 @@ public:
                             std::uint64_t request_id,
                             std::span<const std::byte> payload,
                             std::string* error = nullptr);
+    [[nodiscard]] bool send(protocol::CommandType type,
+                            std::uint64_t request_id,
+                            std::span<const std::byte> payload,
+                            std::chrono::steady_clock::time_point deadline,
+                            std::string* error = nullptr);
+    [[nodiscard]] bool send_with_deadline(
+        protocol::CommandType type,
+        std::uint64_t request_id,
+        std::span<const std::byte> payload,
+        std::chrono::steady_clock::time_point deadline,
+        std::string* error = nullptr);
     [[nodiscard]] std::optional<AuthenticatedCommand> receive(
         std::string* error = nullptr);
     [[nodiscard]] bool wait_readable(std::uint32_t timeout_ms,
@@ -84,6 +96,12 @@ public:
     void close() noexcept;
 
 private:
+    [[nodiscard]] bool send_impl(
+        protocol::CommandType type, std::uint64_t request_id,
+        std::span<const std::byte> payload,
+        std::optional<std::chrono::steady_clock::time_point> deadline,
+        std::string* error);
+
     net::TcpSocket socket_;
     security::Sha256Digest session_key_{};
     security::ControlSequenceGuard receive_sequence_;

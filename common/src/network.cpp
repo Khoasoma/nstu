@@ -21,7 +21,124 @@ void set_error(std::string* error, const char* message) {
     }
 }
 
+
+#if defined(_WIN32)
+std::chrono::steady_clock::time_point deadline_now(void*) noexcept {
+    return std::chrono::steady_clock::now();
+}
+
+bool deadline_set_nonblocking(void* context, bool enabled) noexcept {
+    const auto& socket = *static_cast<TcpSocket*>(context);
+    u_long mode = enabled ? 1u : 0u;
+    return ioctlsocket(static_cast<SOCKET>(socket.native_handle()), FIONBIO, &mode) == 0;
+}
+
+detail::DeadlineSendAttempt deadline_send(
+    void* context, std::span<const std::byte> bytes) noexcept {
+    const auto& socket = *static_cast<TcpSocket*>(context);
+    const int result = ::send(static_cast<SOCKET>(socket.native_handle()),
+        reinterpret_cast<const char*>(bytes.data()), static_cast<int>(bytes.size()), 0);
+    const bool would_block = result == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK;
+    return {result, would_block};
+}
+
+detail::DeadlineWaitResult deadline_wait_writable(
+    void* context, std::chrono::steady_clock::time_point deadline) noexcept {
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= deadline) return detail::DeadlineWaitResult::timed_out;
+    const auto wait = detail::deadline_wait_duration(deadline - now);
+    fd_set writable;
+    FD_ZERO(&writable);
+    FD_SET(static_cast<SOCKET>(static_cast<TcpSocket*>(context)->native_handle()), &writable);
+    timeval timeout{wait.seconds, wait.microseconds};
+    const int result = select(0, nullptr, &writable, nullptr, &timeout);
+    if (result == SOCKET_ERROR) return detail::DeadlineWaitResult::failed;
+    return result == 0 ? detail::DeadlineWaitResult::timed_out : detail::DeadlineWaitResult::ready;
+}
+
+void deadline_close(void* context) noexcept {
+    static_cast<TcpSocket*>(context)->close();
+}
+#endif
+
 } // namespace
+
+detail::DeadlineWaitDuration detail::deadline_wait_duration(
+    std::chrono::steady_clock::duration remaining) noexcept {
+    if (remaining <= std::chrono::steady_clock::duration::zero()) return {};
+    const auto microseconds = std::chrono::ceil<std::chrono::microseconds>(remaining).count();
+    const auto seconds = microseconds / 1'000'000LL;
+    const auto maximum_seconds = static_cast<std::int64_t>(std::numeric_limits<long>::max());
+    if (seconds > maximum_seconds) return {std::numeric_limits<long>::max(), 999'999};
+    return {static_cast<long>(seconds), static_cast<long>(microseconds % 1'000'000LL)};
+}
+
+int detail::send_all_with_deadline(
+    std::span<const std::byte> bytes,
+    std::chrono::steady_clock::time_point deadline,
+    const DeadlineSendOperations& operations,
+    std::string* error) {
+    if (bytes.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        set_error(error, "invalid TCP send");
+        return -1;
+    }
+    if (bytes.empty()) return 0;
+    if (operations.now(operations.context) >= deadline) {
+        operations.close(operations.context);
+        set_error(error, "TCP send deadline expired");
+        return -1;
+    }
+    if (!operations.set_nonblocking(operations.context, true)) {
+        operations.close(operations.context);
+        set_error(error, "failed to configure socket for deadline send");
+        return -1;
+    }
+    struct CloseUnlessRestored {
+        const DeadlineSendOperations& operations;
+        bool active = true;
+        ~CloseUnlessRestored() {
+            if (active) operations.close(operations.context);
+        }
+    } guard{operations};
+    std::size_t sent = 0;
+    while (sent < bytes.size()) {
+        if (operations.now(operations.context) >= deadline) {
+            set_error(error, "TCP send deadline expired");
+            return -1;
+        }
+        const auto to_send = std::min(bytes.size() - sent, std::size_t{16384});
+        const auto attempt = operations.send(operations.context, bytes.subspan(sent, to_send));
+        if (attempt.bytes > 0 && static_cast<std::size_t>(attempt.bytes) <= to_send) {
+            sent += static_cast<std::size_t>(attempt.bytes);
+            continue;
+        }
+        if (attempt.bytes < 0 && attempt.would_block) {
+            if (operations.now(operations.context) >= deadline) {
+                set_error(error, "TCP send deadline expired");
+                return -1;
+            }
+            if (operations.wait_writable(operations.context, deadline) == DeadlineWaitResult::failed) {
+                set_error(error, "TCP socket wait failed during send");
+                return -1;
+            }
+            // A clamped or rounded wait can finish before the deadline. Only
+            // the original steady deadline decides expiry, even after progress.
+            continue;
+        }
+        set_error(error, "TCP send failed");
+        return -1;
+    }
+    if (operations.now(operations.context) >= deadline) {
+        set_error(error, "TCP send deadline expired");
+        return -1;
+    }
+    if (!operations.set_nonblocking(operations.context, false)) {
+        set_error(error, "TCP blocking mode restore failed after deadline send");
+        return -1;
+    }
+    guard.active = false;
+    return static_cast<int>(sent);
+}
 
 TcpSocket::TcpSocket() noexcept = default;
 
@@ -265,6 +382,32 @@ int TcpSocket::send_all(std::span<const std::byte> bytes,
 #endif
 }
 
+int TcpSocket::send_all(std::span<const std::byte> bytes,
+                        std::chrono::steady_clock::time_point deadline,
+                        std::string* error) {
+#if defined(_WIN32)
+    if (!is_open() || bytes.size() >
+        static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        set_error(error, "invalid TCP send");
+        return -1;
+    }
+    const detail::DeadlineSendOperations operations{
+        .context = this,
+        .now = deadline_now,
+        .set_nonblocking = deadline_set_nonblocking,
+        .send = deadline_send,
+        .wait_writable = deadline_wait_writable,
+        .close = deadline_close,
+    };
+    return detail::send_all_with_deadline(bytes, deadline, operations, error);
+#else
+    (void)bytes;
+    (void)deadline;
+    set_error(error, "TCP transport requires Windows");
+    return -1;
+#endif
+}
+
 int TcpSocket::receive(std::span<std::byte> bytes, std::string* error) const {
 #if defined(_WIN32)
     if (!is_open() || bytes.size() >
@@ -304,6 +447,33 @@ bool TcpSocket::wait_readable(std::uint32_t timeout_ms,
     const int result = select(0, &read_set, nullptr, nullptr, &timeout);
     if (result == SOCKET_ERROR) {
         set_error(error, "socket readiness wait failed");
+        return false;
+    }
+    return result > 0;
+#else
+    (void)timeout_ms;
+    set_error(error, "TCP transport requires Windows");
+    return false;
+#endif
+}
+
+bool TcpSocket::wait_writable(std::uint32_t timeout_ms,
+                              std::string* error) const {
+#if defined(_WIN32)
+    if (!is_open()) {
+        set_error(error, "socket is not open");
+        return false;
+    }
+    fd_set write_set;
+    FD_ZERO(&write_set);
+    FD_SET(static_cast<SOCKET>(handle_), &write_set);
+    timeval timeout{
+        static_cast<long>(timeout_ms / 1000u),
+        static_cast<long>((timeout_ms % 1000u) * 1000u),
+    };
+    const int result = select(0, nullptr, &write_set, nullptr, &timeout);
+    if (result == SOCKET_ERROR) {
+        set_error(error, "socket writability wait failed");
         return false;
     }
     return result > 0;

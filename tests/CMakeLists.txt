@@ -111,6 +111,13 @@ nstu_enable_test_assertions(nstu_control_channel_tests)
 add_test(NAME nstu.control_channel COMMAND nstu_control_channel_tests)
 
 if(WIN32)
+    add_executable(nstu_control_channel_native_deadline_tests
+        control_channel_native_deadline_tests.cpp)
+    target_link_libraries(nstu_control_channel_native_deadline_tests PRIVATE nstu_common)
+    nstu_enable_warnings(nstu_control_channel_native_deadline_tests)
+    nstu_enable_test_assertions(nstu_control_channel_native_deadline_tests)
+    add_test(NAME nstu.control_channel_native_deadline COMMAND nstu_control_channel_native_deadline_tests)
+
     add_executable(nstu_discovery_tests discovery_tests.cpp)
     target_link_libraries(nstu_discovery_tests PRIVATE nstu_common)
     nstu_enable_warnings(nstu_discovery_tests)

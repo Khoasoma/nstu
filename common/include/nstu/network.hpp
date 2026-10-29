@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -10,6 +11,44 @@ namespace nstu::net {
 inline constexpr std::uintptr_t kInvalidNativeHandle =
     static_cast<std::uintptr_t>(-1);
 
+namespace detail {
+
+// Internal clock/I/O boundary shared by the native transport and deterministic
+// deadline regressions. It owns no memory and stores no global testing hooks.
+struct DeadlineSendAttempt {
+    int bytes = -1;
+    bool would_block = false;
+};
+
+enum class DeadlineWaitResult { ready, timed_out, failed };
+
+struct DeadlineWaitDuration {
+    long seconds = 0;
+    long microseconds = 0;
+};
+
+struct DeadlineSendOperations {
+    void* context;
+    std::chrono::steady_clock::time_point (*now)(void*) noexcept;
+    bool (*set_nonblocking)(void*, bool) noexcept;
+    DeadlineSendAttempt (*send)(void*, std::span<const std::byte>) noexcept;
+    DeadlineWaitResult (*wait_writable)(void*, std::chrono::steady_clock::time_point) noexcept;
+    void (*close)(void*) noexcept;
+};
+
+[[nodiscard]] DeadlineWaitDuration deadline_wait_duration(
+    std::chrono::steady_clock::duration remaining) noexcept;
+[[nodiscard]] int send_all_with_deadline(
+    std::span<const std::byte> bytes,
+    std::chrono::steady_clock::time_point deadline,
+    const DeadlineSendOperations& operations,
+    std::string* error = nullptr);
+
+} // namespace detail
+
+// One thread owns a socket at a time; serialize all operations, including use
+// of its native handle. Deadline send requires a blocking socket, temporarily
+// changes its socket-wide mode, and restores blocking mode before success.
 class TcpSocket {
 public:
     TcpSocket() noexcept;
@@ -36,9 +75,15 @@ public:
                                        std::string* error = nullptr) const;
     [[nodiscard]] int send_all(std::span<const std::byte> bytes,
                                std::string* error = nullptr) const;
+    [[nodiscard]] int send_all(
+        std::span<const std::byte> bytes,
+        std::chrono::steady_clock::time_point deadline,
+        std::string* error = nullptr);
     [[nodiscard]] int receive(std::span<std::byte> bytes,
                               std::string* error = nullptr) const;
     [[nodiscard]] bool wait_readable(std::uint32_t timeout_ms,
+                                     std::string* error = nullptr) const;
+    [[nodiscard]] bool wait_writable(std::uint32_t timeout_ms,
                                      std::string* error = nullptr) const;
     [[nodiscard]] bool is_open() const noexcept;
     [[nodiscard]] std::uintptr_t native_handle() const noexcept;
