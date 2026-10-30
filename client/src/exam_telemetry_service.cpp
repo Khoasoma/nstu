@@ -34,6 +34,30 @@ void record_stop_error(TelemetryStopOutcome* outcome, TelemetryStopError error) 
     }
 }
 
+void record_disconnect_error(TelemetryDisconnectOutcome* outcome, TelemetryDisconnectError error) noexcept {
+    if (outcome == nullptr) return;
+    const auto current = outcome->current_failure;
+    if (current == TelemetryDisconnectError::none ||
+        error == TelemetryDisconnectError::revocation_witness_unconfirmed ||
+        (error == TelemetryDisconnectError::protected_state_failed &&
+         current != TelemetryDisconnectError::revocation_witness_unconfirmed) ||
+        (error == TelemetryDisconnectError::cleanup_failed &&
+         (current == TelemetryDisconnectError::pending_conflict ||
+          current == TelemetryDisconnectError::pending_enqueue_unfinished))) {
+        outcome->current_failure = error;
+    }
+}
+
+TelemetryDisconnectState disconnect_state(TelemetryLifecycleState state) noexcept {
+    switch (state) {
+    case TelemetryLifecycleState::disabled: return TelemetryDisconnectState::disabled;
+    case TelemetryLifecycleState::enabled: return TelemetryDisconnectState::enabled;
+    case TelemetryLifecycleState::suspended: return TelemetryDisconnectState::suspended;
+    case TelemetryLifecycleState::revoked: return TelemetryDisconnectState::revoked;
+    }
+    return TelemetryDisconnectState::closed;
+}
+
 inline void set_error(std::string* error, std::string_view message) {
     if (error != nullptr && error->empty()) {
         *error = message;
@@ -408,26 +432,35 @@ struct ExamTelemetryServiceCoordinator::Impl {
     }
 
     bool persist_revocation_locked(std::string* error, std::uint64_t now,
-                                   TelemetryStopOutcome* outcome = nullptr) {
+                                   TelemetryStopOutcome* outcome = nullptr,
+                                   TelemetryDisconnectOutcome* disconnect = nullptr) {
         // Every revocation uses the same durable fallback before payload cleanup.
         if (!persist_state_locked()) {
             record_stop_error(outcome, TelemetryStopError::protected_state_failed);
+            record_disconnect_error(disconnect, TelemetryDisconnectError::protected_state_failed);
+            if (disconnect != nullptr && disconnect->publication == TelemetryDisconnectPublication::not_attempted)
+                disconnect->publication = TelemetryDisconnectPublication::unconfirmed;
             if (!write_revocation_refusal_marker(state_path.wstring() + L".blocked")) {
                 if (outcome != nullptr) outcome->durable_witness = TelemetryStopDurableWitness::unconfirmed;
                 record_stop_error(outcome, TelemetryStopError::revocation_witness_unconfirmed);
+                // Preserve an earlier successful suspended snapshot; it is no revocation witness.
+                record_disconnect_error(disconnect, TelemetryDisconnectError::revocation_witness_unconfirmed);
                 fail("revocation state and marker persistence failed", error);
             } else {
                 if (outcome != nullptr) outcome->durable_witness = TelemetryStopDurableWitness::refusal_marker_confirmed;
+                if (disconnect != nullptr) disconnect->publication = TelemetryDisconnectPublication::refusal_marker_confirmed;
                 fail("revocation state persistence failed; durable marker blocks restart", error);
             }
             if (!outbox.purge()) {
                 record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                record_disconnect_error(disconnect, TelemetryDisconnectError::cleanup_failed);
                 fail("revocation persistence and payload cleanup failed; restart blocked when marker is durable", error);
             }
             return false;
         }
         if (outcome != nullptr) outcome->durable_witness = TelemetryStopDurableWitness::protected_state_confirmed;
-        return flush_locked(error, now, outcome);
+        if (disconnect != nullptr) disconnect->publication = TelemetryDisconnectPublication::current_protected_state_confirmed;
+        return flush_locked(error, now, outcome, disconnect);
     }
 
     bool pending_has_expired(std::uint64_t now) const noexcept {
@@ -436,7 +469,8 @@ struct ExamTelemetryServiceCoordinator::Impl {
         return stamp == 0 || (now >= stamp && now - stamp >= exam::kTelemetryRetentionMilliseconds);
     }
 
-    bool revoke_pending_locked(std::string_view reason, std::string* error, std::uint64_t now) {
+    bool revoke_pending_locked(std::string_view reason, std::string* error, std::uint64_t now,
+                               TelemetryDisconnectOutcome* disconnect = nullptr) {
         if (pending_batch) {
             touch_loss(now);
             add_saturated(dropped_samples, pending_batch->samples.size());
@@ -446,12 +480,14 @@ struct ExamTelemetryServiceCoordinator::Impl {
         pending_started_ms = 0;
         (void)lifecycle.on_explicit_stop();
         cleanup_pending = true;
+        if (disconnect != nullptr) disconnect->cleanup = TelemetryDisconnectCleanup::pending;
         state_dirty = true;
-        (void)persist_revocation_locked(error, now);
+        (void)persist_revocation_locked(error, now, nullptr, disconnect);
         return fail(reason, error);
     }
 
-    bool finish_pending_locked(std::string* error = nullptr, std::uint64_t now = 0) {
+    bool finish_pending_locked(std::string* error = nullptr, std::uint64_t now = 0,
+                               TelemetryDisconnectOutcome* disconnect = nullptr) {
         if (!pending_batch) return true;
         if (now == 0) now = current_time_ms();
         const auto records = outbox.pending_batches();
@@ -460,15 +496,21 @@ struct ExamTelemetryServiceCoordinator::Impl {
         });
         if (existing != records.end()) {
             if (exam::encode_telemetry_batch(*existing) != exam::encode_telemetry_batch(*pending_batch)) {
+                // Startup conflict fixtures cover refusal; no public live-disconnect setup is established.
+                record_disconnect_error(disconnect, TelemetryDisconnectError::pending_conflict);
                 return fail("pending telemetry conflicts with durable batch", error);
             }
         } else {
             if (outbox.aggregate_loss(pending_batch->session_id).expired_batches != 0) {
                 // Open may have just retired this exact durable record by its
                 // earlier arrival anchor. An empty outbox is not proof of a new intent.
-                return revoke_pending_locked("pending telemetry age is uncertain after expiry; context revoked", error, now);
+                // Source-only disconnect fact: existing controls exercise startup, not this branch live.
+                if (disconnect != nullptr) disconnect->pending = TelemetryDisconnectPending::revoked_age_uncertain;
+                return revoke_pending_locked("pending telemetry age is uncertain after expiry; context revoked", error, now, disconnect);
             }
             if (!outbox.enqueue(*pending_batch, error)) {
+                // Enqueue rejection includes validation/quota/consistency as well as storage failure.
+                record_disconnect_error(disconnect, TelemetryDisconnectError::pending_enqueue_unfinished);
                 return fail("pending telemetry enqueue persistence failed", error);
             }
         }
@@ -476,20 +518,33 @@ struct ExamTelemetryServiceCoordinator::Impl {
         pending_batch.reset();
         pending_started_ms = 0;
         state_dirty = true;
-        if (!persist_state_locked()) return fail("pending telemetry completion persistence failed", error);
+        if (disconnect != nullptr) disconnect->pending = TelemetryDisconnectPending::completed;
+        if (!persist_state_locked()) {
+            record_disconnect_error(disconnect, TelemetryDisconnectError::protected_state_failed);
+            return fail("pending telemetry completion persistence failed", error);
+        }
+        if (disconnect != nullptr) disconnect->publication = TelemetryDisconnectPublication::current_protected_state_confirmed;
         return true;
     }
 
     bool flush_locked(std::string* error = nullptr, std::uint64_t now = 0,
-                      TelemetryStopOutcome* outcome = nullptr) {
+                      TelemetryStopOutcome* outcome = nullptr,
+                      TelemetryDisconnectOutcome* disconnect = nullptr) {
         if (now == 0) now = current_time_ms();
         expire_loss_locked(now);
         if (pending_has_expired(now)) {
-            return revoke_pending_locked("pending telemetry expired; context revoked", error, now);
+            if (disconnect != nullptr) disconnect->pending = TelemetryDisconnectPending::revoked_expired;
+            return revoke_pending_locked("pending telemetry expired; context revoked", error, now, disconnect);
         }
-        if (state_dirty && !persist_state_locked()) {
-            record_stop_error(outcome, TelemetryStopError::protected_state_failed);
-            return fail("coordinator state persistence failed", error);
+        if (state_dirty) {
+            if (!persist_state_locked()) {
+                record_stop_error(outcome, TelemetryStopError::protected_state_failed);
+                record_disconnect_error(disconnect, TelemetryDisconnectError::protected_state_failed);
+                if (disconnect != nullptr && disconnect->publication == TelemetryDisconnectPublication::not_attempted)
+                    disconnect->publication = TelemetryDisconnectPublication::unconfirmed;
+                return fail("coordinator state persistence failed", error);
+            }
+            if (disconnect != nullptr) disconnect->publication = TelemetryDisconnectPublication::current_protected_state_confirmed;
         }
         if (cleanup_pending) {
             if (!outbox.is_open()) {
@@ -498,23 +553,27 @@ struct ExamTelemetryServiceCoordinator::Impl {
                 outbox = exam::TelemetryOutbox{};
                 if (!outbox.open(outbox_path, error)) {
                     record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                    record_disconnect_error(disconnect, TelemetryDisconnectError::cleanup_failed);
                     return fail("revoked payload cleanup reopen failed", error);
                 }
             }
             if (!outbox.purge(error)) {
                 record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                record_disconnect_error(disconnect, TelemetryDisconnectError::cleanup_failed);
                 return fail("revoked payload cleanup failed", error);
             }
             std::error_code ec;
             std::filesystem::remove(state_path.wstring() + L".blocked", ec);
             if (ec) {
                 record_stop_error(outcome, TelemetryStopError::cleanup_failed);
+                record_disconnect_error(disconnect, TelemetryDisconnectError::cleanup_failed);
                 return fail("revocation marker cleanup failed", error);
             }
             cleanup_pending = false;
             if (outcome != nullptr) outcome->cleanup = TelemetryStopCleanup::complete;
+            if (disconnect != nullptr) disconnect->cleanup = TelemetryDisconnectCleanup::complete;
         }
-        return finish_pending_locked(error, now);
+        return finish_pending_locked(error, now, disconnect);
     }
 
     bool maintain_locked(std::uint64_t now, std::string* error, std::size_t* pruned = nullptr) {
@@ -821,13 +880,26 @@ bool ExamTelemetryServiceCoordinator::on_server_enable(
     return res.accepted;
 }
 
-void ExamTelemetryServiceCoordinator::on_disconnect() noexcept {
+TelemetryDisconnectOutcome ExamTelemetryServiceCoordinator::on_disconnect_with_outcome() noexcept {
     std::scoped_lock lock(impl_->mutex);
-    if (!impl_->is_open) return;
+    TelemetryDisconnectOutcome outcome;
+    if (!impl_->is_open) return outcome;
+    outcome.before = disconnect_state(impl_->lifecycle.state());
+    if (impl_->pending_batch) outcome.pending = TelemetryDisconnectPending::retained;
+    if (impl_->cleanup_pending) outcome.cleanup = TelemetryDisconnectCleanup::pending;
     (void)impl_->lifecycle.on_disconnect();
     impl_->outbox.clear_inflight();
     impl_->state_dirty = true;
-    (void)impl_->flush_locked();
+    (void)impl_->flush_locked(nullptr, 0, nullptr, &outcome);
+    outcome.after = disconnect_state(impl_->lifecycle.state());
+    if (impl_->cleanup_pending) outcome.cleanup = TelemetryDisconnectCleanup::pending;
+    if (impl_->state_dirty && outcome.publication == TelemetryDisconnectPublication::current_protected_state_confirmed)
+        outcome.publication = TelemetryDisconnectPublication::earlier_protected_snapshot_confirmed;
+    return outcome;
+}
+
+void ExamTelemetryServiceCoordinator::on_disconnect() noexcept {
+    (void)on_disconnect_with_outcome();
 }
 
 void ExamTelemetryServiceCoordinator::on_service_shutdown() noexcept {

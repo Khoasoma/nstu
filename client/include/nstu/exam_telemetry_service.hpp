@@ -38,6 +38,30 @@ struct TelemetryStopOutcome {
     TelemetryStopError error = TelemetryStopError::none;
 };
 
+// Disconnect observations include closed without changing the persisted lifecycle enum.
+enum class TelemetryDisconnectState : std::uint8_t { closed, disabled, enabled, suspended, revoked };
+enum class TelemetryDisconnectPending : std::uint8_t {
+    not_present, retained, completed, revoked_expired, revoked_age_uncertain
+};
+enum class TelemetryDisconnectPublication : std::uint8_t {
+    not_attempted, current_protected_state_confirmed, earlier_protected_snapshot_confirmed,
+    refusal_marker_confirmed, unconfirmed
+};
+enum class TelemetryDisconnectCleanup : std::uint8_t { not_needed, complete, pending };
+enum class TelemetryDisconnectError : std::uint8_t {
+    none, protected_state_failed, revocation_witness_unconfirmed, cleanup_failed,
+    pending_conflict, pending_enqueue_unfinished
+};
+
+struct TelemetryDisconnectOutcome {
+    TelemetryDisconnectState before = TelemetryDisconnectState::closed;
+    TelemetryDisconnectState after = TelemetryDisconnectState::closed;
+    TelemetryDisconnectPending pending = TelemetryDisconnectPending::not_present;
+    TelemetryDisconnectPublication publication = TelemetryDisconnectPublication::not_attempted;
+    TelemetryDisconnectCleanup cleanup = TelemetryDisconnectCleanup::not_needed;
+    TelemetryDisconnectError current_failure = TelemetryDisconnectError::none;
+};
+
 // Callable service coordinator that encapsulates telemetry batching,
 // lifecycle, producer identity generation, monotonic sequencing, and
 // outbox management without relying on global service variables.
@@ -71,6 +95,15 @@ public:
                                         std::string* error = nullptr);
 
     // Transport disconnected: suspends collection and clears outbox in-flight markers.
+    // Entry/final authorization and entry-intent disposition are observed under one lock.
+    // Publication confirms only this call's coordinator writer, not payload storage or
+    // permanent durability. Later dirty serialized changes demote a successful state
+    // write to an earlier snapshot; completed intent may still need completion publication.
+    // Fresh marker success supersedes earlier state evidence; existing markers do not
+    // confirm publication. Cleanup requires actual reopen/purge/marker removal completion.
+    // Failure priority: witness uncertainty, state write, cleanup, conflict, enqueue unfinished.
+    [[nodiscard]] TelemetryDisconnectOutcome on_disconnect_with_outcome() noexcept;
+    // Compatibility entry point explicitly discards the current operation outcome.
     void on_disconnect() noexcept;
 
     // Service shutting down: suspends collection, retains active outbox.
