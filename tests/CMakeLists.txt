@@ -292,6 +292,15 @@ if(TARGET nstu_client_platform)
     add_test(NAME nstu.exam_telemetry_stop_reporting
         COMMAND nstu_exam_telemetry_stop_reporting_tests)
 
+    add_executable(nstu_exam_telemetry_disconnect_reporting_tests
+        exam_telemetry_disconnect_reporting_tests.cpp)
+    target_link_libraries(nstu_exam_telemetry_disconnect_reporting_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_exam_telemetry_disconnect_reporting_tests)
+    nstu_enable_test_assertions(nstu_exam_telemetry_disconnect_reporting_tests)
+    add_test(NAME nstu.exam_telemetry_disconnect_reporting
+        COMMAND nstu_exam_telemetry_disconnect_reporting_tests)
+
     # Fail-safe exam network-lockdown policy; pure state machine over the WFP
     # allowlist config, no firewall touched.
     add_executable(nstu_exam_network_lockdown_tests
