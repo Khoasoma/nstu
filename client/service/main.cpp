@@ -14,6 +14,7 @@
 #include "nstu/exam_telemetry_router.hpp"
 #include "nstu/exam_telemetry_service.hpp"
 #include "nstu/exam_telemetry_stop_reporting.hpp"
+#include "nstu/exam_telemetry_disconnect_reporting.hpp"
 #include "nstu/session.hpp"
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
@@ -586,6 +587,30 @@ void report_telemetry_stop(
         if (!initialization_failed.test_and_set(std::memory_order_relaxed)) {
             OutputDebugStringA(
                 "NSTU exam telemetry stop: reporter initialization unavailable.\n");
+        }
+        return;
+    }
+    (void)reporter->report(snapshot);
+}
+
+void report_telemetry_disconnect(
+    const nstu::client::TelemetryDisconnectDispatchResult& snapshot) noexcept {
+    static std::atomic_flag initialization_failed = ATOMIC_FLAG_INIT;
+    nstu::client::ExamTelemetryDisconnectReporter* reporter = nullptr;
+    try {
+        static nstu::client::ExamTelemetryDisconnectReporter instance(
+            [](const nstu::audit::Event& event) {
+                return g_audit_spool.emit(event);
+            },
+            [](const std::string& line) {
+                OutputDebugStringA(line.c_str());
+            });
+        reporter = &instance;
+        initialization_failed.clear(std::memory_order_relaxed);
+    } catch (...) {
+        if (!initialization_failed.test_and_set(std::memory_order_relaxed)) {
+            OutputDebugStringA(
+                "NSTU exam telemetry disconnect: reporter initialization unavailable.\n");
         }
         return;
     }
@@ -2237,7 +2262,9 @@ void remote_control_loop(std::stop_token stop_token) {
             // must make every unsatisfied event eligible on the next session.
             clear_exam_inflight();
             queue_exam_stop();
-            g_exam_telemetry_router.handle_disconnect();
+            const auto disconnect_snapshot =
+                g_exam_telemetry_router.handle_disconnect_with_outcome();
+            report_telemetry_disconnect(disconnect_snapshot);
             set_desired_lock(false);
             // The authenticated teacher session has ended. Tell the agent so it
             // hides / refuses chat until a teacher is reachable again.
