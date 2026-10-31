@@ -40,6 +40,22 @@ struct TelemetryDisconnectDispatchResult {
     std::optional<TelemetryDisconnectOutcome> outcome = std::nullopt;
 };
 
+// Two ordered operation snapshots; separate coordinator locks allow interleaving.
+// Neither a transaction nor a shared context/merged publication is implied.
+struct TelemetryShutdownCloseOutcome {
+    TelemetryShutdownOutcome shutdown{};
+    TelemetryCloseOutcome close{};
+};
+
+enum class TelemetryShutdownDispatch : std::uint8_t {
+    not_configured, legacy_callback_invoked, outcome_callback_invoked
+};
+
+struct TelemetryShutdownDispatchResult {
+    TelemetryShutdownDispatch dispatch = TelemetryShutdownDispatch::not_configured;
+    std::optional<TelemetryShutdownCloseOutcome> outcome = std::nullopt;
+};
+
 struct ExamTelemetryRouterCallbacks {
     std::function<bool(const exam::TelemetryEnable& enable, std::string* error)> on_enable;
     std::function<bool(const std::vector<exam::TelemetrySample>& samples, std::uint64_t now_ms, std::string* error)> ingest_samples;
@@ -53,6 +69,7 @@ struct ExamTelemetryRouterCallbacks {
     std::function<std::optional<exam::TelemetryBatch>(std::uint64_t now_ms, std::uint64_t timeout_ms)> next_batch_to_send;
     std::function<TelemetryStopOutcome()> on_explicit_stop_with_outcome = {};
     std::function<TelemetryDisconnectOutcome()> on_disconnect_with_outcome = {};
+    std::function<TelemetryShutdownCloseOutcome()> on_shutdown_with_outcome = {};
 };
 
 class ExamTelemetryRouter {
@@ -97,6 +114,9 @@ public:
     // Exceptions propagate. Callback invocation does not guarantee current publication or cleanup.
     [[nodiscard]] TelemetryDisconnectDispatchResult handle_disconnect_with_outcome();
     void handle_disconnect();
+    // Typed callback precedes legacy; missing/legacy invocation has no pair.
+    // Exceptions propagate, and the two snapshots retain independent facts.
+    [[nodiscard]] TelemetryShutdownDispatchResult handle_shutdown_with_outcome();
     void handle_shutdown();
     // Restores the coordinator from its protected local storage. Restore alone
     // never authorizes upload; a matching server enable is still required.

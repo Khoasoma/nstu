@@ -55,6 +55,11 @@ ExamTelemetryRouter::ExamTelemetryRouter(
         },
         .on_disconnect_with_outcome = [&coordinator]() {
             return coordinator.on_disconnect_with_outcome();
+        },
+        .on_shutdown_with_outcome = [&coordinator]() {
+            const auto shutdown = coordinator.on_service_shutdown_with_outcome();
+            const auto close = coordinator.close_with_outcome();
+            return TelemetryShutdownCloseOutcome{shutdown, close};
         }
     } {}
 
@@ -161,10 +166,20 @@ void ExamTelemetryRouter::handle_disconnect() {
     (void)handle_disconnect_with_outcome();
 }
 
-void ExamTelemetryRouter::handle_shutdown() {
+TelemetryShutdownDispatchResult ExamTelemetryRouter::handle_shutdown_with_outcome() {
+    if (callbacks_.on_shutdown_with_outcome) {
+        auto outcome = callbacks_.on_shutdown_with_outcome();
+        return {TelemetryShutdownDispatch::outcome_callback_invoked, std::move(outcome)};
+    }
     if (callbacks_.on_shutdown) {
         callbacks_.on_shutdown();
+        return {TelemetryShutdownDispatch::legacy_callback_invoked, std::nullopt};
     }
+    return {};
+}
+
+void ExamTelemetryRouter::handle_shutdown() {
+    (void)handle_shutdown_with_outcome();
 }
 
 bool ExamTelemetryRouter::handle_restart(const std::filesystem::path& outbox_path,
