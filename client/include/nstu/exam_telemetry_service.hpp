@@ -62,6 +62,17 @@ struct TelemetryDisconnectOutcome {
     TelemetryDisconnectError current_failure = TelemetryDisconnectError::none;
 };
 
+// Shutdown has a distinct carrier while sharing the existing fixed fact enums.
+// These authorization/publication facts do not describe final close or OS shutdown.
+struct TelemetryShutdownOutcome {
+    TelemetryDisconnectState before = TelemetryDisconnectState::closed;
+    TelemetryDisconnectState after = TelemetryDisconnectState::closed;
+    TelemetryDisconnectPending pending = TelemetryDisconnectPending::not_present;
+    TelemetryDisconnectPublication publication = TelemetryDisconnectPublication::not_attempted;
+    TelemetryDisconnectCleanup cleanup = TelemetryDisconnectCleanup::not_needed;
+    TelemetryDisconnectError current_failure = TelemetryDisconnectError::none;
+};
+
 // Callable service coordinator that encapsulates telemetry batching,
 // lifecycle, producer identity generation, monotonic sequencing, and
 // outbox management without relying on global service variables.
@@ -107,6 +118,9 @@ public:
     void on_disconnect() noexcept;
 
     // Service shutting down: suspends collection, retains active outbox.
+    // Current facts observed under the same lock and original shutdown operation.
+    // Successful ordinary suspension keeps the coordinator open; close is separate.
+    [[nodiscard]] TelemetryShutdownOutcome on_service_shutdown_with_outcome() noexcept;
     void on_service_shutdown() noexcept;
 
     // Explicit stop command received: revokes context and attempts durable cleanup.

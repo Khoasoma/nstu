@@ -902,13 +902,29 @@ void ExamTelemetryServiceCoordinator::on_disconnect() noexcept {
     (void)on_disconnect_with_outcome();
 }
 
-void ExamTelemetryServiceCoordinator::on_service_shutdown() noexcept {
+TelemetryShutdownOutcome ExamTelemetryServiceCoordinator::on_service_shutdown_with_outcome() noexcept {
     std::scoped_lock lock(impl_->mutex);
-    if (!impl_->is_open) return;
+    // Internal flush observations reuse the qualified machinery, without calling
+    // the public disconnect operation or converting its externally returned type.
+    TelemetryDisconnectOutcome observed;
+    if (!impl_->is_open) return {};
+    observed.before = disconnect_state(impl_->lifecycle.state());
+    if (impl_->pending_batch) observed.pending = TelemetryDisconnectPending::retained;
+    if (impl_->cleanup_pending) observed.cleanup = TelemetryDisconnectCleanup::pending;
     (void)impl_->lifecycle.on_service_shutdown();
     impl_->outbox.clear_inflight();
     impl_->state_dirty = true;
-    (void)impl_->flush_locked();
+    (void)impl_->flush_locked(nullptr, 0, nullptr, &observed);
+    observed.after = disconnect_state(impl_->lifecycle.state());
+    if (impl_->cleanup_pending) observed.cleanup = TelemetryDisconnectCleanup::pending;
+    if (impl_->state_dirty && observed.publication == TelemetryDisconnectPublication::current_protected_state_confirmed)
+        observed.publication = TelemetryDisconnectPublication::earlier_protected_snapshot_confirmed;
+    return {observed.before, observed.after, observed.pending, observed.publication,
+            observed.cleanup, observed.current_failure};
+}
+
+void ExamTelemetryServiceCoordinator::on_service_shutdown() noexcept {
+    (void)on_service_shutdown_with_outcome();
 }
 
 TelemetryStopOutcome ExamTelemetryServiceCoordinator::on_explicit_stop_with_outcome() noexcept {

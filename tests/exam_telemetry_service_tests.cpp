@@ -2506,7 +2506,252 @@ void run_disconnect_outcome_tests() {
 
 } // namespace
 
+namespace {
+using ShutdownOutcome = nstu::client::TelemetryShutdownOutcome;
+static_assert(noexcept(std::declval<Coordinator&>().on_service_shutdown_with_outcome()));
+static_assert(noexcept(std::declval<Coordinator&>().on_service_shutdown()));
+static_assert(std::is_same_v<decltype(ShutdownOutcome{}.before), DisconnectState>);
+static_assert(std::is_same_v<decltype(ShutdownOutcome{}.after), DisconnectState>);
+static_assert(std::is_same_v<decltype(ShutdownOutcome{}.pending), DisconnectPending>);
+static_assert(std::is_same_v<decltype(ShutdownOutcome{}.publication), DisconnectPublication>);
+static_assert(std::is_same_v<decltype(ShutdownOutcome{}.cleanup), DisconnectCleanup>);
+static_assert(std::is_same_v<decltype(ShutdownOutcome{}.current_failure), DisconnectError>);
+static_assert(!std::is_convertible_v<ShutdownOutcome, DisconnectOutcome>);
+static_assert(!std::is_convertible_v<DisconnectOutcome, ShutdownOutcome>);
+
+void assert_shutdown_outcome(const ShutdownOutcome& result, DisconnectState before,
+    DisconnectState after, DisconnectPending pending, DisconnectPublication publication,
+    DisconnectCleanup cleanup, DisconnectError failure) {
+    assert(result.before == before && result.after == after);
+    assert(result.pending == pending && result.publication == publication);
+    assert(result.cleanup == cleanup && result.current_failure == failure);
+}
+void test_shutdown_defaults_closed_and_ordinary_retention() {
+    assert_shutdown_outcome({}, DisconnectState::closed, DisconnectState::closed, DisconnectPending::not_present,
+        DisconnectPublication::not_attempted, DisconnectCleanup::not_needed, DisconnectError::none);
+    const auto now = test_now_ms(); unsigned calls = 0;
+    Coordinator coordinator([&] { ++calls; return now; });
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::closed,
+        DisconnectState::closed, DisconnectPending::not_present, DisconnectPublication::not_attempted,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    coordinator.on_service_shutdown(); assert(calls == 0 && !coordinator.is_open());
+    const auto path = temp_outbox_path("shutdown_ordinary");
+    assert(coordinator.open(path));
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::disabled,
+        DisconnectState::disabled, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(coordinator.is_open());
+    const auto enable = make_enable(); assert(coordinator.on_server_enable(enable));
+    assert(coordinator.ingest_samples(std::vector{make_sample(201)}, now));
+    constexpr std::uint64_t timeout = 600000;
+    const auto offered = coordinator.next_batch_to_send(now, timeout); assert(offered);
+    const auto payload = pristine_ciphertext(path);
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::enabled,
+        DisconnectState::suspended, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(coordinator.is_open() && coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1);
+    assert(pristine_ciphertext(path) == payload);
+    const auto physical = coordinator_fixture_payload(path);
+    assert(physical[sequence_fixture_offset(enable) + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::suspended));
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::suspended,
+        DisconnectState::suspended, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(!coordinator.next_batch_to_send(now + 1, timeout));
+    assert(!coordinator.on_server_enable(make_enable("wrong-shutdown-context")));
+    assert(!coordinator.next_batch_to_send(now + 1, timeout));
+    assert(coordinator.on_server_enable(enable));
+    const auto reoffered = coordinator.next_batch_to_send(now + 1, timeout);
+    assert(reoffered && nstu::exam::encode_telemetry_batch(*reoffered) == nstu::exam::encode_telemetry_batch(*offered));
+    assert(coordinator.active_producer_id() == offered->producer_id && coordinator.next_sequence() == 2);
+    coordinator.on_service_shutdown(); assert(coordinator.is_open());
+    assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::suspended);
+    (void)coordinator.on_explicit_stop_with_outcome();
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::revoked,
+        DisconnectState::revoked, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(coordinator.is_open() && !coordinator.next_batch_to_send(now));
+    coordinator.close(); assert(!coordinator.is_open());
+    std::cout << "Shutdown distinct defaults, closed no-Clock, ordinary/repeated/legacy retention and already-revoked controls passed.\n";
+}
+std::vector<std::byte> shutdown_protected_payload(const std::filesystem::path& path, std::string_view entropy) {
+    auto bytes = nstu::security::load_machine_secret(path.wstring(), entropy_bytes(entropy));
+    assert(bytes.size() > 32);
+    const auto payload = std::span<const std::byte>(bytes).first(bytes.size() - 32);
+    const auto digest = nstu::security::sha256(payload);
+    assert(digest && std::equal(digest->begin(), digest->end(), bytes.end() - 32));
+    bytes.resize(bytes.size() - 32);
+    return bytes;
+}
+void test_shutdown_state_write_failure_and_retry() {
+    const auto path = temp_outbox_path("shutdown_state_failure");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); const auto enable = make_enable();
+    Coordinator coordinator([now] { return now; });
+    assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+    assert(coordinator.ingest_samples(std::vector{make_sample(202)}, now));
+    const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+    const auto before = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    {
+        StopReadSharingLock held(state);
+        assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::enabled,
+            DisconnectState::suspended, DisconnectPending::not_present, DisconnectPublication::unconfirmed,
+            DisconnectCleanup::not_needed, DisconnectError::protected_state_failed);
+        assert(pristine_ciphertext(state) == original_state && pristine_ciphertext(path) == original_payload);
+        assert(shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1") == before);
+        assert(before[sequence_fixture_offset(enable) + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::enabled));
+        assert(coordinator.is_open() && coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1);
+    }
+    const auto history = coordinator.last_error(); assert(!history.empty());
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::suspended,
+        DisconnectState::suspended, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(coordinator.last_error() == history && coordinator.is_open());
+    const auto after = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    assert(after[sequence_fixture_offset(enable) + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::suspended));
+    assert(pristine_ciphertext(path) == original_payload && !coordinator.next_batch_to_send(now));
+    std::cout << "Shutdown real state-write failure, unchanged physical publication and current retry passed.\n";
+}
+void test_shutdown_retained_pending_and_retry() {
+    const auto path = temp_outbox_path("shutdown_pending");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); const auto enable = make_enable();
+    Coordinator coordinator([now] { return now; });
+    assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+    const auto expected = retain_disconnect_intent(coordinator, path, enable, now, 203);
+    const auto original_payload = pristine_ciphertext(path);
+    const auto encoded = nstu::exam::encode_telemetry_batch(expected);
+    {
+        StopReadSharingLock held(path);
+        assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::enabled,
+            DisconnectState::suspended, DisconnectPending::retained, DisconnectPublication::current_protected_state_confirmed,
+            DisconnectCleanup::not_needed, DisconnectError::pending_enqueue_unfinished);
+        const auto wal = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+        assert(wal.size() >= encoded.size() && std::equal(encoded.rbegin(), encoded.rend(), wal.rbegin()));
+        assert(pristine_ciphertext(path) == original_payload && coordinator.next_sequence() == 1 && coordinator.outbox_size() == 0);
+        assert(coordinator.is_open());
+    }
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::suspended,
+        DisconnectState::suspended, DisconnectPending::completed, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1 && coordinator.is_open());
+    const auto physical = shutdown_protected_payload(path, "NSTU-Exam-Telemetry-Outbox-v1");
+    assert(std::search(physical.begin(), physical.end(), encoded.begin(), encoded.end()) != physical.end());
+    assert_disconnect_durable_batch(path, expected, now);
+    assert(!coordinator.next_batch_to_send(now));
+    assert(!coordinator.on_server_enable(make_enable("wrong-shutdown-pending")));
+    assert(coordinator.on_server_enable(enable));
+    const auto recovered = coordinator.next_batch_to_send(now);
+    assert(recovered && nstu::exam::encode_telemetry_batch(*recovered) == encoded);
+    assert(coordinator.active_producer_id() == expected.producer_id && coordinator.next_sequence() == 2);
+    std::cout << "Shutdown retained public-ingest WAL, exact once retry and matching-enable recovery passed.\n";
+}
+void test_shutdown_late_completion_publication_failure() {
+    const auto path = temp_outbox_path("shutdown_late_completion");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); bool armed = false; unsigned calls = 0;
+    std::unique_ptr<StopReadSharingLock> held;
+    Coordinator coordinator([&] {
+        if (!armed) return now;
+        ++calls;
+        if (calls <= 2) return std::uint64_t{0};
+        assert(calls == 3); held = std::make_unique<StopReadSharingLock>(state); return now;
+    });
+    const auto enable = make_enable(); assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+    const auto expected = retain_disconnect_intent(coordinator, path, enable, now, 204);
+    armed = true; const auto outcome = coordinator.on_service_shutdown_with_outcome(); armed = false;
+    assert(calls == 3 && held);
+    assert_shutdown_outcome(outcome, DisconnectState::enabled, DisconnectState::suspended, DisconnectPending::completed,
+        DisconnectPublication::earlier_protected_snapshot_confirmed, DisconnectCleanup::not_needed, DisconnectError::protected_state_failed);
+    assert(coordinator.is_open() && coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1);
+    const auto published = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    const auto offset = sequence_fixture_offset(enable); const auto encoded = nstu::exam::encode_telemetry_batch(expected);
+    assert(disconnect_fixture_number(published, offset, 8) == 1);
+    assert(published[offset + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::suspended));
+    assert(disconnect_fixture_number(published, offset + 57, 4) == encoded.size());
+    assert(published.size() >= encoded.size() && std::equal(encoded.rbegin(), encoded.rend(), published.rbegin()));
+    const auto payload = shutdown_protected_payload(path, "NSTU-Exam-Telemetry-Outbox-v1");
+    assert(std::search(payload.begin(), payload.end(), encoded.begin(), encoded.end()) != payload.end());
+    const auto history = coordinator.last_error(); assert(!history.empty()); held.reset();
+    assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::suspended,
+        DisconnectState::suspended, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    const auto completed = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    assert(disconnect_fixture_number(completed, offset, 8) == 2);
+    assert(disconnect_fixture_number(completed, offset + 49, 8) == 0 && disconnect_fixture_number(completed, offset + 57, 4) == 0);
+    assert(coordinator.last_error() == history && coordinator.active_producer_id() == expected.producer_id);
+    assert(coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1 && !coordinator.next_batch_to_send(now));
+    std::cout << "Shutdown exactly3 Clock calls, earlier WAL/current completion failure and no-duplicate retry passed.\n";
+}
+void assert_shutdown_physical_empty_outbox(const std::filesystem::path& path) {
+    const auto payload = shutdown_protected_payload(path, "NSTU-Exam-Telemetry-Outbox-v1");
+    assert(payload.size() >= 32 && disconnect_fixture_number(payload, 0, 4) == 0x544c4d4f);
+    assert(payload[4] == std::byte{2} && payload[5] == std::byte{0});
+    assert(payload[6] == std::byte{0} && payload[7] == std::byte{0});
+    const auto loss_count = disconnect_fixture_number(payload, 24, 4); assert(loss_count <= 64);
+    const auto records = std::size_t{28} + std::size_t{56} * static_cast<std::size_t>(loss_count);
+    assert(disconnect_fixture_number(payload, records, 4) == 0 && payload.size() == records + 4);
+}
+void test_shutdown_expiry_cleanup_and_recovery() {
+    for (const unsigned arm : {0u, 1u, 2u}) {
+        const auto path = temp_outbox_path("shutdown_expiry_" + std::to_string(arm));
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        auto now = test_now_ms(); const auto enable = make_enable();
+        Coordinator coordinator([&] { return now; });
+        assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+        assert(coordinator.ingest_samples(std::vector{make_sample(205)}, now));
+        (void)retain_disconnect_intent(coordinator, path, enable, now, 206);
+        const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+        assert(!std::filesystem::exists(marker)); now += nstu::exam::kTelemetryRetentionMilliseconds;
+        {
+            std::unique_ptr<StopReadSharingLock> held;
+            if (arm != 0) held = std::make_unique<StopReadSharingLock>(arm == 1 ? state : path);
+            const auto result = coordinator.on_service_shutdown_with_outcome();
+            assert_shutdown_outcome(result, DisconnectState::enabled, DisconnectState::revoked, DisconnectPending::revoked_expired,
+                arm == 1 ? DisconnectPublication::refusal_marker_confirmed : DisconnectPublication::current_protected_state_confirmed,
+                arm == 0 ? DisconnectCleanup::complete : DisconnectCleanup::pending,
+                arm == 0 ? DisconnectError::none : (arm == 1 ? DisconnectError::protected_state_failed : DisconnectError::cleanup_failed));
+            assert(coordinator.is_open() && coordinator.next_sequence() == 2);
+            assert(coordinator.dropped_sample_count() == 1 && coordinator.dropped_batch_count() == 1);
+            if (arm == 1) {
+                assert(pristine_ciphertext(state) == original_state); assert_pristine_regular_file(marker);
+                assert(pristine_ciphertext(marker) == std::vector<std::byte>{std::byte{1}});
+                assert_shutdown_physical_empty_outbox(path); // First physical receipt before any aged open/prune.
+                Coordinator refused([&] { return now; });
+                assert(!refused.open(path) && !refused.on_server_enable(enable));
+                assert(pristine_ciphertext(state) == original_state && pristine_ciphertext(marker) == std::vector<std::byte>{std::byte{1}});
+            } else {
+                const auto published = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+                assert(published[sequence_fixture_offset(enable) + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::revoked));
+                assert(!std::filesystem::exists(marker));
+                if (arm == 2) assert(pristine_ciphertext(path) == original_payload);
+                else assert_shutdown_physical_empty_outbox(path);
+            }
+        }
+        const auto history = coordinator.last_error(); assert(!history.empty());
+        assert_shutdown_outcome(coordinator.on_service_shutdown_with_outcome(), DisconnectState::revoked,
+            DisconnectState::revoked, DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+            arm == 0 ? DisconnectCleanup::not_needed : DisconnectCleanup::complete, DisconnectError::none);
+        assert(coordinator.last_error() == history && coordinator.is_open());
+        assert_shutdown_physical_empty_outbox(path);
+        assert_stop_revoked_fixture(path, enable);
+        assert(!std::filesystem::exists(marker) && coordinator.next_sequence() == 2 && coordinator.outbox_size() == 0);
+        assert(!coordinator.next_batch_to_send(now) && !coordinator.on_server_enable(enable));
+        coordinator.close(); assert_stop_restart_refuses_old(path, enable, now);
+    }
+    std::cout << "Shutdown clean expiry, real state/payload failure receipts and actual revoked cleanup/recovery passed.\n";
+}
+void run_shutdown_outcome_tests() {
+    test_shutdown_defaults_closed_and_ordinary_retention();
+    test_shutdown_state_write_failure_and_retry();
+    test_shutdown_retained_pending_and_retry();
+    test_shutdown_late_completion_publication_failure();
+    test_shutdown_expiry_cleanup_and_recovery();
+}
+} // namespace
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "shutdown-outcomes") { run_shutdown_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "disconnect-outcomes") { run_disconnect_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "stop-outcomes") { run_stop_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "stop-marker-controls") { test_stop_repair_preserves_active_empty_recovery(); test_stop_repair_keeps_existing_refusal_markers(); return 0; }
@@ -2639,6 +2884,7 @@ int main(int argc, char** argv) {
     test_stop_repair_keeps_existing_refusal_markers();
     run_stop_outcome_tests();
     run_disconnect_outcome_tests();
+    run_shutdown_outcome_tests();
     std::cout << "All exam_telemetry_service_tests passed successfully.\n";
     return 0;
 }
