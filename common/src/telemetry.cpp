@@ -56,10 +56,10 @@ bool sensitive_assignment(std::string_view token) {
                   return value == '-' || value == '_';
               }),
               key.end());
-    constexpr std::array<std::string_view, 11> keys = {
+    constexpr std::array<std::string_view, 14> keys = {
         "authorization", "clientid", "hostname", "machine",
         "machinename", "password", "psk", "school", "secret",
-        "token", "username"};
+        "token", "username", "sas", "sascode", "pairingcode"};
     return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
 
@@ -72,10 +72,10 @@ bool sensitive_key(std::string_view token) {
                   return value == '-' || value == '_';
               }),
               key.end());
-    constexpr std::array<std::string_view, 11> keys = {
+    constexpr std::array<std::string_view, 14> keys = {
         "authorization", "clientid", "hostname", "machine",
         "machinename", "password", "psk", "school", "secret",
-        "token", "username"};
+        "token", "username", "sas", "sascode", "pairingcode"};
     return std::find(keys.begin(), keys.end(), key) != keys.end();
 }
 

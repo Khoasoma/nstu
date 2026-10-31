@@ -16,6 +16,7 @@
 #include "nstu/exam_telemetry_stop_reporting.hpp"
 #include "nstu/exam_telemetry_disconnect_reporting.hpp"
 #include "nstu/exam_telemetry_shutdown_close_reporting.hpp"
+#include "nstu/detail/exam_telemetry_result_reporting.hpp"
 #include "nstu/session.hpp"
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
@@ -531,43 +532,29 @@ void emit_audit(nstu::audit::Category category, nstu::audit::Severity severity,
     (void)g_audit_spool.emit(event);
 }
 
-enum class TelemetryOperation : std::size_t {
-    startup, enable, samples, ack, maintenance, shutdown, count
-};
+using TelemetryOperation = nstu::client::detail::TelemetryResultOperation;
 
 void report_telemetry_result(TelemetryOperation operation, bool succeeded,
                              std::string_view error = {}) noexcept {
-    static constexpr std::array<std::string_view,
-        static_cast<std::size_t>(TelemetryOperation::count)> actions{
-        "startup", "enable", "samples", "ack", "maintenance", "shutdown"};
-    static std::mutex mutex;
-    static std::array<std::string, actions.size()> last_failure;
-    static std::atomic_flag reporting_failed = ATOMIC_FLAG_INIT;
+    static std::atomic_flag initialization_failed = ATOMIC_FLAG_INIT;
+    nstu::client::detail::ExamTelemetryResultReporter* reporter = nullptr;
     try {
-        const auto index = static_cast<std::size_t>(operation);
-        const auto detail = nstu::audit::sanitize_audit_field(
-            error.empty() ? "operation failed" : error, nstu::audit::kMaximumDetailBytes);
-        {
-            std::scoped_lock lock(mutex);
-            if (succeeded) {
-                last_failure[index].clear();
-                return;
-            }
-            if (last_failure[index] == detail) return;
-            last_failure[index] = detail;
-        }
-        // Fixed operation names and bounded, sanitized diagnostics only.
-        // Repeated unchanged failure is quiet until recovery or a new failure.
-        emit_audit(nstu::audit::Category::exam, nstu::audit::Severity::warning,
-                   "exam_telemetry", std::string(actions[index]), "failed", detail);
-        const auto line = "NSTU exam telemetry " + std::string(actions[index]) +
-                          " failed: " + detail + "\n";
-        OutputDebugStringA(line.c_str());
+        static nstu::client::detail::ExamTelemetryResultReporter instance(
+            [](const nstu::audit::Event& event) {
+                return g_audit_spool.emit(event);
+            },
+            [](const std::string& line) {
+                OutputDebugStringA(line.c_str());
+            });
+        reporter = &instance;
+        initialization_failed.clear(std::memory_order_relaxed);
     } catch (...) {
-        if (!reporting_failed.test_and_set()) {
+        if (!initialization_failed.test_and_set(std::memory_order_relaxed)) {
             OutputDebugStringA("NSTU telemetry failure reporting unavailable.\n");
         }
+        return;
     }
+    reporter->report(operation, succeeded, error);
 }
 
 void report_telemetry_stop(
