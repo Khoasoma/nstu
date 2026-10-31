@@ -15,6 +15,7 @@
 #include "nstu/exam_telemetry_service.hpp"
 #include "nstu/exam_telemetry_stop_reporting.hpp"
 #include "nstu/exam_telemetry_disconnect_reporting.hpp"
+#include "nstu/exam_telemetry_shutdown_close_reporting.hpp"
 #include "nstu/session.hpp"
 #include "nstu/service_install.hpp"
 #include "nstu/setup/diagnostics.hpp"
@@ -611,6 +612,30 @@ void report_telemetry_disconnect(
         if (!initialization_failed.test_and_set(std::memory_order_relaxed)) {
             OutputDebugStringA(
                 "NSTU exam telemetry disconnect: reporter initialization unavailable.\n");
+        }
+        return;
+    }
+    (void)reporter->report(snapshot);
+}
+
+void report_telemetry_shutdown_close(
+    const nstu::client::TelemetryShutdownDispatchResult& snapshot) noexcept {
+    static std::atomic_flag initialization_failed = ATOMIC_FLAG_INIT;
+    nstu::client::ExamTelemetryShutdownCloseReporter* reporter = nullptr;
+    try {
+        static nstu::client::ExamTelemetryShutdownCloseReporter instance(
+            [](const nstu::audit::Event& event) {
+                return g_audit_spool.emit(event);
+            },
+            [](const std::string& line) {
+                OutputDebugStringA(line.c_str());
+            });
+        reporter = &instance;
+        initialization_failed.clear(std::memory_order_relaxed);
+    } catch (...) {
+        if (!initialization_failed.test_and_set(std::memory_order_relaxed)) {
+            OutputDebugStringA(
+                "NSTU exam telemetry shutdown and close: reporter initialization unavailable.\n");
         }
         return;
     }
@@ -2597,10 +2622,9 @@ void WINAPI service_main(DWORD, wchar_t**) {
         g_exam_outbox_ready = false;
         g_exam_outbox_path.clear();
     }
-    g_exam_telemetry_router.handle_shutdown();
-    report_telemetry_result(TelemetryOperation::shutdown,
-                           !g_exam_telemetry_coordinator.is_open(),
-                           g_exam_telemetry_coordinator.last_error());
+    const auto shutdown_close_snapshot =
+        g_exam_telemetry_router.handle_shutdown_with_outcome();
+    report_telemetry_shutdown_close(shutdown_close_snapshot);
     {
         clear_configured_client_id();
     }
