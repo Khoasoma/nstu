@@ -364,9 +364,9 @@ struct ExamTelemetryServiceCoordinator::Impl {
         return false;
     }
 
-    bool close_locked() {
+    bool close_locked(TelemetryDisconnectOutcome* observed = nullptr) {
         if (!is_open) return true;
-        if (!flush_locked()) return false;
+        if (!flush_locked(nullptr, 0, nullptr, observed)) return false;
         outbox.close();
         is_open = false;
         return true;
@@ -521,6 +521,11 @@ struct ExamTelemetryServiceCoordinator::Impl {
         if (disconnect != nullptr) disconnect->pending = TelemetryDisconnectPending::completed;
         if (!persist_state_locked()) {
             record_disconnect_error(disconnect, TelemetryDisconnectError::protected_state_failed);
+            // Close may attempt its first writer only at pending completion.
+            // Existing dirty-first disconnect/shutdown observations already have
+            // publication evidence here; never replace that earlier/current fact.
+            if (disconnect != nullptr && disconnect->publication == TelemetryDisconnectPublication::not_attempted)
+                disconnect->publication = TelemetryDisconnectPublication::unconfirmed;
             return fail("pending telemetry completion persistence failed", error);
         }
         if (disconnect != nullptr) disconnect->publication = TelemetryDisconnectPublication::current_protected_state_confirmed;
@@ -803,9 +808,24 @@ bool ExamTelemetryServiceCoordinator::open(const std::filesystem::path& outbox_p
     return true;
 }
 
-void ExamTelemetryServiceCoordinator::close() noexcept {
+TelemetryCloseOutcome ExamTelemetryServiceCoordinator::close_with_outcome() noexcept {
     std::scoped_lock lock(impl_->mutex);
-    impl_->close_locked();
+    TelemetryDisconnectOutcome observed;
+    if (!impl_->is_open) return {};
+    observed.before = disconnect_state(impl_->lifecycle.state());
+    if (impl_->pending_batch) observed.pending = TelemetryDisconnectPending::retained;
+    if (impl_->cleanup_pending) observed.cleanup = TelemetryDisconnectCleanup::pending;
+    (void)impl_->close_locked(&observed);
+    observed.after = impl_->is_open ? disconnect_state(impl_->lifecycle.state()) : TelemetryDisconnectState::closed;
+    if (impl_->cleanup_pending) observed.cleanup = TelemetryDisconnectCleanup::pending;
+    if (impl_->state_dirty && observed.publication == TelemetryDisconnectPublication::current_protected_state_confirmed)
+        observed.publication = TelemetryDisconnectPublication::earlier_protected_snapshot_confirmed;
+    return {observed.before, observed.after, observed.pending, observed.publication,
+            observed.cleanup, observed.current_failure};
+}
+
+void ExamTelemetryServiceCoordinator::close() noexcept {
+    (void)close_with_outcome();
 }
 
 bool ExamTelemetryServiceCoordinator::is_open() const noexcept {

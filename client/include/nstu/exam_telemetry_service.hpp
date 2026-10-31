@@ -73,6 +73,18 @@ struct TelemetryShutdownOutcome {
     TelemetryDisconnectError current_failure = TelemetryDisconnectError::none;
 };
 
+// Close has a distinct carrier using the same fixed fact enum vocabulary.
+// Closed denotes the coordinator's actual local resource state, not a serialized
+// lifecycle transition, protected writer or final OS/service shutdown.
+struct TelemetryCloseOutcome {
+    TelemetryDisconnectState before = TelemetryDisconnectState::closed;
+    TelemetryDisconnectState after = TelemetryDisconnectState::closed;
+    TelemetryDisconnectPending pending = TelemetryDisconnectPending::not_present;
+    TelemetryDisconnectPublication publication = TelemetryDisconnectPublication::not_attempted;
+    TelemetryDisconnectCleanup cleanup = TelemetryDisconnectCleanup::not_needed;
+    TelemetryDisconnectError current_failure = TelemetryDisconnectError::none;
+};
+
 // Callable service coordinator that encapsulates telemetry batching,
 // lifecycle, producer identity generation, monotonic sequencing, and
 // outbox management without relying on global service variables.
@@ -96,6 +108,10 @@ public:
     [[nodiscard]] bool open(const std::filesystem::path& outbox_path,
                             std::string* error = nullptr);
     // Pending storage failure is logged and leaves the coordinator open for retry.
+    // Observe one original close/flush under the same lock. No writer is inferred
+    // from closure; clean policy expiry can leave the coordinator open with no
+    // current storage failure. No shutdown/disconnect operation is added.
+    [[nodiscard]] TelemetryCloseOutcome close_with_outcome() noexcept;
     void close() noexcept;
     [[nodiscard]] bool is_open() const noexcept;
 

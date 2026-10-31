@@ -2750,7 +2750,248 @@ void run_shutdown_outcome_tests() {
 }
 } // namespace
 
+namespace {
+using CloseOutcome = nstu::client::TelemetryCloseOutcome;
+static_assert(noexcept(std::declval<Coordinator&>().close_with_outcome()));
+static_assert(noexcept(std::declval<Coordinator&>().close()));
+static_assert(std::is_same_v<decltype(CloseOutcome{}.before), DisconnectState>);
+static_assert(std::is_same_v<decltype(CloseOutcome{}.after), DisconnectState>);
+static_assert(std::is_same_v<decltype(CloseOutcome{}.pending), DisconnectPending>);
+static_assert(std::is_same_v<decltype(CloseOutcome{}.publication), DisconnectPublication>);
+static_assert(std::is_same_v<decltype(CloseOutcome{}.cleanup), DisconnectCleanup>);
+static_assert(std::is_same_v<decltype(CloseOutcome{}.current_failure), DisconnectError>);
+static_assert(!std::is_convertible_v<CloseOutcome, ShutdownOutcome> && !std::is_convertible_v<ShutdownOutcome, CloseOutcome>);
+static_assert(!std::is_convertible_v<CloseOutcome, DisconnectOutcome> && !std::is_convertible_v<DisconnectOutcome, CloseOutcome>);
+void assert_close_outcome(const CloseOutcome& result, DisconnectState before, DisconnectState after,
+    DisconnectPending pending, DisconnectPublication publication, DisconnectCleanup cleanup, DisconnectError failure) {
+    assert(result.before == before && result.after == after);
+    assert(result.pending == pending && result.publication == publication);
+    assert(result.cleanup == cleanup && result.current_failure == failure);
+}
+void test_close_defaults_and_ordinary_retention() {
+    const auto now = test_now_ms(); unsigned calls = 0;
+    Coordinator closed([&] { ++calls; return now; });
+    assert_close_outcome({}, DisconnectState::closed, DisconnectState::closed, DisconnectPending::not_present,
+        DisconnectPublication::not_attempted, DisconnectCleanup::not_needed, DisconnectError::none);
+    assert_close_outcome(closed.close_with_outcome(), DisconnectState::closed, DisconnectState::closed,
+        DisconnectPending::not_present, DisconnectPublication::not_attempted, DisconnectCleanup::not_needed, DisconnectError::none);
+    closed.close(); assert(calls == 0 && !closed.is_open());
+    for (const unsigned mode : {0u, 1u, 2u}) {
+        const auto path = temp_outbox_path("close_ordinary_" + std::to_string(mode));
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        unsigned close_calls = 0; Coordinator coordinator([&] { ++close_calls; return now; });
+        const auto enable = make_enable(); assert(coordinator.open(path));
+        std::optional<nstu::exam::TelemetryBatch> offered;
+        if (mode != 0) {
+            assert(coordinator.on_server_enable(enable)); assert(coordinator.ingest_samples(std::vector{make_sample(207)}, now));
+            offered = coordinator.next_batch_to_send(now, 600000); assert(offered);
+            if (mode == 2) coordinator.on_service_shutdown();
+        }
+        const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+        const auto physical = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+        close_calls = 0;
+        assert_close_outcome(coordinator.close_with_outcome(), mode == 0 ? DisconnectState::disabled :
+            (mode == 1 ? DisconnectState::enabled : DisconnectState::suspended), DisconnectState::closed,
+            DisconnectPending::not_present, DisconnectPublication::not_attempted, DisconnectCleanup::not_needed, DisconnectError::none);
+        assert(!coordinator.is_open() && close_calls == 1);
+        assert(pristine_ciphertext(state) == original_state && pristine_ciphertext(path) == original_payload);
+        assert(shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1") == physical);
+        assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::closed, DisconnectState::closed,
+            DisconnectPending::not_present, DisconnectPublication::not_attempted, DisconnectCleanup::not_needed, DisconnectError::none);
+        coordinator.close(); assert(close_calls == 1);
+        assert(!coordinator.next_batch_to_send(now));
+        if (mode != 0) {
+            assert(coordinator.open(path)); assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::suspended);
+            assert(coordinator.active_producer_id() == offered->producer_id && coordinator.next_sequence() == 2);
+            assert(!coordinator.next_batch_to_send(now + 1, 600000));
+            assert(!coordinator.on_server_enable(make_enable("wrong-close-context")));
+            assert(coordinator.on_server_enable(enable));
+            const auto recovered = coordinator.next_batch_to_send(now + 1, 600000);
+            assert(recovered && nstu::exam::encode_telemetry_batch(*recovered) == nstu::exam::encode_telemetry_batch(*offered));
+        }
+    }
+    std::cout << "Close distinct/default/closed no-Clock and ordinary no-writer retained-data/auth controls passed.\n";
+}
+void test_close_default_destructor_keeps_pending_bytes() {
+    const auto path = temp_outbox_path("close_destructor");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); unsigned calls = 0;
+    auto coordinator = std::make_unique<Coordinator>([&] { ++calls; return now; });
+    const auto enable = make_enable(); assert(coordinator->open(path) && coordinator->on_server_enable(enable));
+    (void)retain_disconnect_intent(*coordinator, path, enable, now, 208);
+    const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+    const auto before = calls; coordinator.reset();
+    assert(calls == before && pristine_ciphertext(state) == original_state && pristine_ciphertext(path) == original_payload);
+    std::cout << "Default destructor retains pending WAL without Clock or physical writes.\n";
+}
+void test_close_retained_pending_without_first_writer() {
+    const auto path = temp_outbox_path("close_pending");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); const auto enable = make_enable();
+    Coordinator coordinator([now] { return now; }); assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+    const auto expected = retain_disconnect_intent(coordinator, path, enable, now, 209);
+    const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+    {
+        StopReadSharingLock held(path);
+        assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::enabled, DisconnectState::enabled,
+            DisconnectPending::retained, DisconnectPublication::not_attempted, DisconnectCleanup::not_needed,
+            DisconnectError::pending_enqueue_unfinished);
+        assert(coordinator.is_open() && coordinator.next_sequence() == 1 && coordinator.outbox_size() == 0);
+        assert(pristine_ciphertext(state) == original_state && pristine_ciphertext(path) == original_payload);
+    }
+    assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::enabled, DisconnectState::closed,
+        DisconnectPending::completed, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(!coordinator.is_open() && coordinator.next_sequence() == 2);
+    const auto encoded = nstu::exam::encode_telemetry_batch(expected);
+    const auto physical = shutdown_protected_payload(path, "NSTU-Exam-Telemetry-Outbox-v1");
+    assert(std::search(physical.begin(), physical.end(), encoded.begin(), encoded.end()) != physical.end());
+    assert_disconnect_durable_batch(path, expected, now);
+    assert(coordinator.open(path) && coordinator.next_sequence() == 2 && coordinator.active_producer_id() == expected.producer_id);
+    assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::suspended && !coordinator.next_batch_to_send(now));
+    assert(coordinator.on_server_enable(enable)); const auto recovered = coordinator.next_batch_to_send(now);
+    assert(recovered && nstu::exam::encode_telemetry_batch(*recovered) == encoded);
+    std::cout << "Close clean retained WAL remains open without writer; exact completion/reopen authorization passed.\n";
+}
+void test_close_first_completion_writer_failure() {
+    const auto path = temp_outbox_path("close_first_writer");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); bool armed = false; unsigned calls = 0;
+    std::unique_ptr<StopReadSharingLock> held;
+    Coordinator coordinator([&] {
+        if (!armed) return now;
+        ++calls; if (calls <= 2) return std::uint64_t{0};
+        assert(calls == 3); held = std::make_unique<StopReadSharingLock>(state); return now;
+    });
+    const auto enable = make_enable(); assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+    const auto expected = retain_disconnect_intent(coordinator, path, enable, now, 210);
+    const auto original_state = pristine_ciphertext(state); const auto encoded = nstu::exam::encode_telemetry_batch(expected);
+    armed = true; const auto result = coordinator.close_with_outcome(); armed = false;
+    assert(calls == 3 && held);
+    assert_close_outcome(result, DisconnectState::enabled, DisconnectState::enabled, DisconnectPending::completed,
+        DisconnectPublication::unconfirmed, DisconnectCleanup::not_needed, DisconnectError::protected_state_failed);
+    assert(coordinator.is_open() && coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1);
+    assert(pristine_ciphertext(state) == original_state); // No earlier close writer: old enabled+WAL ciphertext is exact.
+    const auto published = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    const auto offset = sequence_fixture_offset(enable);
+    assert(disconnect_fixture_number(published, offset, 8) == 1);
+    assert(published[offset + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::enabled));
+    assert(disconnect_fixture_number(published, offset + 57, 4) == encoded.size());
+    assert(published.size() >= encoded.size() && std::equal(encoded.rbegin(), encoded.rend(), published.rbegin()));
+    const auto payload = shutdown_protected_payload(path, "NSTU-Exam-Telemetry-Outbox-v1");
+    assert(std::search(payload.begin(), payload.end(), encoded.begin(), encoded.end()) != payload.end());
+    const auto history = coordinator.last_error(); assert(!history.empty()); held.reset();
+    assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::enabled, DisconnectState::closed,
+        DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(!coordinator.is_open() && coordinator.last_error() == history && coordinator.next_sequence() == 2);
+    const auto completed = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    assert(disconnect_fixture_number(completed, offset, 8) == 2 && disconnect_fixture_number(completed, offset + 57, 4) == 0);
+    assert_disconnect_durable_batch(path, expected, now);
+    std::cout << "Close exactly3 Clock calls, genuine failed first writer/unconfirmed and no-duplicate closure retry passed.\n";
+}
+void test_close_dirty_state_failure_and_retry() {
+    const auto path = temp_outbox_path("close_dirty_state");
+    const std::filesystem::path state = path.wstring() + L".coord_state";
+    const auto now = test_now_ms(); const auto enable = make_enable();
+    Coordinator coordinator([now] { return now; }); assert(coordinator.open(path));
+    const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+    {
+        StopReadSharingLock held(state);
+        assert(!coordinator.on_server_enable(enable)); // Real failed enable leaves its original dirty recovery obligation.
+        assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::suspended, DisconnectState::suspended,
+            DisconnectPending::not_present, DisconnectPublication::unconfirmed, DisconnectCleanup::not_needed,
+            DisconnectError::protected_state_failed);
+        assert(coordinator.is_open() && pristine_ciphertext(state) == original_state && pristine_ciphertext(path) == original_payload);
+    }
+    const auto history = coordinator.last_error(); assert(!history.empty());
+    assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::suspended, DisconnectState::closed,
+        DisconnectPending::not_present, DisconnectPublication::current_protected_state_confirmed,
+        DisconnectCleanup::not_needed, DisconnectError::none);
+    assert(!coordinator.is_open() && coordinator.last_error() == history && pristine_ciphertext(path) == original_payload);
+    const auto after = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+    assert(after[sequence_fixture_offset(enable) + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::suspended));
+    std::cout << "Close real enable-induced dirty failure remains open and retry publishes before closure.\n";
+}
+void test_close_policy_false_cleanup_and_no_writer_retry() {
+    for (const unsigned arm : {0u, 1u, 2u}) {
+        const auto path = temp_outbox_path("close_expiry_" + std::to_string(arm));
+        const std::filesystem::path state = path.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        auto now = test_now_ms(); const auto enable = make_enable();
+        Coordinator coordinator([&] { return now; }); assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+        assert(coordinator.ingest_samples(std::vector{make_sample(211)}, now));
+        (void)retain_disconnect_intent(coordinator, path, enable, now, 212);
+        const auto original_state = pristine_ciphertext(state), original_payload = pristine_ciphertext(path);
+        now += nstu::exam::kTelemetryRetentionMilliseconds;
+        {
+            std::unique_ptr<StopReadSharingLock> held;
+            if (arm != 0) held = std::make_unique<StopReadSharingLock>(arm == 1 ? state : path);
+            assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::enabled, DisconnectState::revoked,
+                DisconnectPending::revoked_expired, arm == 1 ? DisconnectPublication::refusal_marker_confirmed :
+                DisconnectPublication::current_protected_state_confirmed,
+                arm == 0 ? DisconnectCleanup::complete : DisconnectCleanup::pending,
+                arm == 0 ? DisconnectError::none : (arm == 1 ? DisconnectError::protected_state_failed : DisconnectError::cleanup_failed));
+            assert(coordinator.is_open() && coordinator.next_sequence() == 2); // Even clean policy false is not actual closure.
+            assert(coordinator.dropped_sample_count() == 1 && coordinator.dropped_batch_count() == 1);
+            if (arm == 1) {
+                assert(pristine_ciphertext(state) == original_state); assert_pristine_regular_file(marker);
+                assert(pristine_ciphertext(marker) == std::vector<std::byte>{std::byte{1}});
+                assert_shutdown_physical_empty_outbox(path); // Checksum/header/zero records before any aged open.
+                Coordinator refused([&] { return now; }); assert(!refused.open(path) && !refused.on_server_enable(enable));
+                assert(pristine_ciphertext(state) == original_state && pristine_ciphertext(marker) == std::vector<std::byte>{std::byte{1}});
+            } else {
+                const auto published = shutdown_protected_payload(state, "NSTU-Exam-Telemetry-Service-Coordinator-v1");
+                assert(published[sequence_fixture_offset(enable) + 12] == static_cast<std::byte>(nstu::client::TelemetryLifecycleState::revoked));
+                assert(!std::filesystem::exists(marker));
+                if (arm == 2) assert(pristine_ciphertext(path) == original_payload);
+                else assert_shutdown_physical_empty_outbox(path);
+            }
+        }
+        const auto before_retry_state = pristine_ciphertext(state);
+        const auto history = coordinator.last_error(); assert(!history.empty());
+        assert_close_outcome(coordinator.close_with_outcome(), DisconnectState::revoked, DisconnectState::closed,
+            DisconnectPending::not_present, arm == 1 ? DisconnectPublication::current_protected_state_confirmed :
+            DisconnectPublication::not_attempted, arm == 0 ? DisconnectCleanup::not_needed : DisconnectCleanup::complete, DisconnectError::none);
+        assert(!coordinator.is_open() && coordinator.last_error() == history && coordinator.next_sequence() == 2);
+        if (arm != 1) assert(pristine_ciphertext(state) == before_retry_state); // Closure/cleanup supplies no new protected writer.
+        assert_shutdown_physical_empty_outbox(path); assert_stop_revoked_fixture(path, enable);
+        assert(!std::filesystem::exists(marker)); assert_stop_restart_refuses_old(path, enable, now);
+    }
+    std::cout << "Close clean-policy false/open, native state/payload cleanup and truthful no-writer closure retry passed.\n";
+}
+void test_close_private_replacement_null_guard() {
+    const auto path = temp_outbox_path("close_replacement_old");
+    const auto replacement = temp_outbox_path("close_replacement_new");
+    auto now = test_now_ms(); const auto enable = make_enable();
+    Coordinator coordinator([&] { return now; }); assert(coordinator.open(path) && coordinator.on_server_enable(enable));
+    assert(coordinator.ingest_samples(std::vector{make_sample(213)}, now));
+    (void)retain_disconnect_intent(coordinator, path, enable, now, 214);
+    now += nstu::exam::kTelemetryRetentionMilliseconds;
+    assert(!coordinator.open(replacement)); // Private default-null close keeps its original false policy guard.
+    assert(coordinator.is_open() && coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked);
+    assert(!std::filesystem::exists(replacement) && !std::filesystem::exists(replacement.wstring() + L".coord_state"));
+    assert_shutdown_physical_empty_outbox(path); assert_stop_revoked_fixture(path, enable);
+    const auto old_state = pristine_ciphertext(path.wstring() + L".coord_state");
+    assert(coordinator.open(replacement)); // Subsequent private close succeeds and the original replacement admission runs.
+    assert(coordinator.is_open() && coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::disabled);
+    assert(std::filesystem::exists(replacement) && std::filesystem::exists(replacement.wstring() + L".coord_state"));
+    assert(pristine_ciphertext(path.wstring() + L".coord_state") == old_state);
+    std::cout << "Private null-observer close/replacement false guard and later original admission passed.\n";
+}
+void run_close_outcome_tests() {
+    test_close_defaults_and_ordinary_retention();
+    test_close_default_destructor_keeps_pending_bytes();
+    test_close_retained_pending_without_first_writer();
+    test_close_first_completion_writer_failure();
+    test_close_dirty_state_failure_and_retry();
+    test_close_policy_false_cleanup_and_no_writer_retry();
+    test_close_private_replacement_null_guard();
+}
+} // namespace
+
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "close-outcomes") { run_close_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "shutdown-outcomes") { run_shutdown_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "disconnect-outcomes") { run_disconnect_outcome_tests(); return 0; }
     if (argc == 2 && std::string_view(argv[1]) == "stop-outcomes") { run_stop_outcome_tests(); return 0; }
@@ -2885,6 +3126,7 @@ int main(int argc, char** argv) {
     run_stop_outcome_tests();
     run_disconnect_outcome_tests();
     run_shutdown_outcome_tests();
+    run_close_outcome_tests();
     std::cout << "All exam_telemetry_service_tests passed successfully.\n";
     return 0;
 }
