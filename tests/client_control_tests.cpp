@@ -1069,11 +1069,362 @@ void run_router_stop_outcome_tests() {
     test_router_stop_native_failures_and_maintenance_recovery();
 }
 
+using DisconnectOutcome = nstu::client::TelemetryDisconnectOutcome;
+using DisconnectState = nstu::client::TelemetryDisconnectState;
+using DisconnectPending = nstu::client::TelemetryDisconnectPending;
+using DisconnectPublication = nstu::client::TelemetryDisconnectPublication;
+using DisconnectCleanup = nstu::client::TelemetryDisconnectCleanup;
+using DisconnectError = nstu::client::TelemetryDisconnectError;
+using DisconnectDispatch = nstu::client::TelemetryDisconnectDispatch;
+static_assert(!noexcept(std::declval<nstu::client::ExamTelemetryRouter&>().handle_disconnect_with_outcome()));
+static_assert(!noexcept(std::declval<nstu::client::ExamTelemetryRouter&>().handle_disconnect()));
+
+void assert_router_disconnect(const nstu::client::TelemetryDisconnectDispatchResult& result,
+                              const DisconnectOutcome& expected) {
+    assert(result.dispatch == DisconnectDispatch::outcome_callback_invoked && result.outcome);
+    assert(result.outcome->before == expected.before);
+    assert(result.outcome->after == expected.after);
+    assert(result.outcome->pending == expected.pending);
+    assert(result.outcome->publication == expected.publication);
+    assert(result.outcome->cleanup == expected.cleanup);
+    assert(result.outcome->current_failure == expected.current_failure);
+}
+
+void test_router_disconnect_dispatch_compatibility_and_exceptions() {
+    nstu::client::TelemetryDisconnectDispatchResult defaults;
+    assert(defaults.dispatch == DisconnectDispatch::not_configured && !defaults.outcome);
+    nstu::client::ExamTelemetryRouter router;
+    const auto absent = router.handle_disconnect_with_outcome();
+    assert(absent.dispatch == DisconnectDispatch::not_configured && !absent.outcome);
+    router.handle_disconnect();
+    int legacy_calls = 0;
+    nstu::client::ExamTelemetryRouterCallbacks legacy;
+    legacy.on_disconnect = [&] { ++legacy_calls; };
+    router.set_callbacks(legacy);
+    const auto legacy_result = router.handle_disconnect_with_outcome();
+    assert(legacy_result.dispatch == DisconnectDispatch::legacy_callback_invoked && !legacy_result.outcome);
+    router.handle_disconnect();
+    assert(legacy_calls == 2);
+
+    // Supplied tuples prove forwarding only, including earlier publication versus current failure.
+    const std::array<DisconnectOutcome, 4> supplied{{
+        {},
+        {DisconnectState::enabled, DisconnectState::suspended, DisconnectPending::retained,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed,
+         DisconnectError::pending_enqueue_unfinished},
+        {DisconnectState::enabled, DisconnectState::suspended, DisconnectPending::completed,
+         DisconnectPublication::earlier_protected_snapshot_confirmed, DisconnectCleanup::not_needed,
+         DisconnectError::protected_state_failed},
+        {DisconnectState::enabled, DisconnectState::revoked, DisconnectPending::revoked_age_uncertain,
+         DisconnectPublication::earlier_protected_snapshot_confirmed, DisconnectCleanup::pending,
+         DisconnectError::revocation_witness_unconfirmed}
+    }};
+    for (const bool both : {false, true}) {
+        for (const auto& outcome : supplied) {
+            int typed_calls = 0;
+            nstu::client::ExamTelemetryRouterCallbacks callbacks;
+            callbacks.on_disconnect_with_outcome = [&] { ++typed_calls; return outcome; };
+            if (both) callbacks.on_disconnect = [&] { ++legacy_calls; };
+            router.set_callbacks(std::move(callbacks));
+            assert_router_disconnect(router.handle_disconnect_with_outcome(), outcome);
+            router.handle_disconnect();
+            assert(typed_calls == 2 && legacy_calls == 2);
+        }
+    }
+    router.set_callbacks(legacy); // Replacing callbacks removes typed precedence.
+    const auto replaced = router.handle_disconnect_with_outcome();
+    assert(replaced.dispatch == DisconnectDispatch::legacy_callback_invoked && !replaced.outcome);
+    assert(legacy_calls == 3);
+    router.set_callbacks({});
+    assert(router.handle_disconnect_with_outcome().dispatch == DisconnectDispatch::not_configured);
+
+    int stop_calls = 0;
+    // Eleven positional fields retain the typed stop position; the appended disconnect defaults empty.
+    nstu::client::ExamTelemetryRouterCallbacks eleven{
+        {}, {}, {}, {}, [&] { ++legacy_calls; }, {}, {}, {}, {}, {},
+        [&] { ++stop_calls; return RouterStopOutcome{}; }
+    };
+    assert(eleven.on_explicit_stop_with_outcome && !eleven.on_disconnect_with_outcome);
+    router.set_callbacks(std::move(eleven));
+    assert_router_stop_outcome(router.handle_explicit_stop_with_outcome(), {});
+    assert(router.handle_disconnect_with_outcome().dispatch == DisconnectDispatch::legacy_callback_invoked);
+    assert(stop_calls == 1 && legacy_calls == 4);
+
+    struct Sentinel {} sentinel;
+    for (const bool typed : {false, true}) {
+        for (const bool void_entry : {false, true}) {
+            int legacy_count = 0;
+            int typed_count = 0;
+            nstu::client::ExamTelemetryRouterCallbacks callbacks;
+            callbacks.on_disconnect = [&] { ++legacy_count; if (!typed) throw &sentinel; };
+            if (typed) callbacks.on_disconnect_with_outcome = [&]() -> DisconnectOutcome {
+                ++typed_count; throw &sentinel;
+            };
+            router.set_callbacks(std::move(callbacks));
+            bool caught = false;
+            try {
+                if (void_entry) router.handle_disconnect();
+                else (void)router.handle_disconnect_with_outcome();
+            } catch (const Sentinel* actual) { assert(actual == &sentinel); caught = true; }
+            assert(caught && typed_count == (typed ? 1 : 0) && legacy_count == (typed ? 0 : 1));
+        }
+    }
+}
+
+std::vector<std::byte> router_disconnect_state_payload(const std::filesystem::path& outbox) {
+    constexpr std::string_view entropy = "NSTU-Exam-Telemetry-Service-Coordinator-v1";
+    auto bytes = nstu::security::load_machine_secret(outbox.wstring() + L".coord_state",
+        {reinterpret_cast<const std::byte*>(entropy.data()), entropy.size()});
+    assert(bytes.size() >= 32);
+    const auto payload = std::span<const std::byte>(bytes).first(bytes.size() - 32);
+    const auto digest = nstu::security::sha256(payload);
+    assert(digest && std::equal(digest->begin(), digest->end(), bytes.end() - 32));
+    bytes.resize(bytes.size() - 32);
+    return bytes;
+}
+
+void assert_router_disconnect_batch(const std::filesystem::path& outbox,
+                                    const nstu::exam::TelemetryBatch& expected, std::uint64_t now) {
+    constexpr std::string_view entropy = "NSTU-Exam-Telemetry-Outbox-v1";
+    const auto physical = nstu::security::load_machine_secret(outbox.wstring(),
+        {reinterpret_cast<const std::byte*>(entropy.data()), entropy.size()});
+    const auto encoded = nstu::exam::encode_telemetry_batch(expected);
+    assert(!encoded.empty() && std::search(physical.begin(), physical.end(), encoded.begin(), encoded.end()) != physical.end());
+    nstu::exam::TelemetryOutbox inspect;
+    assert(inspect.open(outbox, now, nullptr));
+    const auto batches = inspect.pending_batches();
+    assert(batches.size() == 1 && nstu::exam::encode_telemetry_batch(batches.front()) == encoded);
+}
+
+void assert_router_disconnect_physical_empty_outbox(const std::filesystem::path& outbox) {
+    constexpr std::string_view entropy = "NSTU-Exam-Telemetry-Outbox-v1";
+    const auto bytes = nstu::security::load_machine_secret(outbox.wstring(),
+        {reinterpret_cast<const std::byte*>(entropy.data()), entropy.size()});
+    assert(bytes.size() >= 64);
+    const auto payload = std::span<const std::byte>(bytes).first(bytes.size() - 32);
+    const auto digest = nstu::security::sha256(payload);
+    assert(digest && std::equal(digest->begin(), digest->end(), bytes.end() - 32));
+    const auto u32 = [&](std::size_t offset) {
+        assert(offset <= payload.size() && payload.size() - offset >= 4);
+        std::uint32_t value = 0;
+        for (std::size_t index = 0; index < 4; ++index)
+            value |= std::to_integer<std::uint32_t>(payload[offset + index]) << (8 * index);
+        return value;
+    };
+    assert(u32(0) == 0x544c4d4f);
+    assert(payload[4] == std::byte{2} && payload[5] == std::byte{0});
+    assert(payload[6] == std::byte{0} && payload[7] == std::byte{0});
+    const auto loss_count = u32(24);
+    assert(loss_count <= 64);
+    const auto records_offset = std::size_t{28} + std::size_t{56} * loss_count;
+    assert(u32(records_offset) == 0 && payload.size() == records_offset + 4);
+    // Read protected bytes directly: no open/prune operation can hide a stale batch.
+}
+
+void test_router_disconnect_real_retention_and_reconstruction() {
+    Task9Storage storage("disconnect-retention");
+    const auto now = task9_now_ms();
+    nstu::client::ExamTelemetryServiceCoordinator coordinator([now] { return now; });
+    int forwards = 0;
+    nstu::client::ExamTelemetryRouter router(coordinator, [&](std::span<const std::byte>) { ++forwards; });
+    assert_router_disconnect(router.handle_disconnect_with_outcome(), {});
+    assert(router.handle_restart(storage.outbox));
+    const auto unbound_payload = router_stop_file_bytes(storage.outbox);
+    assert_router_disconnect(router.handle_disconnect_with_outcome(),
+        {DisconnectState::disabled, DisconnectState::disabled, DisconnectPending::not_present,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+    assert(router_stop_file_bytes(storage.outbox) == unbound_payload && forwards == 0);
+    const auto enable = task9_enable();
+    const auto raw = nstu::exam::encode_telemetry_enable(enable);
+    assert(router.handle_server_enable(raw));
+    assert(router.handle_agent_samples(std::vector{task9_sample()}, now));
+    constexpr std::uint64_t long_timeout = 600000;
+    const auto offered = router.poll_outbound_batch(now, long_timeout);
+    assert(offered);
+    const auto expected = nstu::exam::decode_telemetry_batch(offered->payload);
+    assert(expected && expected->sequence == 1 && expected->producer_id == coordinator.active_producer_id());
+    const auto payload = router_stop_file_bytes(storage.outbox);
+    assert_router_disconnect(router.handle_disconnect_with_outcome(),
+        {DisconnectState::enabled, DisconnectState::suspended, DisconnectPending::not_present,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+    assert_router_stop_protected_lifecycle(storage.outbox, enable, nstu::client::TelemetryLifecycleState::suspended);
+    assert(router_stop_file_bytes(storage.outbox) == payload && forwards == 1);
+    assert_router_disconnect(router.handle_disconnect_with_outcome(),
+        {DisconnectState::suspended, DisconnectState::suspended, DisconnectPending::not_present,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+    assert(!router.poll_outbound_batch(now + 1, long_timeout));
+    auto mismatch = enable;
+    mismatch.candidate_id = "wrong-candidate";
+    assert(!router.handle_server_enable(nstu::exam::encode_telemetry_enable(mismatch)));
+    assert(forwards == 1 && !router.poll_outbound_batch(now + 1, long_timeout));
+    assert(router.handle_server_enable(raw) && forwards == 2);
+    const auto reoffered = router.poll_outbound_batch(now + 1, long_timeout);
+    assert(reoffered && reoffered->payload == offered->payload);
+    assert_router_disconnect_batch(storage.outbox, *expected, now);
+    router.handle_disconnect();
+    coordinator.close();
+    nstu::client::ExamTelemetryServiceCoordinator rebuilt([now] { return now; });
+    nstu::client::ExamTelemetryRouter restored(rebuilt, [&](std::span<const std::byte>) { ++forwards; });
+    assert(restored.handle_restart(storage.outbox));
+    assert(rebuilt.lifecycle_state() == nstu::client::TelemetryLifecycleState::suspended);
+    assert(rebuilt.next_sequence() == 2 && rebuilt.active_producer_id() == expected->producer_id);
+    assert(rebuilt.outbox_size() == 1 && !restored.poll_outbound_batch(now + 2, long_timeout));
+    assert(restored.handle_server_enable(raw) && forwards == 3);
+    const auto recovered = restored.poll_outbound_batch(now + 2, long_timeout);
+    assert(recovered && recovered->payload == offered->payload);
+    restored.handle_shutdown();
+}
+
+void test_router_disconnect_real_state_failure_retry() {
+    Task9Storage storage("disconnect-state-failure");
+    const auto now = task9_now_ms();
+    nstu::client::ExamTelemetryServiceCoordinator coordinator([now] { return now; });
+    int forwards = 0;
+    nstu::client::ExamTelemetryRouter router(coordinator, [&](std::span<const std::byte>) { ++forwards; });
+    const auto enable = task9_enable();
+    assert(router.handle_restart(storage.outbox) && router.handle_server_enable(nstu::exam::encode_telemetry_enable(enable)));
+    const std::filesystem::path state = storage.outbox.wstring() + L".coord_state";
+    const auto original = router_stop_file_bytes(state);
+    {
+        RouterStopSharingLock held(state);
+        assert_router_disconnect(router.handle_disconnect_with_outcome(),
+            {DisconnectState::enabled, DisconnectState::suspended, DisconnectPending::not_present,
+             DisconnectPublication::unconfirmed, DisconnectCleanup::not_needed, DisconnectError::protected_state_failed});
+        assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::suspended);
+        assert(router_stop_file_bytes(state) == original && forwards == 1);
+        assert_router_stop_protected_lifecycle(storage.outbox, enable, nstu::client::TelemetryLifecycleState::enabled);
+    }
+    const auto history = coordinator.last_error();
+    assert(!history.empty());
+    assert_router_disconnect(router.handle_disconnect_with_outcome(),
+        {DisconnectState::suspended, DisconnectState::suspended, DisconnectPending::not_present,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+    assert(coordinator.last_error() == history && forwards == 1 && !router.poll_outbound_batch(now));
+    assert_router_stop_protected_lifecycle(storage.outbox, enable, nstu::client::TelemetryLifecycleState::suspended);
+    router.handle_shutdown();
+}
+
+void test_router_disconnect_real_pending_retry() {
+    Task9Storage storage("disconnect-pending");
+    const auto now = task9_now_ms();
+    nstu::client::ExamTelemetryServiceCoordinator coordinator([now] { return now; });
+    int forwards = 0;
+    nstu::client::ExamTelemetryRouter router(coordinator, [&](std::span<const std::byte>) { ++forwards; });
+    const auto enable = task9_enable();
+    assert(router.handle_restart(storage.outbox) && router.handle_server_enable(nstu::exam::encode_telemetry_enable(enable)));
+    const nstu::exam::TelemetryBatch expected{enable.package_id, enable.package_digest, enable.client_id,
+        enable.session_id, enable.candidate_id, coordinator.active_producer_id(), 1, now, std::vector{task9_sample()}};
+    const auto encoded = nstu::exam::encode_telemetry_batch(expected);
+    const auto original_payload = router_stop_file_bytes(storage.outbox);
+    {
+        RouterStopSharingLock held(storage.outbox);
+        assert(!router.handle_agent_samples(expected.samples, now));
+        const auto wal = router_disconnect_state_payload(storage.outbox);
+        assert(!encoded.empty() && wal.size() >= encoded.size());
+        assert(std::equal(encoded.rbegin(), encoded.rend(), wal.rbegin()));
+        assert_router_disconnect(router.handle_disconnect_with_outcome(),
+            {DisconnectState::enabled, DisconnectState::suspended, DisconnectPending::retained,
+             DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed,
+             DisconnectError::pending_enqueue_unfinished});
+        assert(coordinator.next_sequence() == 1 && coordinator.outbox_size() == 0 && forwards == 1);
+        assert(router_stop_file_bytes(storage.outbox) == original_payload);
+        const auto suspended_wal = router_disconnect_state_payload(storage.outbox);
+        assert(suspended_wal.size() >= encoded.size());
+        assert(std::equal(encoded.rbegin(), encoded.rend(), suspended_wal.rbegin()));
+        assert_router_stop_protected_lifecycle(storage.outbox, enable, nstu::client::TelemetryLifecycleState::suspended);
+    }
+    assert_router_disconnect(router.handle_disconnect_with_outcome(),
+        {DisconnectState::suspended, DisconnectState::suspended, DisconnectPending::completed,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+    assert(coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1 && forwards == 1);
+    assert_router_disconnect_batch(storage.outbox, expected, now);
+    assert(!router.poll_outbound_batch(now));
+    assert_router_disconnect(router.handle_disconnect_with_outcome(),
+        {DisconnectState::suspended, DisconnectState::suspended, DisconnectPending::not_present,
+         DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+    assert(coordinator.next_sequence() == 2 && coordinator.outbox_size() == 1);
+    router.handle_shutdown();
+}
+
+void test_router_disconnect_real_expiry_and_cleanup() {
+    for (const bool block_payload : {false, true}) {
+        Task9Storage storage(block_payload ? "disconnect-expiry-cleanup" : "disconnect-expiry-marker");
+        auto now = task9_now_ms();
+        nstu::client::ExamTelemetryServiceCoordinator coordinator([&] { return now; });
+        int forwards = 0;
+        nstu::client::ExamTelemetryRouter router(coordinator, [&](std::span<const std::byte>) { ++forwards; });
+        const auto enable = task9_enable();
+        const auto raw = nstu::exam::encode_telemetry_enable(enable);
+        assert(router.handle_restart(storage.outbox) && router.handle_server_enable(raw));
+        assert(router.handle_agent_samples(std::vector{task9_sample()}, now)); // Real payload to retain during failed purge.
+        {
+            RouterStopSharingLock held(storage.outbox);
+            auto sample = task9_sample();
+            sample.collector_id = 12;
+            assert(!router.handle_agent_samples(std::vector{sample}, now));
+        }
+        const std::filesystem::path state = storage.outbox.wstring() + L".coord_state";
+        const std::filesystem::path marker = state.wstring() + L".blocked";
+        const auto original_state = router_stop_file_bytes(state);
+        const auto original_payload = router_stop_file_bytes(storage.outbox);
+        now += nstu::exam::kTelemetryRetentionMilliseconds;
+        {
+            RouterStopSharingLock held(block_payload ? storage.outbox : state);
+            assert_router_disconnect(router.handle_disconnect_with_outcome(),
+                {DisconnectState::enabled, DisconnectState::revoked, DisconnectPending::revoked_expired,
+                 block_payload ? DisconnectPublication::current_protected_state_confirmed : DisconnectPublication::refusal_marker_confirmed,
+                 DisconnectCleanup::pending, block_payload ? DisconnectError::cleanup_failed : DisconnectError::protected_state_failed});
+            assert(coordinator.lifecycle_state() == nstu::client::TelemetryLifecycleState::revoked && forwards == 1);
+            if (block_payload) {
+                assert(router_stop_file_bytes(storage.outbox) == original_payload);
+                assert_router_stop_protected_lifecycle(storage.outbox, enable, nstu::client::TelemetryLifecycleState::revoked);
+                assert(!std::filesystem::exists(marker));
+            } else {
+                assert(router_stop_file_bytes(state) == original_state);
+                assert(router_stop_file_bytes(marker) == std::string(1, '\x01'));
+                assert_router_disconnect_physical_empty_outbox(storage.outbox);
+                nstu::exam::TelemetryOutbox inspect;
+                assert(inspect.open(storage.outbox, now, nullptr) && inspect.size() == 0);
+                inspect.close();
+                nstu::client::ExamTelemetryServiceCoordinator blocked([&] { return now; });
+                nstu::client::ExamTelemetryRouter blocked_router(blocked, [](std::span<const std::byte>) { assert(false); });
+                assert(!blocked_router.handle_restart(storage.outbox) && !blocked.is_open());
+                assert(!blocked_router.handle_server_enable(raw) && !blocked_router.poll_outbound_batch(now));
+                assert(router_stop_file_bytes(state) == original_state && router_stop_file_bytes(marker) == std::string(1, '\x01'));
+            }
+        }
+        const auto history = coordinator.last_error();
+        assert(router.handle_maintenance(now));
+        assert_router_disconnect_physical_empty_outbox(storage.outbox);
+        assert_router_disconnect(router.handle_disconnect_with_outcome(),
+            {DisconnectState::revoked, DisconnectState::revoked, DisconnectPending::not_present,
+             DisconnectPublication::current_protected_state_confirmed, DisconnectCleanup::not_needed, DisconnectError::none});
+        assert(coordinator.last_error() == history && coordinator.outbox_size() == 0);
+        assert_router_stop_protected_lifecycle(storage.outbox, enable, nstu::client::TelemetryLifecycleState::revoked);
+        assert(!std::filesystem::exists(marker) && !router.handle_server_enable(raw));
+        assert(!router.poll_outbound_batch(now) && forwards == 1);
+        router.handle_shutdown();
+        assert_router_stop_reconstruction_refuses_old(storage, enable, now);
+    }
+}
+
+void run_router_disconnect_outcome_tests() {
+    test_router_disconnect_dispatch_compatibility_and_exceptions();
+    test_router_disconnect_real_retention_and_reconstruction();
+    test_router_disconnect_real_state_failure_retry();
+    test_router_disconnect_real_pending_retry();
+    test_router_disconnect_real_expiry_and_cleanup();
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     nstu::net::WinsockRuntime winsock;
     assert(winsock.ready());
+    if (argc == 2 && std::string_view(argv[1]) == "router-disconnect-outcomes") {
+        run_router_disconnect_outcome_tests();
+        return 0;
+    }
     if (argc == 2 && std::string_view(argv[1]) == "router-stop-outcomes") {
         run_router_stop_outcome_tests();
         return 0;
@@ -1309,6 +1660,7 @@ int main(int argc, char** argv) {
     nstu::client::clear_client_runtime_config(client_config);
 
     run_router_stop_outcome_tests();
+    run_router_disconnect_outcome_tests();
     test_exam_telemetry_router();
     test_task9_real_restart_restores_storage();
     test_task9_decoder_preserves_specific_error();

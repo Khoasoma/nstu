@@ -52,6 +52,9 @@ ExamTelemetryRouter::ExamTelemetryRouter(
         },
         .on_explicit_stop_with_outcome = [&coordinator]() {
             return coordinator.on_explicit_stop_with_outcome();
+        },
+        .on_disconnect_with_outcome = [&coordinator]() {
+            return coordinator.on_disconnect_with_outcome();
         }
     } {}
 
@@ -142,10 +145,20 @@ void ExamTelemetryRouter::handle_explicit_stop() {
     (void)handle_explicit_stop_with_outcome();
 }
 
-void ExamTelemetryRouter::handle_disconnect() {
+TelemetryDisconnectDispatchResult ExamTelemetryRouter::handle_disconnect_with_outcome() {
+    if (callbacks_.on_disconnect_with_outcome) {
+        auto outcome = callbacks_.on_disconnect_with_outcome();
+        return {TelemetryDisconnectDispatch::outcome_callback_invoked, std::move(outcome)};
+    }
     if (callbacks_.on_disconnect) {
         callbacks_.on_disconnect();
+        return {TelemetryDisconnectDispatch::legacy_callback_invoked, std::nullopt};
     }
+    return {};
+}
+
+void ExamTelemetryRouter::handle_disconnect() {
+    (void)handle_disconnect_with_outcome();
 }
 
 void ExamTelemetryRouter::handle_shutdown() {

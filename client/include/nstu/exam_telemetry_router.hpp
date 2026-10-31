@@ -30,6 +30,16 @@ struct TelemetryStopDispatchResult {
     std::optional<TelemetryStopOutcome> outcome = std::nullopt;
 };
 
+// Dispatch reports invocation; the outcome preserves the coordinator's current disconnect facts.
+enum class TelemetryDisconnectDispatch : std::uint8_t {
+    not_configured, legacy_callback_invoked, outcome_callback_invoked
+};
+
+struct TelemetryDisconnectDispatchResult {
+    TelemetryDisconnectDispatch dispatch = TelemetryDisconnectDispatch::not_configured;
+    std::optional<TelemetryDisconnectOutcome> outcome = std::nullopt;
+};
+
 struct ExamTelemetryRouterCallbacks {
     std::function<bool(const exam::TelemetryEnable& enable, std::string* error)> on_enable;
     std::function<bool(const std::vector<exam::TelemetrySample>& samples, std::uint64_t now_ms, std::string* error)> ingest_samples;
@@ -42,6 +52,7 @@ struct ExamTelemetryRouterCallbacks {
     std::function<void(std::span<const std::byte> enable_payload)> queue_agent_enable;
     std::function<std::optional<exam::TelemetryBatch>(std::uint64_t now_ms, std::uint64_t timeout_ms)> next_batch_to_send;
     std::function<TelemetryStopOutcome()> on_explicit_stop_with_outcome = {};
+    std::function<TelemetryDisconnectOutcome()> on_disconnect_with_outcome = {};
 };
 
 class ExamTelemetryRouter {
@@ -82,6 +93,9 @@ public:
     // Exceptions propagate. Callback invocation does not guarantee completed cleanup.
     [[nodiscard]] TelemetryStopDispatchResult handle_explicit_stop_with_outcome();
     void handle_explicit_stop();
+    // Typed callback takes precedence; absent/legacy callbacks leave the outcome empty.
+    // Exceptions propagate. Callback invocation does not guarantee current publication or cleanup.
+    [[nodiscard]] TelemetryDisconnectDispatchResult handle_disconnect_with_outcome();
     void handle_disconnect();
     void handle_shutdown();
     // Restores the coordinator from its protected local storage. Restore alone
