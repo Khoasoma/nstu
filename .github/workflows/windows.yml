@@ -188,16 +188,22 @@ jobs:
             ConvertFrom-Json | Out-Null
           Get-Content exam/examples/ielts-sample.json -Raw |
             ConvertFrom-Json | Out-Null
+      - name: Install to verification tree
+        run: cmake --install build-webview2 --prefix build-webview2/install --config Release
       - name: Verify WebView2 loader
         shell: pwsh
         run: |
-          $loader = Get-ChildItem -Path build-webview2 -Recurse -Filter WebView2Loader.dll -File
+          $loader = Get-ChildItem -Path build-webview2 -Recurse -Filter WebView2Loader.dll -File | Select-Object -First 1
           if ($null -eq $loader) {
-            throw "WebView2Loader.dll was not found in the build tree"
+            throw "WebView2Loader.dll was not found in the build/install tree"
           }
           $sig = Get-AuthenticodeSignature $loader.FullName
+          Write-Host "WebView2Loader.dll found at: $($loader.FullName)"
           Write-Host "WebView2Loader.dll signature status: $($sig.Status)"
           Write-Host "WebView2Loader.dll signer: $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') {
+            Write-Warning "WebView2Loader.dll signature is not valid: $($sig.Status)"
+          }
 
   release:
     name: Development release
