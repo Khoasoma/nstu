@@ -147,6 +147,58 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  webview2-host-build:
+    name: WebView2-enabled host build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install NSIS
+        run: choco install nsis --no-progress --yes --force
+      - name: Acquire WebView2 SDK
+        shell: pwsh
+        run: |
+          nuget install Microsoft.Web.WebView2 -Version 1.0.4314.35 -OutputDirectory packages
+          $sdk = Resolve-Path "packages/Microsoft.Web.WebView2.1.0.4314.35"
+          if (-not (Test-Path "$sdk/build/native/include/WebView2.h")) {
+            throw "WebView2 SDK header not found"
+          }
+          "NSTU_WEBVIEW2_SDK_DIR=$sdk" | Out-File -Append $env:GITHUB_ENV
+      - name: Configure with WebView2 host
+        run: >-
+          cmake -S . -B build-webview2 -A x64
+          -DNSTU_ENABLE_WERROR=ON
+          -DNSTU_ENABLE_WEBVIEW2_HOST=ON
+          -DNSTU_WEBVIEW2_SDK_DIR="${{ env.NSTU_WEBVIEW2_SDK_DIR }}"
+      - name: Build
+        run: cmake --build build-webview2 --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build-webview2 -C Release --output-on-failure
+      - name: Validate installer and exam assets
+        shell: pwsh
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path packaging/verify-client-connection.ps1),
+            [ref]$null,
+            [ref]$errors) | Out-Null
+          if ($errors.Count -ne 0) { throw ($errors | Out-String) }
+          node --check exam/web/app.js
+          node tests/exam_web_recovery_tests.js
+          Get-Content exam/schema/manifest.schema.json -Raw |
+            ConvertFrom-Json | Out-Null
+          Get-Content exam/examples/ielts-sample.json -Raw |
+            ConvertFrom-Json | Out-Null
+      - name: Verify WebView2 loader
+        shell: pwsh
+        run: |
+          $loader = Get-ChildItem -Path build-webview2 -Recurse -Filter WebView2Loader.dll -File
+          if ($null -eq $loader) {
+            throw "WebView2Loader.dll was not found in the build tree"
+          }
+          $sig = Get-AuthenticodeSignature $loader.FullName
+          Write-Host "WebView2Loader.dll signature status: $($sig.Status)"
+          Write-Host "WebView2Loader.dll signer: $($sig.SignerCertificate.Subject)"
+
   release:
     name: Development release
     needs: build-test
