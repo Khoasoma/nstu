@@ -141,6 +141,52 @@ bool is_disallowed_ipv4(std::uint32_t ip) noexcept {
     return false;
 }
 
+bool is_disallowed_ipv6(const net::Ipv6Address& ip) noexcept {
+    const auto& b = ip.bytes;
+    // 1. Unspecified address ::
+    const bool all_zero = std::all_of(b.begin(), b.end(), [](std::uint8_t x) { return x == 0; });
+    if (all_zero) return true;
+
+    // 2. Loopback ::1
+    const bool is_loopback = std::all_of(b.begin(), b.end() - 1, [](std::uint8_t x) { return x == 0; }) &&
+                             b.back() == 1;
+    if (is_loopback) return true;
+
+    // 3. IPv4-mapped IPv6 address ::ffff:x.x.x.x
+    const bool is_v4_mapped = std::all_of(b.begin(), b.begin() + 10, [](std::uint8_t x) { return x == 0; }) &&
+                              b[10] == 0xff && b[11] == 0xff;
+    if (is_v4_mapped) {
+        const std::uint32_t v4 = (static_cast<std::uint32_t>(b[12]) << 24) |
+                                 (static_cast<std::uint32_t>(b[13]) << 16) |
+                                 (static_cast<std::uint32_t>(b[14]) << 8) |
+                                 static_cast<std::uint32_t>(b[15]);
+        return is_disallowed_ipv4(v4);
+    }
+
+    // 4. Multicast ff00::/8
+    if (b[0] == 0xff) return true;
+
+    // 5. Link-local fe80::/10
+    if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return true;
+
+    // 6. Site-local fec0::/10 (deprecated RFC 3879)
+    if (b[0] == 0xfe && (b[1] & 0xc0) == 0xc0) return true;
+
+    // 7. Discard prefix 100::/64 (RFC 6666)
+    if (b[0] == 0x01 && b[1] == 0x00) {
+        bool rest_zero = true;
+        for (std::size_t i = 2; i < 8; ++i) {
+            if (b[i] != 0) { rest_zero = false; break; }
+        }
+        if (rest_zero) return true;
+    }
+
+    // 8. Documentation 2001:db8::/32 (RFC 3849)
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return true;
+
+    return false;
+}
+
 std::vector<std::uint32_t> resolve_allowed_origins(
     std::span<const std::string> origins,
     OriginResolveFn resolve_fn) {
@@ -229,8 +275,9 @@ bool ExamLockdownController::arm(
         set_controller_error(error, "package has not been verified");
         return false;
     }
-    if (params.allowed_ipv4.empty()) {
-        set_controller_error(error, "allowed IPv4 set is empty");
+    if (params.allowed_ipv4.empty() && params.allowed_ipv6.empty() &&
+        params.server_ipv4 == 0 && params.server_ipv6 == net::Ipv6Address{}) {
+        set_controller_error(error, "allowed IP set is empty");
         return false;
     }
 
@@ -243,6 +290,13 @@ bool ExamLockdownController::arm(
 
     net::WfpAllowlistConfig config;
     config.allowed_ipv4 = params.allowed_ipv4;
+    config.allowed_ipv6 = params.allowed_ipv6;
+    config.server_ipv4 = params.server_ipv4;
+    config.server_ipv6 = params.server_ipv6;
+    config.server_port = params.server_port;
+    config.default_deny = params.default_deny;
+    config.permit_loopback = params.permit_loopback;
+    config.permit_dns_dhcp = params.permit_dns_dhcp;
     config.block_http = true;
     config.block_https = true;
 

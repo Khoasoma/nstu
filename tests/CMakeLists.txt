@@ -347,6 +347,15 @@ if(TARGET nstu_client_platform)
     add_test(NAME nstu.exam_lockdown_controller
         COMMAND nstu_exam_lockdown_controller_tests)
 
+    add_executable(nstu_wfp_allowlist_tests
+        wfp_allowlist_tests.cpp)
+    target_link_libraries(nstu_wfp_allowlist_tests PRIVATE
+        nstu_client_platform)
+    nstu_enable_warnings(nstu_wfp_allowlist_tests)
+    nstu_enable_test_assertions(nstu_wfp_allowlist_tests)
+    add_test(NAME nstu.wfp_allowlist
+        COMMAND nstu_wfp_allowlist_tests)
+
     # Exam app-suppression policy; pure classifier with a built-in never-kill
     # floor, no real process touched.
     add_executable(nstu_exam_app_suppression_tests

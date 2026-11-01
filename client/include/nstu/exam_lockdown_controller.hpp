@@ -35,6 +35,11 @@ inline constexpr unsigned int kMaxApplyRetries = 5;
 // unspecified, multicast, reserved, or broadcast.
 [[nodiscard]] bool is_disallowed_ipv4(std::uint32_t ip) noexcept;
 
+// Checks if an IPv6 address is loopback (::1), link-local (fe80::/10),
+// unspecified (::), multicast (ff00::/8), site-local (fec0::/10),
+// IPv4-mapped disallowed address, discard prefix, or documentation prefix.
+[[nodiscard]] bool is_disallowed_ipv6(const net::Ipv6Address& ip) noexcept;
+
 using OriginResolveFn =
     std::function<std::vector<std::uint32_t>(const std::string& hostname)>;
 
@@ -49,7 +54,14 @@ struct ExamLockdownArmParams {
     security::ClientId client_id{};
     bool package_verified = false;
     std::uint32_t duration_seconds = 0;
-    std::vector<std::uint32_t> allowed_ipv4;
+    std::vector<std::uint32_t> allowed_ipv4{};
+    std::vector<net::Ipv6Address> allowed_ipv6{};
+    std::uint32_t server_ipv4 = 0;
+    net::Ipv6Address server_ipv6{};
+    std::uint16_t server_port = 0;
+    bool default_deny = true;
+    bool permit_loopback = true;
+    bool permit_dns_dhcp = true;
 };
 
 // ExamLockdownController manages the lifecycle of the Windows Filtering Platform
@@ -62,10 +74,10 @@ struct ExamLockdownArmParams {
 //   - tick() is called periodically from the 2-second supervisor loop.
 // All operations are serialized behind an internal std::mutex.
 //
-// Known limitations (NOT safety claims):
-//   - WFP installs only ALE_AUTH_CONNECT_V4; IPv6 egress is not blocked.
-//   - Only ports 80/443 are blocked, with per-IP permits; not default-deny.
-//   - Origins resolve to IPv4 at arm time; rotating CDNs may become unreachable.
+// Known operational characteristics (NOT safety claims):
+//   - WFP enforces dual-stack ALE_AUTH_CONNECT_V4 and ALE_AUTH_CONNECT_V6.
+//   - Outbound default-deny policy at weight 1 with explicit weight 20 permits.
+//   - Origins resolve to IP at arm time; rotating CDNs may become unreachable.
 //   - Terminating nstu-agent.exe stops heartbeats, so the block lifts after 90s.
 //   - WfpWebsiteAllowlist::clear() returns true even if individual filter deletes fail.
 //   - WebView2 resource filters only permit local package assets; an allowed WFP
