@@ -25,6 +25,9 @@ struct ServerControlPlaneConfig {
     // Persistent server-owned exam journal. This is intentionally separate
     // from any client UWF/Deep Freeze data root.
     std::filesystem::path exam_journal_path;
+    // Dedicated server-owned exam telemetry journal directory. Separate
+    // restricted %ProgramData%\NSTU\exams\telemetry-journal path.
+    std::filesystem::path telemetry_journal_path;
     std::vector<std::byte> keyring_entropy;
     std::vector<std::byte> enrollment_secret;
     std::size_t maximum_clients = 512;

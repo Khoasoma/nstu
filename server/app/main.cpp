@@ -3946,6 +3946,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             (data_directory / L"server-keyring.bin").wstring();
         control_config.exam_journal_path =
             data_directory / L"exams" / L"answer-journal.bin";
+        control_config.telemetry_journal_path =
+            data_directory / L"exams" / L"telemetry-journal";
         constexpr char entropy_text[] = "NSTU-SERVER-KEYRING-V1";
         control_config.keyring_entropy.assign(
             reinterpret_cast<const std::byte*>(entropy_text),

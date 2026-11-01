@@ -844,7 +844,236 @@ void test_fixed_deadline_boundaries_and_wrong_client() {
     nstu::server::set_telemetry_clock_for_testing(std::nullopt);
 }
 
+void test_async_telemetry_persistence_and_ack() {
+    using namespace std::chrono_literals;
+    auto tele_dir = std::filesystem::temp_directory_path() /
+        ("nstu-telemetry-test-" + std::to_string(std::chrono::high_resolution_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(tele_dir);
+
+    struct TelemetryFixture {
+        nstu::security::ClientId id = client_id();
+        std::vector<std::byte> key = client_key();
+        nstu::security::KeyStore store;
+        nstu::server::ClientRegistry registry;
+        nstu::server::ServerControlPlane plane{registry, store};
+        std::filesystem::path path = journal_path();
+        std::filesystem::path tele_path;
+        std::optional<nstu::control::AuthenticatedControlChannel> channel;
+        nstu::exam::ExamStartRequest start = make_start(id);
+        std::uint64_t registry_id = 0;
+        std::string error;
+
+        TelemetryFixture(std::filesystem::path tp) : tele_path(std::move(tp)) {
+            assert(store.enroll(id, 9, key, &error));
+            nstu::server::ServerControlPlaneConfig config;
+            config.port = 0;
+            config.maximum_clients = 16;
+            config.exam_journal_path = path;
+            config.telemetry_journal_path = tele_path;
+            assert(plane.start(std::move(config), &error));
+            reconnect("TELEMETRY-CLIENT");
+            assert(registry.set_uwf_fleet_status(registry_id, verified_protection()));
+            assert(plane.start_exam(registry_id, start, &error));
+            const auto command = channel->receive(&error);
+            assert(command && command->envelope.type == nstu::protocol::CommandType::exam_start);
+            receive_enable();
+        }
+        ~TelemetryFixture() {
+            if (channel) channel->close();
+            plane.stop();
+            nstu::security::secure_zero(key);
+            std::error_code ec;
+            std::filesystem::remove(path, ec);
+            auto lock_path = path;
+            lock_path += L".lock";
+            std::filesystem::remove(lock_path, ec);
+            std::filesystem::remove_all(tele_path, ec);
+        }
+        void reconnect(const std::string& label) {
+            if (channel) channel->close();
+            channel = connect_channel(plane, id, 9, key, &error);
+            assert(channel);
+            nstu::control::ClientStatusReport status;
+            status.hostname = label;
+            assert(channel->send(nstu::protocol::CommandType::status_report, 1,
+                nstu::control::encode_status_report(status), &error));
+            assert(wait_until([&] {
+                const auto peers = registry.snapshot();
+                const auto peer = std::find_if(peers.begin(), peers.end(), [&](const auto& p) {
+                    return p.hostname == label && p.status == nstu::server::ClientStatus::online;
+                });
+                if (peer == peers.end()) return false;
+                registry_id = peer->id;
+                return true;
+            }));
+        }
+        void receive_enable() {
+            const auto frame = channel->receive(&error);
+            assert(frame && frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_enable);
+        }
+    };
+
+    TelemetryFixture fixture(tele_dir);
+    nstu::exam::ProducerId producer{};
+    producer[0] = std::byte{0x01};
+
+    auto make_batch = [&](std::uint64_t seq) {
+        nstu::exam::TelemetryBatch batch;
+        batch.package_id = fixture.start.package_id;
+        batch.package_digest = fixture.start.package_digest;
+        batch.client_id = fixture.start.client_id;
+        batch.session_id = fixture.start.session_id;
+        batch.candidate_id = fixture.start.candidate_id;
+        batch.producer_id = producer;
+        batch.sequence = seq;
+        batch.first_enqueued_at_unix_milliseconds = 1000;
+        nstu::exam::TelemetrySample s;
+        s.kind = nstu::exam::TelemetrySampleKind::question_dwell;
+        s.source = nstu::exam::TelemetrySource::native;
+        s.collector_id = 1;
+        s.monotonic_elapsed_milliseconds = 500;
+        s.duration_milliseconds = 500;
+        s.client_time_unix_milliseconds = 1000;
+        batch.samples.push_back(s);
+        return batch;
+    };
+
+    // Case 1: Valid initial batch seq=1 receives accepted ACK
+    {
+        const auto b1 = make_batch(1);
+        const auto wire = nstu::exam::encode_telemetry_batch(b1);
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 501, wire, &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        assert(ack_frame->envelope.request_id == 501);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::accepted);
+        assert(ack->sequence == 1);
+        assert(ack->producer_id == producer);
+    }
+
+    // Case 2: Exact duplicate batch seq=1 receives duplicate ACK without error
+    {
+        const auto b1 = make_batch(1);
+        const auto wire = nstu::exam::encode_telemetry_batch(b1);
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 502, wire, &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        assert(ack_frame->envelope.request_id == 502);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::duplicate);
+    }
+
+    // Case 3: Mismatched tuple rejected
+    {
+        // Wrong candidate_id
+        auto b_bad_cand = make_batch(2);
+        b_bad_cand.candidate_id = "wrong-candidate";
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 503,
+            nstu::exam::encode_telemetry_batch(b_bad_cand), &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::rejected);
+    }
+    {
+        // Wrong package_id
+        auto b_bad_pkg = make_batch(2);
+        b_bad_pkg.package_id = "wrong-pkg";
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 504,
+            nstu::exam::encode_telemetry_batch(b_bad_pkg), &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::rejected);
+    }
+    {
+        // Cross-exam: wrong client_id
+        auto b_bad_client = make_batch(2);
+        b_bad_client.client_id[0] ^= std::byte{0xFF};
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 505,
+            nstu::exam::encode_telemetry_batch(b_bad_client), &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::rejected);
+    }
+    {
+        // Cross-exam: wrong session_id
+        auto b_bad_sess = make_batch(2);
+        b_bad_sess.session_id[0] ^= std::byte{0xFF};
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 506,
+            nstu::exam::encode_telemetry_batch(b_bad_sess), &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::rejected);
+    }
+
+    // Case 4: Rate limit & queue full return unavailable without blocking control traffic
+    {
+        // Send a burst exceeding rate limit
+        bool saw_unavailable = false;
+        for (int i = 0; i < 15; ++i) {
+            auto b = make_batch(2 + i);
+            (void)fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 600 + i,
+                nstu::exam::encode_telemetry_batch(b), &fixture.error);
+            const auto ack_frame = fixture.channel->receive(&fixture.error);
+            if (ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack) {
+                const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+                if (ack && ack->status == nstu::exam::TelemetryAckStatus::unavailable) {
+                    saw_unavailable = true;
+                    break;
+                }
+            }
+        }
+        assert(saw_unavailable);
+
+        // Control traffic (heartbeat) remains completely responsive
+        assert(fixture.plane.send_command(fixture.registry_id, nstu::protocol::CommandType::heartbeat, {}, &fixture.error));
+        const auto hb_frame = fixture.channel->receive(&fixture.error);
+        assert(hb_frame && hb_frame->envelope.type == nstu::protocol::CommandType::heartbeat);
+    }
+
+    // Case 5: Stalled disk returns unavailable without blocking control traffic
+    {
+        nstu::server::set_telemetry_journal_disk_failure_for_testing(true);
+        // Wait for worker to finish any in-flight work
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+        auto b_disk = make_batch(100);
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 701,
+            nstu::exam::encode_telemetry_batch(b_disk), &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::unavailable);
+
+        // Control plane remains fully responsive during disk failure
+        assert(fixture.plane.send_command(fixture.registry_id, nstu::protocol::CommandType::heartbeat, {}, &fixture.error));
+        const auto hb_frame = fixture.channel->receive(&fixture.error);
+        assert(hb_frame && hb_frame->envelope.type == nstu::protocol::CommandType::heartbeat);
+
+        nstu::server::set_telemetry_journal_disk_failure_for_testing(false);
+    }
+
+    // Case 6: Stopped exam rejects subsequent batches
+    {
+        assert(fixture.plane.stop_exam(fixture.registry_id, &fixture.error));
+        const auto stop_frame = fixture.channel->receive(&fixture.error);
+        assert(stop_frame && stop_frame->envelope.type == nstu::protocol::CommandType::exam_stop);
+        auto b_stopped = make_batch(101);
+        assert(fixture.channel->send(nstu::protocol::CommandType::exam_telemetry_batch, 801,
+            nstu::exam::encode_telemetry_batch(b_stopped), &fixture.error));
+        const auto ack_frame = fixture.channel->receive(&fixture.error);
+        assert(ack_frame && ack_frame->envelope.type == nstu::protocol::CommandType::exam_telemetry_ack);
+        const auto ack = nstu::exam::decode_telemetry_ack(ack_frame->payload);
+        assert(ack && ack->status == nstu::exam::TelemetryAckStatus::rejected);
+    }
+}
+
 } // namespace
+
 
 int main() {
     nstu::net::WinsockRuntime winsock;
@@ -1358,5 +1587,6 @@ int main() {
     test_fixed_deadline_boundaries_and_wrong_client();
     test_authenticated_ownership_regressions();
     test_exam_admission_regressions();
+    test_async_telemetry_persistence_and_ack();
     return 0;
 }

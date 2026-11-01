@@ -8,6 +8,7 @@
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/exam_telemetry.hpp"
+#include "nstu/exam_telemetry_journal.hpp"
 #include "nstu/keyring.hpp"
 #include "nstu/pairing.hpp"
 
@@ -16,11 +17,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -71,6 +75,11 @@ std::uint64_t unix_milliseconds_now() {
 std::atomic<std::int64_t> g_telemetry_clock_offset_ms{0};
 std::mutex g_telemetry_clock_mutex;
 std::optional<TelemetryClockSnapshot> g_frozen_telemetry_clock;
+std::atomic<bool> g_telemetry_worker_stall{false};
+std::atomic<std::uint64_t> g_telemetry_worker_processed_count{0};
+std::mutex g_active_telemetry_journal_mutex;
+ExamTelemetryJournal* g_active_telemetry_journal = nullptr;
+std::atomic<bool> g_telemetry_journal_disk_failure{false};
 
 // Test-only disconnect ordering hooks. While the hold is set, disconnect
 // callbacks are queued instead of run, so a test can force a superseded
@@ -271,6 +280,43 @@ bool keyring_file_exists(std::wstring_view path) {
 
 } // namespace
 
+struct TelemetryWorkItem {
+    std::uint64_t registry_id = 0;
+    net::ConnectionId connection_id = 0;
+    std::uint64_t request_id = 0;
+    exam::TelemetryBatch batch;
+};
+
+class TelemetryRateLimiter {
+public:
+    bool allow(std::uint64_t client_id, std::uint64_t now_unix_ms) {
+        constexpr double refill_per_ms = 2.0 / 1000.0;
+        constexpr double burst = 4.0;
+        std::scoped_lock lock(mutex_);
+        auto& b = buckets_[client_id];
+        if (b.last_refill_ms == 0) {
+            b.tokens = burst;
+            b.last_refill_ms = now_unix_ms;
+        } else if (now_unix_ms > b.last_refill_ms) {
+            const auto elapsed = now_unix_ms - b.last_refill_ms;
+            b.tokens = std::min(burst, b.tokens + static_cast<double>(elapsed) * refill_per_ms);
+            b.last_refill_ms = now_unix_ms;
+        }
+        if (b.tokens >= 1.0) {
+            b.tokens -= 1.0;
+            return true;
+        }
+        return false;
+    }
+private:
+    struct Bucket {
+        double tokens = 0.0;
+        std::uint64_t last_refill_ms = 0;
+    };
+    std::mutex mutex_;
+    std::unordered_map<std::uint64_t, Bucket> buckets_;
+};
+
 class ServerControlPlane::Impl {
 public:
     Impl(ClientRegistry& registry, security::KeyStore& key_store)
@@ -386,6 +432,59 @@ public:
         }
     }
 
+    void telemetry_worker_loop() {
+        while (true) {
+            TelemetryWorkItem item;
+            {
+                std::unique_lock lock(telemetry_queue_mutex_);
+                telemetry_queue_cv_.wait(lock, [this] {
+                    return !telemetry_worker_running_ || !telemetry_queue_.empty();
+                });
+                if (!telemetry_worker_running_ && telemetry_queue_.empty()) {
+                    break;
+                }
+                item = std::move(telemetry_queue_.front());
+                telemetry_queue_.pop_front();
+            }
+
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+            while (g_telemetry_worker_stall.load() && telemetry_worker_running_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+#endif
+
+            const auto now_ms = current_server_time_ms();
+            std::string record_error;
+            exam::TelemetryAck ack;
+            if (telemetry_journal_.is_open()) {
+                ack = telemetry_journal_.record_batch(item.batch, now_ms, &record_error);
+            } else {
+                ack.session_id = item.batch.session_id;
+                ack.producer_id = item.batch.producer_id;
+                ack.sequence = item.batch.sequence;
+                ack.batch_hash = exam::compute_telemetry_batch_hash(item.batch).value_or(security::Sha256Digest{});
+                ack.server_time_unix_milliseconds = now_ms;
+                ack.status = exam::TelemetryAckStatus::unavailable;
+            }
+
+            const auto payload = exam::encode_telemetry_ack(ack);
+            if (!payload.empty()) {
+                auto state = state_for_connection(item.connection_id);
+                if (state) {
+                    std::scoped_lock state_lock(state->mutex);
+                    if (state->stage == Stage::authenticated &&
+                        state->connection_id == item.connection_id) {
+                        send_authenticated_locked(*state, protocol::CommandType::exam_telemetry_ack,
+                                                  item.request_id, payload, nullptr);
+                    }
+                }
+            }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+            g_telemetry_worker_processed_count.fetch_add(1);
+#endif
+        }
+    }
+
     bool start(ServerControlPlaneConfig config, std::string* error) {
         if (dispatcher_.running()) {
             set_error(error, "server control plane is already running");
@@ -396,6 +495,24 @@ public:
             !exam_journal_.open(config_.exam_journal_path, error)) {
             config_ = {};
             return false;
+        }
+        if (!config_.telemetry_journal_path.empty()) {
+            if (!telemetry_journal_.open(config_.telemetry_journal_path, current_server_time_ms(), error)) {
+                exam_journal_.close();
+                config_ = {};
+                return false;
+            }
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+            {
+                std::scoped_lock lock(g_active_telemetry_journal_mutex);
+                g_active_telemetry_journal = &telemetry_journal_;
+                if (g_telemetry_journal_disk_failure.load()) {
+                    telemetry_journal_.set_disk_failure_injection(true);
+                }
+            }
+#endif
+            telemetry_worker_running_ = true;
+            telemetry_worker_ = std::thread([this] { telemetry_worker_loop(); });
         }
         if (!config_.exam_journal_path.empty()) {
             // Central audit sink lives beside the server-owned journal, never
@@ -535,6 +652,21 @@ public:
             active_exam_contexts_.clear();
         }
         enrollment_authority_.reset();
+        {
+            std::scoped_lock queue_lock(telemetry_queue_mutex_);
+            telemetry_worker_running_ = false;
+            telemetry_queue_cv_.notify_all();
+        }
+        if (telemetry_worker_.joinable()) {
+            telemetry_worker_.join();
+        }
+        telemetry_journal_.close();
+#ifdef NSTU_CONTROL_PLANE_AUTH_TESTING
+        {
+            std::scoped_lock lock(g_active_telemetry_journal_mutex);
+            g_active_telemetry_journal = nullptr;
+        }
+#endif
         exam_journal_.close();
         security::secure_zero(config_.enrollment_secret);
         security::secure_zero(config_.keyring_entropy);
@@ -724,6 +856,9 @@ public:
             return false;
         }
         send_telemetry_enable_locked(*state, inserted_context->second);
+        if (telemetry_journal_.is_open()) {
+            (void)telemetry_journal_.authorize_context(inserted_context->second.session_id, created.wall_ms);
+        }
         audit::Event started;
         started.category = audit::Category::exam;
         started.severity =
@@ -758,7 +893,14 @@ public:
         // connection is unavailable, retaining the context allows a later
         // reconnect to recover answers and receive an explicit stop.
         std::scoped_lock context_lock(exam_contexts_mutex_);
-        active_exam_contexts_.erase(state->registry_id.load());
+        const auto found_ctx = active_exam_contexts_.find(state->registry_id.load());
+        if (found_ctx != active_exam_contexts_.end()) {
+            if (telemetry_journal_.is_open()) {
+                (void)telemetry_journal_.stop_authorization(found_ctx->second.session_id);
+                (void)telemetry_journal_.remove_context(found_ctx->second.session_id);
+            }
+            active_exam_contexts_.erase(found_ctx);
+        }
         return true;
     }
 
@@ -1279,6 +1421,16 @@ private:
                context.session_id == report.session_id &&
                context.package_id == report.package_id &&
                context.candidate_id == report.candidate_id;
+    }
+
+    static bool matches_exam_context(
+        const ActiveExamContext& context,
+        const exam::TelemetryBatch& batch) noexcept {
+        return context.client_id == batch.client_id &&
+               context.package_digest == batch.package_digest &&
+               context.session_id == batch.session_id &&
+               context.package_id == batch.package_id &&
+               context.candidate_id == batch.candidate_id;
     }
 
     void on_bytes(net::ConnectionId id, std::vector<std::byte> bytes) {
@@ -1844,6 +1996,9 @@ private:
         if (command->envelope.type == protocol::CommandType::exam_ready) {
             return process_exam_ready(state, *command);
         }
+        if (command->envelope.type == protocol::CommandType::exam_telemetry_batch) {
+            return process_exam_telemetry_batch(state, *command);
+        }
         if (command->envelope.type == protocol::CommandType::heartbeat) {
             (void)mutate_current_registry(state, [&](std::uint64_t id) {
                 return registry_.touch(id);
@@ -2083,6 +2238,89 @@ private:
         return true;
     }
 
+    bool process_exam_telemetry_batch(
+        ConnectionState& state, const control::AuthenticatedCommand& command) {
+        std::string decode_error;
+        const auto batch = exam::decode_telemetry_batch(command.payload, &decode_error);
+        if (!batch) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+
+        const auto now = telemetry_clock_now();
+        auto context = active_exam_for(state.registry_id.load());
+        const bool context_matches = context.has_value() &&
+            batch->client_id == state.hello.client_id &&
+            matches_exam_context(*context, *batch) &&
+            telemetry_is_eligible(context->telemetry, now);
+
+        if (!context_matches || !exam::validate_telemetry_batch(*batch)) {
+            exam::TelemetryAck rejected_ack;
+            rejected_ack.session_id = batch->session_id;
+            rejected_ack.producer_id = batch->producer_id;
+            rejected_ack.sequence = batch->sequence;
+            rejected_ack.batch_hash = exam::compute_telemetry_batch_hash(*batch).value_or(security::Sha256Digest{});
+            rejected_ack.server_time_unix_milliseconds = now.wall_ms;
+            rejected_ack.status = exam::TelemetryAckStatus::rejected;
+            const auto ack_payload = exam::encode_telemetry_ack(rejected_ack);
+            if (!ack_payload.empty()) {
+                send_authenticated_locked(state, protocol::CommandType::exam_telemetry_ack,
+                                          command.envelope.request_id, ack_payload, nullptr);
+            }
+            return true;
+        }
+
+        if (!telemetry_rate_limiter_.allow(state.registry_id.load(), now.wall_ms)) {
+            exam::TelemetryAck unavail_ack;
+            unavail_ack.session_id = batch->session_id;
+            unavail_ack.producer_id = batch->producer_id;
+            unavail_ack.sequence = batch->sequence;
+            unavail_ack.batch_hash = exam::compute_telemetry_batch_hash(*batch).value_or(security::Sha256Digest{});
+            unavail_ack.server_time_unix_milliseconds = now.wall_ms;
+            unavail_ack.status = exam::TelemetryAckStatus::unavailable;
+            const auto ack_payload = exam::encode_telemetry_ack(unavail_ack);
+            if (!ack_payload.empty()) {
+                send_authenticated_locked(state, protocol::CommandType::exam_telemetry_ack,
+                                          command.envelope.request_id, ack_payload, nullptr);
+            }
+            return true;
+        }
+
+        bool enqueued = false;
+        {
+            std::unique_lock queue_lock(telemetry_queue_mutex_, std::try_to_lock);
+            if (queue_lock.owns_lock() && telemetry_worker_running_ &&
+                telemetry_queue_.size() < kMaximumQueuedTelemetryBatches) {
+                telemetry_queue_.push_back(TelemetryWorkItem{
+                    state.registry_id.load(),
+                    state.connection_id,
+                    command.envelope.request_id,
+                    *batch
+                });
+                telemetry_queue_cv_.notify_one();
+                enqueued = true;
+            }
+        }
+
+        if (!enqueued) {
+            exam::TelemetryAck unavail_ack;
+            unavail_ack.session_id = batch->session_id;
+            unavail_ack.producer_id = batch->producer_id;
+            unavail_ack.sequence = batch->sequence;
+            unavail_ack.batch_hash = exam::compute_telemetry_batch_hash(*batch).value_or(security::Sha256Digest{});
+            unavail_ack.server_time_unix_milliseconds = now.wall_ms;
+            unavail_ack.status = exam::TelemetryAckStatus::unavailable;
+            const auto ack_payload = exam::encode_telemetry_ack(unavail_ack);
+            if (!ack_payload.empty()) {
+                send_authenticated_locked(state, protocol::CommandType::exam_telemetry_ack,
+                                          command.envelope.request_id, ack_payload, nullptr);
+            }
+            return true;
+        }
+
+        return true;
+    }
+
     void fail_handshake(ConnectionState& state, std::string detail) {
         dispatcher_.record_handshake_failure(state.connection_id,
                                              std::move(detail));
@@ -2129,6 +2367,14 @@ public:
     // This journal is server-owned and intentionally never placed under a
     // client freeze/UWF overlay. It remains authoritative across reconnects.
     exam::AnswerJournal exam_journal_;
+    ExamTelemetryJournal telemetry_journal_;
+    std::thread telemetry_worker_;
+    std::mutex telemetry_queue_mutex_;
+    std::condition_variable telemetry_queue_cv_;
+    std::deque<TelemetryWorkItem> telemetry_queue_;
+    bool telemetry_worker_running_ = false;
+    static constexpr std::size_t kMaximumQueuedTelemetryBatches = 64;
+    TelemetryRateLimiter telemetry_rate_limiter_;
     // Central audit sink. Distinct from the answer journal and from telemetry:
     // it records that NSTU activity happened, never exam or answer content.
     audit::Sink audit_sink_;
@@ -2548,6 +2794,22 @@ std::uint64_t completed_disconnect_count_for_testing() noexcept {
 
 std::uint64_t telemetry_server_time_ms_for_testing() noexcept {
     return current_server_time_ms();
+}
+
+void set_telemetry_journal_disk_failure_for_testing(bool enable) noexcept {
+    g_telemetry_journal_disk_failure.store(enable);
+    std::scoped_lock lock(g_active_telemetry_journal_mutex);
+    if (g_active_telemetry_journal) {
+        g_active_telemetry_journal->set_disk_failure_injection(enable);
+    }
+}
+
+void set_telemetry_worker_stall_for_testing(bool stall) noexcept {
+    g_telemetry_worker_stall.store(stall);
+}
+
+std::uint64_t telemetry_worker_processed_count_for_testing() noexcept {
+    return g_telemetry_worker_processed_count.load();
 }
 #endif
 
