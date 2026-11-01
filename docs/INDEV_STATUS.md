@@ -21,21 +21,21 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 56/56 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 57/57 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
 
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23)
 
-| Task | Title | Key Objective |
-|---|---|---|
-| **Task 18** | `WFP-IPV6-DEFAULT-DENY-HARDENING-1` | Enforce WFP ALE IPv6 default-deny filter to prevent IPv6 bypass during active exams |
-| **Task 19** | `DYNAMIC-EXAM-IP-TRACKING-1` | Periodic DNS re-resolution and dynamic WFP filter re-arm for allowed CDN origins |
-| **Task 20** | `ANTI-TAMPER-HEARTBEAT-KILLSWITCH-1` | Cryptographic HMAC challenge/response heartbeat between agent and service; auto-terminate kiosk on tampering |
-| **Task 21** | `SAS-SIMULATION-RECOVERY-1` | Secure Attention Sequence (SAS) software simulation and crash recovery drills |
-| **Task 22** | `SECURE-PACKAGE-AUTHORIZATION-1` | Instructor/deployment authorization binding for exam packages and candidate identities |
-| **Task 23** | `REAL-ENVIRONMENT-ACCEPTANCE-1` | 50-client lab validation and physical switch performance measurements |
+| Task | Title | Key Objective | Status |
+|---|---|---|---|
+| **Task 18** | `WFP-IPV6-DEFAULT-DENY-HARDENING-1` | Enforce dual-stack WFP ALE IPv4/IPv6 default-deny filter with fail-safe dynamic teardown | **Merged to main** (`65f13d4`) |
+| **Task 19** | `EXAM-APP-SUPPRESSION-SERVICE-WIRING-1` | Wire active application suppression service lifecycle to terminate unauthorized student apps | **Next in loop** |
+| **Task 20** | `CONTROL-CHANNEL-AEAD-ENCRYPTION-1` | Confidentiality & AEAD authenticated encryption (AES-256-GCM) for control plane payloads | Planned |
+| **Task 21** | `INSTRUCTOR-SESSION-AUTHORIZATION-BINDING-1` | Cryptographic instructor authorization tickets binding official assessment sessions | Planned |
+| **Task 22** | `SERVER-SIDE-GRADING-SEALED-EXPORT-1` | Automated objective scoring, manual essay review workflow, and sealed export container | Planned |
+| **Task 23** | `TEACHER-EXAM-OPERATOR-CONSOLE-1` | Native Dear ImGui teacher console exam management tab with live client monitoring | Planned |
 
 ## Acceptance That Remains Open Before Production Release
 
