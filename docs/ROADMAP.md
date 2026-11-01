@@ -61,6 +61,20 @@
       digest immediately before mapping, rejects parent reparse points,
       confines navigation to the validated web root, and requires the packaged
       loader plus a runtime probe.
+- [x] Implement client-side discrete exam timing telemetry in `web/app.js` and
+      `exam_telemetry_outbox.*` (per-question dwell, first view, time-to-first-answer,
+      selection change count, focus/visibility transitions, blocked shortcuts)
+      with low-priority wire scheduling and zero capture of raw keystrokes,
+      notes, clipboard secrets, or answer texts.
+- [x] Implement dedicated server-side exam telemetry journal with 8×8 MiB rotation,
+      ≤262,144 dedup hashes, 16 generations, un-resurrected replay floor, 30-day
+      retention bound, and an asynchronous non-blocking persistence worker
+      outside control locks returning immediate `unavailable` ACKs under saturation.
+- [x] Add cross-channel integration tests verifying answer equivalence and hash
+      continuity under telemetry flood, replay semantics upon disconnect versus
+      explicit stop, canary privacy, and mixed-version compatibility.
+- [ ] Add proctored teacher live monitor panel and real WebView2/VM qualification
+      evidence for assessment telemetry.
 - [ ] Validate the staging helper, publisher chain/revocation policy,
       `WebView2Loader.dll`, and the WebView2 Runtime across the supported
       Windows images with production certificates and signed fixtures.

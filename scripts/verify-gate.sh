@@ -84,6 +84,24 @@ else
     pass "no assertions removed from tests/"
 fi
 
+step "Browser / Node suite (syntax and recovery tests)"
+if command -v node >/dev/null 2>&1; then
+    if node --check exam/web/app.js >/dev/null 2>&1; then
+        pass "node --check exam/web/app.js"
+    else
+        fail "node --check exam/web/app.js failed"
+    fi
+    node_test_out="$(node tests/exam_web_recovery_tests.js 2>&1)"
+    if [ $? -eq 0 ]; then
+        pass "$node_test_out"
+    else
+        fail "node tests/exam_web_recovery_tests.js failed:"
+        printf '        %s\n' "$node_test_out"
+    fi
+else
+    fail "node is not on PATH -- required to verify browser suite"
+fi
+
 # ---------------------------------------------------------------- build + test
 BUILD_OK=1
 if [ "$STRICT" -eq 1 ]; then

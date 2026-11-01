@@ -375,3 +375,34 @@ The publicly released `NSTU DEV (UNPROTECTED)` build bypasses this one gate for
 testing and nothing else; every bypassed start is audited at `severity=warning`
 and the build is conspicuously labeled in the UI and installer. Release builds
 cannot start an exam on an unprotected client.
+
+## Exam telemetry, evidence limits, and privacy guarantees
+
+An optional discrete timing telemetry pipeline operates alongside the exam response flow in INDEV:
+
+### Channel isolation and priority scheduling
+
+1. **Separation of concerns:** Telemetry batches are framed as `CommandType::exam_telemetry_batch` and acknowledged via `CommandType::exam_telemetry_ack`. The answer event stream (`exam_answer_event`) and its cryptographic hash chain remain entirely isolated.
+2. **Priority and backpressure:** Answer events always take precedence. Under socket backpressure, client outbox limits, or server worker saturation, telemetry is delayed, dropped, or answered with `TelemetryAckStatus::unavailable`. Answer submission and state recovery are never stalled or blocked by telemetry volume.
+3. **Dedicated storage path:** Telemetry records are persisted on the server in a separate restricted path (`%ProgramData%\NSTU\exams\telemetry-journal`), preventing telemetry disk utilization from impacting the append-only answer ledger.
+
+### Interpretive limits: evidence requiring review
+
+1. **Investigative evidence only:** Telemetry metrics (such as dwell time, selection change counts, focus loss, and visibility transitions) constitute raw investigative evidence intended solely for manual proctor or instructor review. The system does not support or authorize automated cheating determinations, score deductions, or disciplinary penalties based on telemetry data.
+2. **Missing data represents unknown status:** Incomplete or missing telemetry logs can occur due to network disruption, client socket disconnection, rate limiting, temporary server disk pressure, client reboots, or legacy client software. The assessment engine strictly treats missing telemetry as **unknown / unobserved**, never as evidence of misconduct or cheating.
+
+### Privacy boundary and zero-leakage invariant
+
+1. **Discrete aggregates only:** Telemetry events capture only predefined, structured enum values (`TelemetrySampleKind`), monotonic timestamps, collector IDs, and aggregate counts.
+2. **Absolute content exclusions:** The telemetry collector, outbox, network wire format, and journal store strictly forbid and exclude:
+   - Raw keystroke logs or typing rhythms.
+   - Student notes, comments, or scratchpad text.
+   - Operating system clipboard text or copied secrets.
+   - Student essay responses, short answers, or option contents.
+   - Screen pixel recordings or microphone audio.
+
+### Storage bounds and retention policy
+
+1. **Segment rotation:** Telemetry data is stored in preallocated rotating segments (8×8 MiB) capped at 16 generations, preventing unbounded disk growth.
+2. **Replay floor and dedup:** Duplicate submissions are deduplicated across a bounded in-memory cache (up to 262,144 hashes) with an un-resurrected monotonic sequence floor.
+3. **Retention bound:** Server-side telemetry records are subject to a strict 30-day maximum retention lifecycle. Obsolete generations are purged automatically, and earlier data loss may occur if local quota limits are exceeded.

@@ -49,14 +49,14 @@ Mapping the intended exam mode onto what exists in the tree today:
 | **Authoring (create / edit exams)** | **Not built** | greenfield; there is no HTTP server anywhere in the repo |
 | **Instructor authorization binding** | **Not built** | called a pre-production blocker in the docs |
 | **OS-level app / internet blocking** | **Not built** | the kiosk is user-mode only; no process kill, no firewall |
-| **Anticheat timing telemetry** | **Not built** | only a per-answer wall-clock timestamp is captured |
+| **Anticheat timing telemetry** | **Built (INDEV)** | Bounded discrete collector, outbox, server journal/dedup, cross-channel isolation |
 | **Teacher live monitor** | **Not built** | the journal holds the data; no UI reads it |
 | **Scoring / grading** | **Not built** | the server stores opaque answer bytes by design |
 
 **In one line:** the *take-an-exam-and-collect-answers* engine is built and
 hardened; what is missing is everything that makes it **operable** (teacher
 start / monitor), **authorable**, **hard-locked** (OS app + net), **proctored**
-(timing telemetry), and **graded**.
+(telemetry pipeline built, live monitor UI unbuilt), and **graded**.
 
 ## How an exam runs today
 
@@ -136,12 +136,15 @@ and watchdog state machine without flipping the real firewall. Recommend
 safety net, not a substitute for a clean, reboot-free restore.
 
 ### Phase 4 — Anticheat timing telemetry ✚  (the "answer-timing logs")
-In `web/app.js`, capture per-question first-view, dwell, time-to-first-answer,
-answer-change count, and selection timestamps; log focus/blur/visibility changes
-and blocked-shortcut attempts. Carry them on a **new bounded `exam_telemetry`
-channel** (keep the answer ledger pure) and persist them server-side like
-answers. The foundation already exists: a per-answer `client_time` plus the
-hash-chained journal.
+Pipeline implemented in INDEV:
+- **Client capture & transport:** In `web/app.js` and `exam_telemetry_outbox.*`, discrete telemetry samples (first-view, dwell, time-to-first-answer, selection change count, focus/blur/visibility transitions, blocked shortcuts) are captured and carried over a bounded, low-priority `exam_telemetry_batch` channel.
+- **Server persistence & dedup:** `ExamTelemetryJournal` provides dedicated crash-safe journal segments with 8×8 MiB rotation, bounded deduplication (≤262,144 hashes), 16 generations, un-resurrected replay floor, and 30-day retention bound. A dedicated asynchronous worker thread persists batches outside control locks, returning immediate `unavailable` ACKs under queue saturation or disk stall.
+- **Channel isolation:** Cross-channel integration tests prove answer equivalence and unbroken hash chains under continuous telemetry flood.
+- **Truthful evidence limits:**
+  - **Evidence requiring human review:** Telemetry records represent investigative evidence for proctor/teacher review, never automated penalties or automated cheating verdicts.
+  - **Missing = Unknown:** Gaps or missing records indicate unobserved state (e.g. from network disconnects, queue overflow, or legacy clients), never presumed cheating.
+  - **Retention & quota limits:** 30-day maximum retention; possible earlier loss under disk/queue quota pressure.
+  - **Privacy boundary:** Zero capture of raw keystrokes, student notes, clipboard secrets, or answer/essay text.
 
 ### Phase 5 — Teacher live monitor and grading ✚ ⟲
 A live per-student view: **time-remaining tick**, answered/total, connection
