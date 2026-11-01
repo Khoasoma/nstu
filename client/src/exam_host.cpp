@@ -2197,7 +2197,6 @@ HRESULT on_web_message(ExamHost::Impl& host,
             return S_OK;
         }
         std::vector<exam::TelemetrySample> samples;
-        std::string parse_error;
         if (!host.telemetry.forward_browser_samples(
                 json, host.valid_question_ids, ExamHostTelemetryState::Clock::now(),
                 samples, &parse_error)) {
