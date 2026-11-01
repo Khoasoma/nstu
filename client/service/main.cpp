@@ -7,6 +7,7 @@
 #include "nstu/client_uwf_request.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
+#include "nstu/exam_app_suppression.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_host.hpp"
 #include "nstu/exam_lockdown_controller.hpp"
@@ -127,6 +128,19 @@ nstu::client::ExamLockdownController g_exam_lockdown_controller(
     },
     [](std::string* error) {
         return g_wfp_allowlist.clear(error);
+    });
+
+void emit_audit(nstu::audit::Category category, nstu::audit::Severity severity,
+                std::string component, std::string action, std::string result,
+                std::string detail = {}, std::uint64_t operation_id = 0);
+
+nstu::client::ExamAppSuppressionExecutor g_app_suppression_executor(
+    nullptr, nullptr,
+    [](std::uint32_t pid, std::string_view image_name, std::uint32_t session_id) {
+        emit_audit(nstu::audit::Category::exam, nstu::audit::Severity::warning,
+                   "app_suppression", "app_suppress", "terminated",
+                   "image=" + std::string(image_name) + " pid=" + std::to_string(pid) +
+                   " session=" + std::to_string(session_id));
     });
 std::mutex g_exam_arm_worker_mutex;
 std::jthread g_exam_arm_worker;
@@ -365,6 +379,7 @@ void queue_exam_stop() {
             {nstu::client::AgentMessageType::exam_stop, {}});
     }
     g_exam_lockdown_controller.disarm();
+    g_app_suppression_executor.disarm();
 }
 
 void clear_exam_ingress() {
@@ -520,7 +535,7 @@ void drain_exam_ingress() {
 
 void emit_audit(nstu::audit::Category category, nstu::audit::Severity severity,
                 std::string component, std::string action, std::string result,
-                std::string detail = {}, std::uint64_t operation_id = 0) {
+                std::string detail, std::uint64_t operation_id) {
     nstu::audit::Event event;
     event.category = category;
     event.severity = severity;
@@ -1715,6 +1730,7 @@ void run_exam_arm_worker(
             emit_audit(nstu::audit::Category::security,
                        nstu::audit::Severity::info, "exam_lockdown",
                        "arm", "success");
+            g_app_suppression_executor.arm();
         }
     } catch (...) {
         emit_audit(nstu::audit::Category::security,
@@ -2348,6 +2364,11 @@ void agent_supervisor_loop(std::stop_token stop_token) {
                 std::chrono::steady_clock::now().time_since_epoch())
                 .count());
         g_exam_lockdown_controller.tick(now_ms);
+        const DWORD active_console_session = WTSGetActiveConsoleSessionId();
+        if (active_console_session != 0xFFFFFFFF && active_console_session != 0) {
+            (void)g_app_suppression_executor.scan(
+                static_cast<std::uint32_t>(active_console_session));
+        }
         if (!g_agent_connected.load()) {
             launch_agent();
         }
@@ -2597,6 +2618,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
         }
     }
     g_exam_lockdown_controller.disarm();
+    g_app_suppression_executor.disarm();
     CloseHandle(g_stop_event);
     g_stop_event = nullptr;
     {

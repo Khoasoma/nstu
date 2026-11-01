@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -32,12 +34,20 @@ inline constexpr std::string_view kProtectedImages[] = {
 // the shell, NSTU, or the exam kiosk itself.
 class ExamAppSuppression {
 public:
-    explicit ExamAppSuppression(std::vector<std::string> allowed_images)
+    explicit ExamAppSuppression(std::vector<std::string> allowed_images = {})
         : allowed_images_(std::move(allowed_images)) {}
 
     void arm() noexcept { active_ = true; }
     void disarm() noexcept { active_ = false; }
     [[nodiscard]] bool active() const noexcept { return active_; }
+
+    void set_allowed_images(std::vector<std::string> allowed_images) {
+        allowed_images_ = std::move(allowed_images);
+    }
+
+    [[nodiscard]] const std::vector<std::string>& allowed_images() const noexcept {
+        return allowed_images_;
+    }
 
     // Whether this process image should be terminated right now. Only ever
     // true while armed, and never for a protected or exam-allowed image.
@@ -87,6 +97,47 @@ private:
 
     std::vector<std::string> allowed_images_;
     bool active_ = false;
+};
+
+struct ProcessSnapshotEntry {
+    std::uint32_t pid = 0;
+    std::uint32_t session_id = 0;
+    std::string image_name;
+};
+
+using ProcessEnumeratorFn = std::function<std::vector<ProcessSnapshotEntry>()>;
+using ProcessTerminatorFn =
+    std::function<bool(std::uint32_t pid, std::string_view image_name)>;
+using SuppressionAuditFn = std::function<void(
+    std::uint32_t pid, std::string_view image_name, std::uint32_t session_id)>;
+
+[[nodiscard]] std::vector<ProcessSnapshotEntry> default_process_enumerator();
+[[nodiscard]] bool default_process_terminator(std::uint32_t pid,
+                                             std::string_view image_name);
+
+class ExamAppSuppressionExecutor {
+public:
+    explicit ExamAppSuppressionExecutor(
+        ProcessEnumeratorFn enumerator = nullptr,
+        ProcessTerminatorFn terminator = nullptr,
+        SuppressionAuditFn audit_cb = nullptr);
+
+    void arm(std::vector<std::string> allowed_images = {}) noexcept;
+    void disarm() noexcept;
+    [[nodiscard]] bool active() const noexcept;
+
+    std::size_t scan(std::uint32_t target_session_id);
+
+    [[nodiscard]] std::size_t total_suppressions() const noexcept;
+    [[nodiscard]] const ExamAppSuppression& classifier() const noexcept;
+
+private:
+    ProcessEnumeratorFn enumerator_;
+    ProcessTerminatorFn terminator_;
+    SuppressionAuditFn audit_cb_;
+    ExamAppSuppression classifier_{{}};
+    std::size_t total_suppressions_ = 0;
+    mutable std::mutex mutex_;
 };
 
 } // namespace nstu::client
