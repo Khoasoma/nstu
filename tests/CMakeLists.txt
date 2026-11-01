@@ -398,6 +398,15 @@ if(TARGET nstu_client_platform)
         nstu_enable_warnings(nstu_client_pairing_tests)
         nstu_enable_test_assertions(nstu_client_pairing_tests)
         add_test(NAME nstu.client_pairing COMMAND nstu_client_pairing_tests)
+
+        add_executable(nstu_exam_telemetry_integration_tests
+            exam_telemetry_integration_tests.cpp)
+        target_link_libraries(nstu_exam_telemetry_integration_tests PRIVATE
+            nstu_client_platform nstu_server_state)
+        nstu_enable_warnings(nstu_exam_telemetry_integration_tests)
+        nstu_enable_test_assertions(nstu_exam_telemetry_integration_tests)
+        add_test(NAME nstu.exam_telemetry_integration
+            COMMAND nstu_exam_telemetry_integration_tests)
     endif()
 endif()
 
