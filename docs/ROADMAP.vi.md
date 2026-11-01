@@ -61,6 +61,20 @@
       triển khai. Host native vẫn kiểm tra lại digest package đã ghim ngay trước
       khi map, từ chối parent reparse point, giới hạn điều hướng trong web root
       đã xác thực, và yêu cầu loader đóng gói cùng một runtime probe.
+- [x] Triển khai pipeline telemetry đo thời gian rời rạc phía client trong `web/app.js` và
+      `exam_telemetry_outbox.*` (thời gian dwell theo câu hỏi, lần xem đầu tiên,
+      thời gian tới câu trả lời đầu tiên, số lần đổi phương án, chuyển đổi focus/visibility,
+      phím tắt bị chặn) với lập lịch ưu tiên thấp trên đường truyền và loại trừ tuyệt đối việc
+      ghi phím thô, ghi chú, nội dung clipboard hoặc nội dung câu trả lời.
+- [x] Triển khai journal telemetry bài thi chuyên dụng phía server với xoay vòng 8×8 MiB,
+      bộ đệm khử trùng lặp ≤262.144 hash, tối đa 16 thế hệ, sàn replay không tái sinh,
+      thời hạn lưu trữ tối đa 30 ngày và worker lưu trữ bất đồng bộ không gây nghẽn ngoài
+      lock control, trả về ACK `unavailable` ngay lập tức khi bão hòa.
+- [x] Thêm các bài test tích hợp liên kênh (cross-channel) kiểm tra tính tương đương của câu
+      trả lời và tính liên tục của hash chain khi có bão telemetry, ngữ nghĩa replay khi
+      disconnect so với stop rõ ràng, kiểm tra canary privacy và tương thích phiên bản hỗn hợp.
+- [ ] Thêm bảng điều khiển giám sát trực tiếp (live monitor) cho giáo viên và thu thập bằng
+      chứng kiểm thử thực tế trên WebView2/VM cho telemetry bài thi.
 - [ ] Validate helper staging, policy chain/revocation publisher,
       `WebView2Loader.dll` và WebView2 Runtime trên các Windows image được hỗ trợ
       với certificate production và fixture đã ký.

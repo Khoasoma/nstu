@@ -110,3 +110,17 @@ Hoạt động của client được đưa vào một hàng đợi có giới h�
 theo sequence. Server lưu trữ bản ghi tập trung vào một sink phân tách theo dòng,
 có xoay vòng file. Đây là việc ghi nhận vận hành luôn bật, tách biệt với chẩn
 đoán cần đồng ý ở trên.
+
+## Telemetry bài thi đo thời gian rời rạc (phân biệt với chẩn đoán và nhật ký kiểm toán)
+
+Đối với các kỳ thi trên máy tính, NSTU cung cấp **pipeline telemetry đo thời gian rời rạc** chuyên dụng, không xâm nhập, hoạt động song song với luồng bài làm của thí sinh.
+
+Khác với chẩn đoán server tùy chọn (chỉ thu thập lỗi đồ họa/crash để kỹ thuật viên báo cáo GitHub thủ công) và log audit hoạt động (ghi nhận thay đổi trạng thái vòng đời của hệ thống), telemetry bài thi đo lường mô thức tương tác của thí sinh trong suốt thời gian làm bài (thời gian dwell theo câu hỏi, thời gian tới câu trả lời đầu tiên, số lần đổi phương án, chuyển đổi focus/blur và độ sâu cuộn trang).
+
+Các ranh giới kiến trúc then chốt:
+- **Cam kết quyền riêng tư tuyệt đối (Zero-Raw-Input)**: loại trừ nghiêm ngặt việc ghi phím (keystroke logging), nội dung clipboard, quỹ đạo chuột thô và nội dung câu trả lời.
+- **Cách ly kênh truyền và lưu trữ**: sử dụng lệnh chuyên biệt (`exam_telemetry_batch` / `exam_telemetry_ack`) cùng journal xoay vòng 8×8 MiB độc lập (`exams/telemetry-journal`), đảm bảo lưu lượng telemetry hoặc dung lượng ổ đĩa không bao giờ làm chậm trễ việc gửi câu trả lời thi.
+- **Chỉ là bằng chứng điều tra**: telemetry bị thiếu hoặc không trọn vẹn luôn được đối xử như dữ liệu chưa quan sát (unobserved), tuyệt đối không coi là bằng chứng gian lận.
+
+Để biết chi tiết đặc tả kỹ thuật, bất biến riêng tư và chính sách giữ lại dữ liệu, xem [Telemetry bài thi trên máy tính](EXAM_ASSESSMENT.vi.md#telemetry-bài-thi-giới-hạn-bằng-chứng-và-đảm-bảo-quyền-riêng-tư).
+

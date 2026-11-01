@@ -114,3 +114,17 @@ Client activity is spooled with a bounded, drop-oldest queue and uploaded to the
 server in small, rate-limited, sequence-acknowledged chunks. The server persists
 records centrally to a rotating newline-delimited sink. This is always-on
 operational record keeping, separate from the consent-gated diagnostics above.
+
+## Assessment discrete timing telemetry (distinct from diagnostics and audit logs)
+
+For computer-based examinations, NSTU provides a dedicated, non-invasive **discrete timing telemetry pipeline** operating alongside the exam response flow.
+
+Unlike the opt-in server diagnostics (which capture graphics/crash events for manual GitHub issues) and the operational activity audit log (which records system lifecycle state changes), assessment timing telemetry measures candidate engagement patterns during active exams (dwell time per question, time-to-first-answer, selection change counts, blur/focus transitions, and scroll depth).
+
+Key architectural boundaries:
+- **Zero-Raw-Input guarantee**: strictly excludes keystroke logging, clipboard inspection, raw mouse trajectories, and response text.
+- **Channel and storage isolation**: uses dedicated commands (`exam_telemetry_batch` / `exam_telemetry_ack`) and a separate 8×8 MiB rotating journal (`exams/telemetry-journal`), preventing telemetry traffic or disk utilization from ever delaying answer event submissions.
+- **Investigative evidence only**: missing or incomplete telemetry is treated strictly as unobserved, never as evidence of misconduct.
+
+For complete specifications, privacy invariants, and data retention policies, see [Computer-based assessment telemetry](EXAM_ASSESSMENT.md#exam-telemetry-evidence-limits-and-privacy-guarantees).
+

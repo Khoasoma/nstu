@@ -21,7 +21,9 @@ nhãn này không chứng nhận toàn bộ ứng dụng sẵn sàng triển kha
 
 | Chức năng | Trạng thái | Tích hợp vào main | Xác minh |
 |---|---|---|---|
-| [Gửi control channel đã xác thực với deadline](../common/include/nstu/control_channel.hpp) (`send_with_deadline`) | **INDEV** | `07af8b6` | Kiểm thử deadline native/public và gửi thông thường đạt; fast/strict 46/46 và cả ba job MSVC Release CI của đúng revision main đều đạt |
+| [Gửi control channel đã xác thực với deadline](../common/include/nstu/control_channel.hpp) (`send_with_deadline`) | **INDEV** | `07af8b6` | Kiểm thử deadline native/public và gửi thông thường đạt; fast/strict gates và MSVC Release CI đạt |
+| [Kiosk WebView2 Host Native](../client/src/exam_host.cpp) (`ExamHost`) | **INDEV** | `79d1fdf` | Pinned SDK, cửa sổ kiosk toàn màn hình, hook bàn phím mức thấp, foreground re-grab, virtual host `https://nstu.exam/` |
+| [Pipeline Telemetry đo thời gian rời rạc](../common/include/nstu/exam_telemetry_collector.hpp) | **INDEV** | `79d1fdf` | Bộ thu thập đo thời gian không xâm nhập (zero-raw-input), outbox DPAPI, journal server xoay vòng 8×8 MiB với cache dedup ≤262k, worker bất đồng bộ, 56/56 test C++ và 63 test recovery Node.js đạt |
 
 ## Tính năng hiện tại
 

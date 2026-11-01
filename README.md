@@ -4,23 +4,21 @@
 
 # Project NSTU
 
-> **INDEV — Phase 4 task branch:** The full committed `feature/phase4-telemetry` work is integrated into `main` for continued development and testing. Lifecycle, runtime/VM and production acceptance remain open. See [INDEV status](docs/INDEV_STATUS.md).
+> **INDEV — Phase 4 integrated:** The complete Phase 4 discrete timing telemetry pipeline and native WebView2 host kiosk are merged into `main` (56/56 C++ tests and 63 browser recovery tests passing). Phase 5 exam security delivery and network hardening are in development. See [INDEV status](docs/INDEV_STATUS.md).
 
 
 [English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Optional diagnostics](docs/TELEMETRY.md) | [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
 
 [![C++](https://img.shields.io/badge/C++-20%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
-[![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
+[![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#license)
 [![Windows CI](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/nekoo-moe/nstu/production.yml)](https://github.com/nekoo-moe/nstu/actions)
-[![Contributors](https://img.shields.io/github/contributors/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/graphs/contributors)
-[![Commit activity](https://img.shields.io/github/commit-activity/m/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
-[![Last commit](https://img.shields.io/github/last-commit/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
-[![Issues](https://img.shields.io/github/issues/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/issues)
-
-> **AI-assisted development:** NSTU is developed with AI assistance; all changes remain human-reviewed and auditable in public source history.
+[![CI](https://img.shields.io/github/actions/workflow/status/Khoasoma/nstu/windows.yml?branch=main)](https://github.com/Khoasoma/nstu/actions)
+[![Contributors](https://img.shields.io/github/contributors/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/graphs/contributors)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits)
+[![Last commit](https://img.shields.io/github/last-commit/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits)
+[![Issues](https://img.shields.io/github/issues/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/issues)
 
 NSTU is a free and open-source classroom and computer-lab management project
 for Windows. It is designed around a centralized teacher server, lightweight
@@ -41,42 +39,40 @@ screen snapshots, and teacher-screen broadcast over a local network.
 
 ## Recent updates
 
-The `feature/zero-touch-enrollment` branch adds a batch of reliability and
-classroom-UX changes (pending review on [PR #3](https://github.com/nekoo-moe/nstu/pull/3)):
+The **Phase 4 Telemetry & Native Kiosk** milestone is fully merged into `main`:
 
-- **Service setup & upgrades** — each `ChangeServiceConfig2W` recovery step is
-  applied and reported individually with its Win32 error; `nstu-service
-  --prepare-update` provides a Managed-mode-safe maintenance stop; NSIS
-  same-role upgrades stage/rename/roll back the program payload while preserving
-  `DataRoot` and `HKLM\Software\NSTU`.
-- **Pairing** — an independent `WinsockRuntime` is held across the pairing TCP
-  handshake (fixes "TCP socket creation failed" after discovery released the
-  last Winsock reference); the "Add computers" window is persistent and shows
-  live probe/beacon counters.
-- **Chat** — client→server messages are transmitted over the control channel
-  and stored in a per-client transcript with sender labels; incoming teacher
-  messages are labelled `Teacher:` on the client.
-- **Monitoring** — every online computer is snapshotted automatically for the
-  class view (no per-machine Start click); the teacher broadcast is captured at
-  1280×720 for legible text.
-- **Annotation** — an eraser tool was added, and drawing is restricted to Focus
-  mode; the ribbon's manual snapshot controls were removed.
-- **Reboot-to-restore** — the "Enable reboot-to-restore" action is disabled with
-  a reason when a client has reported an unsupported Windows edition.
-- **UI** — minimizing the manager keeps it on the taskbar instead of hiding to
-  the system tray.
+- **Native WebView2 Host Kiosk** — Pinned Microsoft.Web.WebView2 SDK acquisition
+  in CMake and CI; native `ExamHost` fullscreen kiosk window with low-level
+  keyboard shortcut suppression (Win, Alt+Tab, Ctrl+Esc), foreground re-grab,
+  and local virtual host isolation (`https://nstu.exam/`).
+- **Discrete Timing Telemetry Pipeline** — Non-invasive client-side telemetry
+  collector (`nstu_exam_telemetry_collector`) capturing dwell times, time to
+  first answer, option change counts, blur/focus transitions, and scroll depth.
+- **Zero-Raw-Input Privacy Guarantee** — Absolute exclusion of keystroke
+  logs, clipboard data, raw mouse trajectories, and student response text.
+  Only aggregate timing statistics are collected.
+- **Durable Client Outbox** — Machine-scoped DPAPI retry outbox
+  (`nstu_exam_telemetry_outbox`) with bounded FIFO queue, transactional
+  commits, and transport error backoff.
+- **Server Telemetry Journal & Deduplication** — Dedicated crash-resilient
+  journal (`nstu_exam_telemetry_journal`) with 8×8 MiB preallocated rotating
+  segments, ≤262,144 dedup hashes, 16 generations, un-resurrected replay
+  floor, and 30-day retention bound.
+- **Asynchronous Persistence Worker** — Decoupled worker queue operating
+  outside IOCP network locks, returning immediate `unavailable` ACKs under
+  saturation so answer submission is never stalled.
+- **Cross-Channel Isolation** — Cryptographically isolated answer event
+  ledger and discrete telemetry channels; answer state recovery is prioritized
+  over telemetry under any network condition.
 
-### Verification (2026-09-26)
+### Verification (2026-11-01)
 
-- Full MinGW/UCRT64 build clean; 38/38 unit tests pass.
-- On a Windows client VM the updated service and agent were installed
-  (`nstu-service --install`) and the client **reconnected to the teacher server
-  automatically after the LAN IP changed** — both host and client moved to a new
-  subnet after an internet restart, and authenticated re-discovery brought the
-  client back online without re-pairing. Automatic class-view snapshots resumed
-  with no operator action.
-- Interactive teacher-side checks (chat transcript, eraser, broadcast) still
-  need to be exercised through the manager UI.
+- Full MinGW/UCRT64 and MSVC build clean with `-Werror`; 56/56 unit and
+  integration tests pass.
+- 63 Node.js browser recovery tests pass (`exam_web_recovery_tests.js`).
+- Local verification gate (`scripts/verify-gate.sh` and `--strict`) passes with 0 warnings.
+- Continuous integration: 4/4 Windows CI jobs pass on feature branches; 5/5 jobs
+  pass on `main`.
 
 ## Why NSTU exists
 

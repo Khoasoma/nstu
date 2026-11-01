@@ -113,7 +113,7 @@ constexpr wchar_t kServerSettingsKey[] = L"Software\\NSTU\\Server";
 constexpr wchar_t kTelemetryEnabledValue[] = L"TelemetryEnabled";
 constexpr wchar_t kTelemetryPromptValue[] = L"TelemetryPromptOnError";
 constexpr wchar_t kDiagnosticIssueUrl[] =
-    L"https://github.com/nekoo-moe/nstu/issues/new?template=sanitized-diagnostic.yml";
+    L"https://github.com/Khoasoma/nstu/issues/new?template=sanitized-diagnostic.yml";
 
 class RegistryKey final {
 public:
@@ -2830,8 +2830,8 @@ void draw_preferences(DashboardState& state) {
     ImGui::Text("NSTU %s", NSTU_PROJECT_VERSION);
     ImGui::TextWrapped("%s", tr(
         state,
-        "Open-source classroom management under the MIT License. Developed with AI assistance; changes remain human-reviewed and publicly auditable.",
-        "Phần mềm quản lý lớp học mã nguồn mở theo giấy phép MIT. Được phát triển với hỗ trợ AI; các thay đổi vẫn được con người rà soát và có thể kiểm tra công khai."));
+        "Open-source classroom management under the MIT License.",
+        "Phần mềm quản lý lớp học mã nguồn mở theo giấy phép MIT."));
     if (g_telemetry_policy.collect_in_background) {
         ImGui::Spacing();
         ImGui::Separator();

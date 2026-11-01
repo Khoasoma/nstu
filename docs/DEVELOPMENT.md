@@ -1,92 +1,88 @@
 # Project NSTU Development Guide
 
-[Product overview](../README.md) | [Tiếng Việt](../README.vi.md)
+[Product overview](../README.md) | [Tiếng Việt](DEVELOPMENT.vi.md)
 
-NSTU là dự án mã nguồn mở dành cho quản lý phòng máy và classroom lab trên
-Windows. Mục tiêu là cung cấp server quản trị tập trung, client nhẹ chạy nền,
-và kênh truyền màn hình độ trễ thấp từ một máy giáo viên tới nhiều máy học
-sinh.
+NSTU is an open-source classroom and computer lab management project for Windows.
+Its objective is to provide a centralized teacher administration server,
+lightweight student clients running in the background, and low-latency screen
+snapshots and broadcast from a teacher workstation to multiple student machines.
 
 Repository: <https://github.com/Khoasoma/nstu>
 
-NSTU hiện là engineering MVP dùng để phát triển và kiểm thử kiến trúc, chưa
-phải bản triển khai production hoàn chỉnh cho trường học. Các giới hạn thực tế
-được ghi trong [ROADMAP.md](ROADMAP.md).
+NSTU is currently an engineering MVP used to develop and test architectural
+boundaries, not a finished production release for schools. Practical limitations
+are documented in [ROADMAP.md](ROADMAP.md).
 
 ## INDEV function status
 
-`INDEV` means the function is merged into `main` for ongoing development and
-testing. Its verified implementation remains in development; this label does
-not certify the full application for production deployment.
+`INDEV` indicates that the function is merged into `main` for ongoing development
+and testing. Its verified implementation remains under development; this label
+does not certify the full application for production deployment.
 
-| Function | Status | Main integration | Verification |
+| Function | Status | Main Integration | Verification |
 |---|---|---|---|
-| [Authenticated control-channel deadline send](../common/include/nstu/control_channel.hpp) (`send_with_deadline`) | **INDEV** | `07af8b6` | Native/public deadline and ordinary-send controls passed; fast/strict 46/46 and all three exact-main MSVC Release CI jobs passed |
+| [Authenticated control-channel deadline send](../common/include/nstu/control_channel.hpp) (`send_with_deadline`) | **INDEV** | `07af8b6` | Native/public deadline and ordinary-send controls passed; fast/strict gates and MSVC Release CI passed |
+| [Native WebView2 Host Kiosk](../client/src/exam_host.cpp) (`ExamHost`) | **INDEV** | `79d1fdf` | Pinned SDK acquisition, fullscreen kiosk window, shortcut suppression hook, foreground re-grab, local virtual host `https://nstu.exam/` |
+| [Discrete Timing Telemetry Pipeline](../common/include/nstu/exam_telemetry_collector.hpp) | **INDEV** | `79d1fdf` | Zero-raw-input timing collector, DPAPI retry outbox, 8×8 MiB rotating server journal with ≤262k dedup cache, async worker, 56/56 C++ and 63 Node recovery tests passed |
 
-## Tính năng hiện tại
+## Current features
 
-- Protocol nhị phân versioned, little-endian, có giới hạn kích thước và parser
-  TCP incremental.
-- TCP control channel với connection preamble, mutual HMAC handshake, replay
-  protection, sequence guard và rate limiter cho kết nối chưa xác thực.
-- `KeyStore` hỗ trợ enrollment, rotation, revocation, tombstone `key_id` và
-  zeroization; DPAPI dùng để bảo vệ secret ở local machine.
-- UDP multicast cho broadcast và policy fallback sang unicast.
-- Packet-loss tracker có reorder window, duplicate/late/wrong-stream/jump
-  handling. Xem [PACKET_LOSS.md](PACKET_LOSS.md).
-- Bounded video frame reassembly, deadline, duplicate/conflict detection và
-  memory-pressure accounting. Xem [VIDEO_REASSEMBLY.md](VIDEO_REASSEMBLY.md).
-- DXGI Desktop Duplication, D3D11 BGRA-to-NV12 và Media Foundation H.264 MFT.
-- Windows Service, active-session agent, secure named pipe, tray icon, lock
-  window, annotation overlay và teacher-broadcast window.
-- Server UI dùng Dear ImGui + D3D11 và client registry thread-safe.
-- Server UI có room snapshot wall responsive với chu kỳ 5-10 giây, health
-  summary, search/filter, selected-client telemetry, annotation, broadcast,
-  chat và control actions.
-- Server UI chuyển được English/Tiếng Việt, light/dark mode, và có native tray
-  icon để hide/restore/exit mà không dừng control plane ngoài ý muốn.
-- Client capture dùng GDI + WIC JPEG, giới hạn 60 KiB/frame; service chỉ giữ
-  snapshot mới nhất đang chờ gửi để không tạo backlog.
-- Client agent có chat window Native Win32 dùng các control hệ thống nhẹ.
-- CMake modular, build được bằng MSVC hoặc MinGW-w64, có Windows CI.
+- **Versioned binary protocol**: little-endian, bounded message sizes, and incremental TCP parser.
+- **TCP control channel**: connection preamble, mutual HMAC handshake, replay protection, monotonic sequence guard, and rate limiter for unauthenticated connections.
+- **`KeyStore`**: enrollment, monotonic rotation, revocation, `key_id` tombstones, and zeroization; machine-scoped DPAPI protection for local secrets.
+- **UDP multicast**: room broadcast foundation with fallback to unicast.
+- **Packet-loss tracker**: reorder window, duplicate/late/wrong-stream/jump handling. See [PACKET_LOSS.md](PACKET_LOSS.md).
+- **Bounded video frame reassembly**: deadlines, duplicate/conflict detection, and memory-pressure accounting. See [VIDEO_REASSEMBLY.md](VIDEO_REASSEMBLY.md).
+- **DXGI Desktop Duplication, D3D11 BGRA-to-NV12 converter, and Media Foundation H.264 MFT encoder**.
+- **Windows Service and active-session agent**: secure local named pipe, tray icon, lock window, annotation overlay, and teacher-broadcast window.
+- **Server UI**: Dear ImGui + Direct3D 11 with thread-safe client registry.
+- **Room snapshot wall**: responsive grid with 5-10 second interval, health summary, search/filter, selected-client telemetry, annotation, broadcast, chat, and control actions.
+- **Bilingual and theme support**: English and Vietnamese runtime switching, light and dark themes, and a resilient native tray icon with hide/restore/exit without stopping the control plane.
+- **Client capture**: GDI + WIC JPEG, bounded to 60 KiB/frame; service retains only the newest pending snapshot to avoid queue backlogs.
+- **Client chat**: Native Win32 chat window using lightweight system controls.
+- **Modular CMake**: builds cleanly with MSVC or MinGW-w64 with zero compiler warnings under `-Werror`.
 
-## Kiến trúc thư mục
+## Directory layout
 
 ```text
 nstu/
-|-- common/                  Protocol, auth, TCP/UDP, IOCP, key, rate limit
+|-- common/                  Protocol, auth, TCP/UDP, IOCP, key, rate limit, telemetry
 |   |-- include/nstu/        Public C++ headers
-|   `-- src/                 Implementation dùng chung
+|   `-- src/                 Shared implementations
 |-- video/                   DXGI, D3D11 converter, Media Foundation encoder
 |-- client/
 |   |-- service/             Windows Service entry point
-|   |-- agent/               Interactive-session tray/overlay entry point
-|   `-- src/                 Named pipe và session integration
+|   |-- agent/               Interactive-session tray/overlay/kiosk entry point
+|   `-- src/                 Named pipe, exam host, and session integration
 |-- server/
-|   |-- app/                 Server UI entry point
-|   |-- include/nstu/        Client state registry headers
-|   `-- src/                 Client registry implementation
-|-- tests/                   Protocol, auth, packet-loss, reassembly, IPC tests
-|-- docs/                    Architecture, security, packet-loss, roadmap
-|-- cmake/                   Compiler warning policy
+|   |-- app/                 Server UI entry point (Dear ImGui)
+|   |-- include/nstu/        Client state registry and server telemetry headers
+|   `-- src/                 Client registry, control plane, telemetry journal/worker
+|-- exam/
+|   |-- web/                 Web-based exam client UI (app.js, index.html, styles.css)
+|   |-- studio/              Browser-native visual authoring tool (NSTU Exam Studio)
+|   |-- schema/              manifest.schema.json contract
+|   `-- examples/            Worked sample manifests
+|-- tests/                   Protocol, auth, packet-loss, reassembly, IPC, telemetry tests
+|-- docs/                    Architecture, security, packet-loss, roadmap, assessment
+|-- packaging/               NSIS installer scripts and package staging helpers
+|-- cmake/                   Compiler warning policy and WebView2 SDK acquisition
 |-- CMakeLists.txt           Root build configuration
 |-- CMakePresets.json        Windows Debug/Release presets
 |-- LICENSE                  MIT license
 `-- THIRD_PARTY_NOTICES.md   Dependency and license notices
 ```
 
-## Yêu cầu cài đặt
+## System requirements
 
-- Windows 10 hoặc Windows 11 x64.
-- Visual Studio 2022 với Desktop development with C++ và Windows SDK, hoặc
-  MinGW-w64 hỗ trợ C++20.
-- CMake 3.25 trở lên, Git.
-- Ninja nếu dùng CMake presets.
+- Windows 10 or Windows 11 x64.
+- Visual Studio 2022 (with "Desktop development with C++" and Windows SDK), or MinGW-w64 (GCC 13+ with C++20 support).
+- CMake 3.25 or later, Git.
+- Ninja (recommended when using CMake presets).
 
-Các API video và service là Windows-only. Build đầy đủ và integration tests cần
-Windows.
+Video APIs and Windows services are Windows-only. Full builds and integration tests require Windows.
 
-## Clone và build
+## Clone and build
 
 ```powershell
 git clone https://github.com/Khoasoma/nstu.git
@@ -106,13 +102,13 @@ ctest --test-dir build-msvc -C Release --output-on-failure
 ```powershell
 cmake -S . -B build-mingw -G "MinGW Makefiles" `
   -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON
-cmake --build build-mingw
+cmake --build build-mingw --parallel 4
 ctest --test-dir build-mingw --output-on-failure
 ```
 
 ### CMake presets
 
-Preset yêu cầu Ninja và một toolchain C++20 phù hợp:
+Presets require Ninja and a compatible C++20 toolchain:
 
 ```powershell
 cmake --preset windows-debug
@@ -120,163 +116,106 @@ cmake --build --preset windows-debug
 ctest --preset windows-debug
 ```
 
-Release dùng `windows-release` thay cho `windows-debug`.
+For release builds, use `--preset windows-release`.
 
-## Tùy chọn CMake
+## CMake configuration options
 
-- `NSTU_BUILD_CLIENT=ON|OFF`: build service và agent client.
-- `NSTU_BUILD_SERVER=ON|OFF`: build server UI.
-- `NSTU_BUILD_SETUP=ON|OFF`: build the `nstu-diagnostics` helper used by the
-  unified installer and client boot checks.
-- `NSTU_BUILD_VIDEO=ON|OFF`: build DXGI/Media Foundation trên Windows.
-- `NSTU_BUILD_TESTS=ON|OFF`: build test suite.
-- `NSTU_SERVER_USE_IMGUI=ON|OFF`: bật/tắt server UI Dear ImGui.
-- `NSTU_ENABLE_WERROR=ON|OFF`: coi warning là error.
-- `NSTU_ENABLE_PACKAGING=ON|OFF`: bật/tắt target installer NSIS hợp nhất.
-- `NSTU_INTERNAL_TEST_BUILD=ON|OFF`: tạo installer `*-internal-vm-setup.exe`
-  cho máy ảo phát triển. Build này đánh dấu rõ `Internal VM Test` và chỉ hạ
-  RAM dưới chuẩn thành warning để kiểm thử luồng cài đặt; CPU luôn chỉ được báo
-  như thông tin và không chặn cài đặt. Mặc định `OFF` và không được dùng để
-  triển khai production.
+| Option | Default | Purpose |
+|---|---|---|
+| `NSTU_BUILD_CLIENT=ON\|OFF` | `ON` | Build client service (`nstu-service`), agent (`nstu-agent`), and provisioning |
+| `NSTU_BUILD_SERVER=ON\|OFF` | `ON` | Build teacher server and administration UI |
+| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` on Windows | Build the `nstu-diagnostics` helper used by installer and boot checks |
+| `NSTU_BUILD_VIDEO=ON\|OFF` | `ON` | Build DXGI Desktop Duplication and Media Foundation components |
+| `NSTU_BUILD_TESTS=ON\|OFF` | `ON` | Build unit and integration test executables |
+| `NSTU_SERVER_USE_IMGUI=ON\|OFF` | `ON` | Enable Dear ImGui + D3D11 server UI executable |
+| `NSTU_ENABLE_WERROR=ON\|OFF` | `OFF` | Treat compiler warnings as errors (required for CI and release gates) |
+| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Enable unified NSIS packaging target (`nstu-package`) |
+| `NSTU_ENABLE_WEBVIEW2_HOST=ON\|OFF`| `ON` on Windows | Build native WebView2 exam kiosk host (`ExamHost`) |
+| `NSTU_WEBVIEW2_SDK_DIR=<path>` | Auto-download | Path to pinned Microsoft.Web.WebView2 SDK directory |
+| `NSTU_INTERNAL_TEST_BUILD=ON\|OFF` | `OFF` | Build `*-internal-vm-setup.exe` permitting low-RAM development VMs |
 
-Ví dụ chỉ build core protocol/test:
+Example: building core protocol and test suite only:
 
 ```powershell
 cmake -S . -B build-core -G "MinGW Makefiles" `
   -DCMAKE_BUILD_TYPE=Release -DNSTU_BUILD_VIDEO=OFF `
   -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF
-cmake --build build-core
+cmake --build build-core --parallel 4
 ctest --test-dir build-core --output-on-failure
 ```
 
-## Artifact sau khi build
+## Build artifacts
 
-- `nstu-server.exe`: server administration UI.
-- `nstu-service.exe`: Windows Service process.
-- `nstu-agent.exe`: interactive session agent.
-- `nstu_video_probe.exe`: kiểm tra khả năng video/MFT trên máy hiện tại.
-- Các executable trong `tests/`: test protocol, auth, networking và video.
+- `nstu-server.exe`: Teacher server administration UI.
+- `nstu-service.exe`: Privileged Windows Service (`LocalSystem`, Session 0).
+- `nstu-agent.exe`: Interactive user session agent (tray, chat, overlay, and WebView2 kiosk).
+- `nstu_video_probe.exe`: Hardware capability probe for DXGI adapters and Media Foundation MFTs.
+- `tests/`: 56 unit and integration test executables covering protocol, crypto, IPC, and telemetry.
 
-## Chạy thử giao diện
+## Running the UI
 
-Sau khi build trên Windows, chạy `nstu-server.exe` để mở server shell. Màn hình
-server mặc định mở `Room screens`: health summary ở đầu trang, chu kỳ snapshot
-5-10 giây, search/filter và screen wall tự đổi số cột theo kích thước cửa sổ.
-`Selected client` cung cấp danh sách gọn, telemetry, preview 16:9, snapshot
-control, lock/unlock, vẽ overlay và chat. Chu kỳ mặc định là 7 giây.
+After building on Windows, execute `nstu-server.exe` to launch the server shell.
+The dashboard opens to `Room screens`: health summary at the top, adjustable 5-10 second snapshot intervals, search/filtering, and responsive snapshot wall.
+`Selected client` provides a focused view with telemetry, 16:9 snapshot preview, snapshot controls, lock/unlock, click-through overlay drawing, and chat.
 
-Nút `EN`/`VI` và `Sáng`/`Tối` đổi ngôn ngữ, theme ngay khi chạy. Có thể chọn
-default từ command line bằng `--language=vi`, `--language=en` và `--dark`.
-Minimize hoặc đóng cửa sổ sẽ đưa server xuống notification area; double-click
-tray icon để mở lại, hoặc dùng menu chuột phải để hide/show và exit.
+- `EN`/`VI` and `Light`/`Dark` buttons toggle language and theme dynamically.
+- Command-line flags `--language=vi`, `--language=en`, and `--dark` select startup defaults.
+- Minimizing or closing the window minimizes to the Windows notification area; double-click the tray icon to restore, or use the context menu to hide/show and exit.
 
-Chạy `nstu-agent.exe` để mở chat client Native Win32 và tray icon. Double-click
-tray icon để ẩn/hiện chat. Agent có các window riêng cho lock, annotation
-click-through và teacher-screen broadcast; lock luôn được xếp trên hai lớp còn
-lại.
+Launch `nstu-agent.exe` to open the Native Win32 client tray icon and chat window.
+Double-click the tray icon to toggle the chat window. The agent manages separate windows for screen lock, annotation click-through, and teacher-screen broadcast.
 
-Các lệnh snapshot, annotation, broadcast, lock/unlock và chat đi qua control
-channel đã xác thực, service và named pipe tới agent. Nền tảng `Start stream`
-và `Request keyframe` của H.264 vẫn còn cho continuous-video mode tùy chọn chưa
-được nối end to end.
+## Local verification gates
 
-## Cài đặt và kiểm thử
+Before pushing commits, run the local verification gates in Bash (e.g. Git Bash):
 
-Installer hợp nhất gọi trực tiếp binary theo vai trò với quyền Administrator;
-PowerShell lifecycle script chỉ là công cụ vận hành trong source tree và không
-được đóng gói vào installer. Cài đặt client đăng ký service automatic, cấu hình
-recovery và yêu cầu restart; service bắt đầu ở lần boot tiếp theo. Windows vẫn
-hiện đăng nhập bình thường để người vận hành tự chọn tài khoản lớp học tiêu chuẩn
-hiện có. NSTU không tạo tài khoản, lưu mật khẩu hoặc cấu hình autologon.
+```bash
+# Fast gate: hygiene, syntax check, web recovery tests, build, and ctest
+./scripts/verify-gate.sh
 
-Lifecycle helper chạy `test-system-setup.ps1` để kiểm tra Windows x64,
-quyền Administrator, data root NTFS/ReFS có thể ghi, Windows Firewall và
-cấu hình autologon. Vai trò Server còn kiểm tra xung đột control/video port.
-Script không bật autologon hoặc lưu credential; built-in Administrator
-autologon bị từ chối, còn dedicated standard-user autologon chỉ được nêu
-như lựa chọn. Khi upgrade server, listener thuộc đúng binary NSTU đã cài
-được cảnh báo thay vì bị nhầm với ứng dụng chiếm port khác.
-
-Kiểm thử nhanh sau build:
-
-```powershell
-ctest --test-dir build-msvc -C Release --output-on-failure
-.\build-msvc\video\Release\nstu_video_probe.exe
+# Strict gate: mirrors CI release posture with -Werror
+./scripts/verify-gate.sh --strict
 ```
 
-`nstu_video_probe.exe` chỉ báo khả năng adapter/MFT trên máy đang chạy, không
-thay thế soak test hoặc kiểm tra multicast trên switch thật.
+The script verifies:
+1. Naming and attribution rules.
+2. Never-stage exclusions (artifacts, private roadmaps, logs).
+3. Node.js web syntax check (`node --check exam/web/app.js`).
+4. Web recovery test suite (`node tests/exam_web_recovery_tests.js`).
+5. Zero compiler warnings with `-Werror`.
+6. 100% test pass rate under `ctest`.
 
-## Đóng gói installer
+## Packaging the installer
 
-Trên Windows, CMake tạo một target NSIS hợp nhất:
+On Windows with [NSIS](https://nsis.sourceforge.io/) installed (`makensis.exe` in `PATH`):
 
 ```powershell
 cmake --build build-msvc --config Release --target nstu-package
 ```
 
-Kết quả là `nstu-0.1.0-setup.exe` trong build directory. Installer mở đầu bằng
-lựa chọn Client hoặc Server, kiểm tra vai trò đối diện trước khi cài và gọi
-`nstu-diagnostics` theo từng bước. Cần cài [NSIS](https://nsis.sourceforge.io/)
-và đặt `makensis.exe` trong `PATH`. Nếu môi trường build không có NSIS, vẫn có
-thể kiểm tra layout bằng script staging:
+The output is `nstu-<version>-setup.exe` in the build directory.
+The installer presents an explicit choice between Client and Server, verifies that the opposite role is not already installed, and invokes `nstu-diagnostics` sequentially.
 
-```powershell
-cmake -DNSTU_BUILD_DIR=build-msvc `
-  -DNSTU_STAGE_DIR=build-msvc/unified-installer-stage `
-  -P packaging/PrepareUnifiedPackage.cmake
-```
+## Secrets, memory, and Deep Freeze
 
-Package staging chứa client, server, diagnostics và tài liệu. Các lifecycle
-script yêu cầu Administrator; quy trình hỗ trợ là chạy installer/uninstaller
-hợp nhất thay vì gọi helper trực tiếp. Lần gọi uninstall đầu tiên không thay
-đổi service, process hoặc file cho đến sau restart bắt buộc; quá trình fail
-closed khi service Deep Freeze được nhận diện (`DFServ` hoặc `DeepFrz`) đang
-active.
+- Never commit PSKs, DPAPI entropy, certificates, crash dumps, memory snapshots, screen captures, logs, or runtime state.
+- Local directories ignored by Git include `local/`, `memory/`, `dumps/`, `logs/`, `runtime/`, and all build trees.
+- Runtime secrets must be stored using machine-scoped DPAPI or Windows certificate store.
+- Named pipes and memory-mapped files reduce temporary disk activity; they do not replace ACLs, authentication, key rotation, or Deep Freeze persistence requirements.
 
-Kế hoạch tự động cập nhật theo chu kỳ LTSC chín tháng và bộ trial state machine
-được ghi trong [AUTO_UPDATE_LTSC.md](AUTO_UPDATE_LTSC.md). Chạy trial không phá
-hủy bằng `pwsh -NoProfile -File packaging/test-update-cycle.ps1`; trial không
-dừng service, không reboot và không sửa installation hiện tại.
+## Security and protocol
 
-Mỗi commit push lên `main` sẽ chạy Windows CI, build/test, tạo một unified
-installer và phát hành GitHub pre-release tự động dạng
-`nightly-<run-number>`. Pull Request vẫn được build/test nhưng không tạo
-release. Các release thủ công như `v0.2.0-dev` vẫn được giữ độc lập.
+- Connection preamble is a quick filter for magic, version, role, `client_id`, and `key_id`; it does not prove client identity.
+- Client identity is accepted only after mutual HMAC handshake succeeds.
+- Video streams authenticate HMAC before packet-loss accounting and frame reassembly.
+- Screen contents are authenticated but not encrypted; sensitive screens require an encrypted physical LAN or VPN.
 
-Nightly CI chưa ký artifact; workflow production có signing nhưng chỉ chạy khi
-có certificate và evidence gate đầy đủ. MVP chưa tự động cấp key hoặc
-cấu hình multicast. Service recovery đã được installer cấu hình, nhưng vẫn
-cần kiểm thử upgrade/reboot trên image thật.
+See [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md), [PACKET_LOSS.md](PACKET_LOSS.md), [VIDEO_REASSEMBLY.md](VIDEO_REASSEMBLY.md), and [ROADMAP.md](ROADMAP.md) for architectural details.
 
-## Secret, memory và Deep Freeze
+## Fork and development workflow
 
-Không commit PSK, DPAPI entropy, certificate, dump, memory snapshot, capture,
-log hoặc file runtime. Các thư mục local được ignore gồm `local/`, `memory/`,
-`dumps/`, `logs/`, `runtime/` và các build tree.
-
-Secret runtime nên được lưu bằng DPAPI machine scope hoặc certificate store.
-Named pipe và memory-mapped/local runtime data chỉ giảm disk I/O; chúng không
-thay thế ACL, authentication, key rotation hoặc policy của Deep Freeze.
-
-## Bảo mật và protocol
-
-Connection preamble là admission filter nhanh cho magic, version, role,
-`client_id` và `key_id`; nó không chứng minh danh tính máy con. Danh tính chỉ
-được chấp nhận sau HMAC handshake thành công.
-
-Luồng video xác thực HMAC trước packet-loss accounting và frame reassembly.
-HMAC không mã hóa nội dung màn hình; nếu LAN không được tin cậy cần AES-GCM
-hoặc cơ chế confidentiality tương đương.
-
-Chi tiết xem [ARCHITECTURE.md](ARCHITECTURE.md),
-[SECURITY.md](SECURITY.md), [PACKET_LOSS.md](PACKET_LOSS.md),
-[VIDEO_REASSEMBLY.md](VIDEO_REASSEMBLY.md) và [ROADMAP.md](ROADMAP.md).
-
-## Fork và phát triển
-
-1. Mở repository trên GitHub và chọn **Fork**.
-2. Clone fork, sau đó cấu hình repository gốc làm `upstream`:
+1. Open the repository on GitHub and click **Fork**.
+2. Clone your fork and configure the upstream repository:
 
    ```powershell
    git clone https://github.com/<your-account>/nstu.git
@@ -284,51 +223,38 @@ Chi tiết xem [ARCHITECTURE.md](ARCHITECTURE.md),
    git remote add upstream https://github.com/Khoasoma/nstu.git
    ```
 
-3. Tạo branch cho thay đổi:
+3. Create a feature branch:
 
    ```powershell
    git fetch upstream
    git switch -c feature/<short-name> upstream/main
    ```
 
-4. Build với `NSTU_ENABLE_WERROR=ON`, chạy test và kiểm tra diff:
+4. Build with `NSTU_ENABLE_WERROR=ON`, run tests, and check diff:
 
    ```powershell
-   cmake --build build-msvc --config Release --parallel
-   ctest --test-dir build-msvc -C Release --output-on-failure
+   ./scripts/verify-gate.sh --strict
    git diff --check
    ```
 
-5. Commit nhỏ, có mục đích rõ ràng, rồi push lên fork:
+5. Commit with clear, purposeful messages and push to your fork:
 
    ```powershell
    git add <files>
-   git commit -m "Describe the change"
+   git commit -m "scope: concise description of changes"
    git push -u origin feature/<short-name>
    ```
 
-6. Mở Pull Request từ fork tới `Khoasoma/nstu:main`. PR phải nêu test đã chạy,
-   thay đổi protocol/ABI nếu có, rủi ro Windows compatibility và ảnh hưởng
-   tới memory/runtime artifact.
+6. Open a Pull Request from your fork to `Khoasoma/nstu:main`. Include test evidence, protocol changes, and compatibility considerations.
 
-Giữ thay đổi tập trung theo module và cập nhật roadmap khi hoàn tất milestone.
+## License and third-party dependencies
 
-## License và dependency
+Project NSTU is released under the [MIT License](../LICENSE).
+All runtime dependencies must be compatible with MIT, Apache-2.0, or equivalent permissive licenses; GPL dependencies are not accepted.
+Dear ImGui is fetched at CMake configure time under the MIT License. Windows SDK, Winsock, DXGI, D3D11, and Media Foundation are system components of Windows and are not redistributed as source.
+See [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
 
-NSTU phát hành theo [MIT License](../LICENSE). Dependency runtime phải tương thích MIT,
-Apache-2.0 hoặc license permissive tương đương; không thêm GPL dependency.
-Dear ImGui được fetch ở thời điểm configure và dùng MIT License. Windows SDK,
-Winsock, DXGI, D3D11 và Media Foundation là thành phần của Windows SDK, không
-được redistribute như source dependency. Xem [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md).
+## Production validation status
 
-## Trạng thái production
-
-IOCP dispatcher, persisted keyring, enrollment transport, snapshot routing,
-annotation/broadcast, packetizer, jitter, NACK, keyframe scheduling,
-service-agent routing, signing automation và device-loss recovery đã có
-implementation và automated test. Green CI vẫn chỉ chứng minh build và local
-correctness. Trước khi triển khai thật phải chạy production signing bằng
-certificate thật, review/fuzz protocol, rồi hoàn tất 50-client snapshot soak,
-Windows/Deep Freeze matrix và benchmark theo
-[PRODUCTION_VALIDATION.md](PRODUCTION_VALIDATION.md). Continuous H.264/UDP là
-enhancement tùy chọn và cần multicast/driver matrix riêng trước khi bật.
+IOCP dispatcher, persisted keyring, enrollment transport, snapshot routing, annotation/broadcast, packetizer, jitter buffer, NACK, keyframe scheduling, service-agent routing, signing automation, native WebView2 kiosk, and discrete timing telemetry are implemented and tested.
+Passing CI proves compilation and automated correctness. Prior to real school deployments, production code signing with genuine certificates, protocol fuzzing, a 50-client physical lab soak test, and the validation checklist in [PRODUCTION_VALIDATION.md](PRODUCTION_VALIDATION.md) must be completed.

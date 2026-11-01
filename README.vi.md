@@ -4,23 +4,21 @@
 
 # Project NSTU
 
-> **INDEV — nhánh công việc Phase 4:** Toàn bộ công việc đã commit của `feature/phase4-telemetry` được tích hợp vào `main` để tiếp tục phát triển và kiểm thử. Các tiêu chí lifecycle, runtime/VM và production vẫn chưa hoàn tất. Xem [trạng thái INDEV](docs/INDEV_STATUS.md).
+> **INDEV — Tích hợp Phase 4:** Toàn bộ pipeline telemetry đo thời gian rời rạc Phase 4 và kiosk WebView2 native đã được merge vào `main` (56/56 test C++ và 63 test recovery trình duyệt đều đạt). Phase 5 về bảo mật kỳ thi và hardening mạng đang được phát triển. Xem [trạng thái INDEV](docs/INDEV_STATUS.md).
 
 
 [English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Hướng dẫn thiết lập](docs/SETUP_GUIDE.vi.md) | [Chẩn đoán tùy chọn](docs/TELEMETRY.vi.md) | [Thiết kế khôi phục sau reboot](docs/REBOOT_TO_RESTORE.vi.md) | [Tự động cập nhật và bảo trì LTSC](docs/AUTO_UPDATE_LTSC.vi.md) | [Kiểm thử VM](docs/VM_TESTING.md)
 
-[![C++](https://img.shields.io/badge/C++-21%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
-[![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#licensing)
+[![C++](https://img.shields.io/badge/C++-20%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
+[![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#bản-quyền)
 [![Windows CI](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[![CI](https://img.shields.io/github/actions/workflow/status/nekoo-moe/nstu/production.yml)](https://github.com/nekoo-moe/nstu/actions)
-[![Contributors](https://img.shields.io/github/contributors/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/graphs/contributors)
-[![Commit activity](https://img.shields.io/github/commit-activity/m/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
-[![Last commit](https://img.shields.io/github/last-commit/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/commits)
-[![Issues](https://img.shields.io/github/issues/nekoo-moe/nstu)](https://github.com/nekoo-moe/nstu/issues)
-
-> **Phát triển có hỗ trợ AI:** NSTU được phát triển với hỗ trợ AI; mọi thay đổi vẫn được con người rà soát và có thể kiểm tra trong lịch sử mã nguồn công khai.
+[![CI](https://img.shields.io/github/actions/workflow/status/Khoasoma/nstu/windows.yml?branch=main)](https://github.com/Khoasoma/nstu/actions)
+[![Contributors](https://img.shields.io/github/contributors/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/graphs/contributors)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits)
+[![Last commit](https://img.shields.io/github/last-commit/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits)
+[![Issues](https://img.shields.io/github/issues/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/issues)
 
 NSTU là dự án quản lý lớp học và phòng máy Windows miễn phí, mã nguồn mở. Dự
 án hướng đến một máy giáo viên quản lý tập trung, client nhẹ trên máy học sinh,
@@ -39,6 +37,25 @@ broadcast màn hình giáo viên trong mạng nội bộ.
 > chưa hoàn thành.
 > Không nên dùng bản nightly hiện tại như một biện pháp bảo mật trong trường học
 > thật.
+
+## Cập nhật gần đây
+
+Mốc công việc **Phase 4 Telemetry & Kiosk Native** đã được tích hợp hoàn toàn vào `main`:
+
+- **Kiosk WebView2 Host Native** — Tích hợp tải SDK Microsoft.Web.WebView2 cố định (pinned) trong CMake và CI; cửa sổ kiosk toàn màn hình `ExamHost` native với hook bàn phím mức thấp chặn phím tắt (Win, Alt+Tab, Ctrl+Esc), tự động lấy lại tiêu điểm (foreground re-grab) và cô lập virtual host nội bộ (`https://nstu.exam/`).
+- **Pipeline Telemetry đo thời gian rời rạc** — Bộ thu thập telemetry không xâm nhập phía client (`nstu_exam_telemetry_collector`) ghi nhận thời gian dừng (dwell time) theo câu hỏi, thời gian tới câu trả lời đầu tiên, số lần đổi phương án, chuyển đổi focus/blur và độ sâu cuộn trang.
+- **Cam kết quyền riêng tư tuyệt đối (Zero-Raw-Input)** — Nghiêm cấm và loại trừ hoàn toàn việc ghi phím (keystroke logging), nội dung clipboard, quỹ đạo chuột thô và nội dung bài làm của học sinh. Hệ thống chỉ thu thập số liệu thống kê thời gian dạng tổng hợp.
+- **Outbox Client bền vững** — Hàng đợi outbox retry bảo vệ bằng DPAPI phạm vi máy (`nstu_exam_telemetry_outbox`) theo cơ chế FIFO có giới hạn dung lượng, commit giao dịch nguyên tử và thuật toán backoff khi gặp lỗi truyền tải.
+- **Journal Telemetry & Chống trùng lặp phía Server** — Phân vùng lưu trữ riêng biệt an toàn trước crash (`nstu_exam_telemetry_journal`) với phân đoạn xoay vòng 8×8 MiB cấp phát trước, bộ đệm deduplication ≤262.144 hash, tối đa 16 thế hệ, sàn replay không tái sinh và giới hạn lưu trữ tối đa 30 ngày.
+- **Worker lưu trữ bất đồng bộ** — Hàng đợi worker tách biệt hoàn toàn ngoài lock mạng IOCP, trả về ACK `unavailable` ngay lập tức khi bão hòa để không bao giờ làm tắc nghẽn luồng nộp câu trả lời thi.
+- **Cô lập kênh truyền** — Tách biệt hoàn toàn về mặt mật mã giữa sổ cái câu trả lời (`exam_answer_event`) và luồng batch telemetry; phục hồi trạng thái câu trả lời luôn được ưu tiên tuyệt đối trước telemetry trong mọi điều kiện mạng.
+
+### Xác minh (2026-11-01)
+
+- Build MinGW/UCRT64 và MSVC sạch 100% với `-Werror`; 56/56 unit và integration test đều đạt.
+- 63 bài kiểm thử phục hồi trình duyệt Node.js đạt (`exam_web_recovery_tests.js`).
+- Cổng kiểm tra cục bộ (`scripts/verify-gate.sh` và `--strict`) vượt qua với 0 cảnh báo.
+- CI tự động: 4/4 job Windows CI đạt trên feature branch; 5/5 job đạt trên `main`.
 
 ## Câu chuyện bắt đầu
 

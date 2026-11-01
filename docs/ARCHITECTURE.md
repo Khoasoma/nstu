@@ -80,6 +80,13 @@ accepted only when it matches that locally derived path exactly.
   -> DPAPI client outbox (retry only)
   -> authenticated TCP control channel
   -> append-only server AnswerJournal (authoritative)
+
+Discrete timing telemetry pipeline (isolated channel):
+  -> client-side discrete timing collector (nstu_exam_telemetry_collector)
+  -> bounded machine-scope DPAPI outbox (nstu_exam_telemetry_outbox)
+  -> authenticated exam_telemetry_batch / exam_telemetry_ack
+  -> server crash-safe rotating journal (nstu_exam_telemetry_journal, 8x8 MiB)
+  -> asynchronous persistence worker (nstu_exam_telemetry_worker)
 ```
 
 The server keeps packages, answer journal records, state exports, and grading

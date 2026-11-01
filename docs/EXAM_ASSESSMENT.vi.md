@@ -340,3 +340,34 @@ Bản dựng công khai `NSTU DEV (UNPROTECTED)` chỉ bỏ qua duy nhất cổn
 nghiệm và không bỏ qua gì khác; mỗi lần bắt đầu bị bỏ qua đều được audit ở
 `severity=warning` và bản dựng được gắn nhãn rõ ràng trong giao diện lẫn
 installer. Bản Release không thể bắt đầu thi trên client chưa được bảo vệ.
+
+## Telemetry bài thi, giới hạn bằng chứng và đảm bảo quyền riêng tư
+
+Một pipeline telemetry đo thời gian rời rạc tùy chọn hoạt động song song với luồng bài làm trong trạng thái INDEV:
+
+### Tách biệt kênh truyền và ưu tiên lập lịch
+
+1. **Tách biệt mối quan tâm:** Các batch telemetry được đóng khung dưới dạng `CommandType::exam_telemetry_batch` và được xác nhận qua `CommandType::exam_telemetry_ack`. Luồng sự kiện câu trả lời (`exam_answer_event`) cùng chuỗi hash mật mã của nó hoàn toàn độc lập và cách ly.
+2. **Ưu tiên và xử lý áp lực nghẽn (backpressure):** Sự kiện câu trả lời luôn được ưu tiên tuyệt đối. Khi socket bị nghẽn, outbox client đạt giới hạn hoặc worker phía server bão hòa, dữ liệu telemetry sẽ bị hoãn, loại bỏ hoặc phản hồi bằng `TelemetryAckStatus::unavailable`. Quá trình nộp bài và khôi phục trạng thái không bao giờ bị trì hoãn hay chặn bởi lưu lượng telemetry.
+3. **Đường lưu trữ chuyên dụng:** Bản ghi telemetry được lưu trữ trên server tại đường dẫn phân quyền riêng biệt (`%ProgramData%\NSTU\exams\telemetry-journal`), ngăn chặn việc dung lượng telemetry gây ảnh hưởng tới sổ cái câu trả lời append-only.
+
+### Giới hạn diễn giải: bằng chứng cần rà soát thủ công
+
+1. **Chỉ là bằng chứng điều tra:** Các số liệu telemetry (như thời gian dừng dwell time, số lần đổi câu trả lời, mất focus và chuyển đổi hiển thị visibility) cấu thành bằng chứng điều tra thô, chỉ nhằm phục vụ việc rà soát thủ công của giám thị hoặc giáo viên. Hệ thống hoàn toàn không hỗ trợ và không cho phép tự động kết luận gian lận, trừ điểm hoặc xử lý kỷ luật dựa trên dữ liệu telemetry.
+2. **Dữ liệu thiếu tương đương trạng thái chưa xác định:** Việc thiếu hoặc mất nhật ký telemetry có thể xảy ra do gián đoạn mạng, ngắt kết nối socket, rate limiting, áp lực ổ đĩa tạm thời trên server, client reboot hoặc phần mềm client phiên bản cũ. Công cụ khảo thí đối xử nghiêm ngặt với telemetry bị thiếu như trạng thái **chưa xác định / chưa quan sát (unknown / unobserved)**, tuyệt đối không coi đó là bằng chứng vi phạm hay gian lận.
+
+### Ranh giới riêng tư và bất biến không rò rỉ dữ liệu (Zero-Leakage)
+
+1. **Chỉ thu thập số liệu rời rạc tổng hợp:** Sự kiện telemetry chỉ ghi lại các giá trị enum cấu trúc được định nghĩa trước (`TelemetrySampleKind`), timestamp đơn điệu, ID bộ thu thập và số đếm tổng hợp.
+2. **Loại trừ tuyệt đối nội dung người dùng:** Bộ thu thập telemetry, outbox, định dạng mạng trên dây và journal lưu trữ nghiêm cấm và loại trừ hoàn toàn:
+   - Nhật ký phím bấm thô hoặc nhịp điệu gõ phím (keystroke logging).
+   - Ghi chú, nhận xét hoặc văn bản nháp của học sinh.
+   - Văn bản trong clipboard hệ điều hành hoặc secret được sao chép.
+   - Nội dung câu trả lời tự luận, câu trả lời ngắn hoặc nội dung phương án thi.
+   - Bản ghi pixel màn hình hoặc âm thanh microphone.
+
+### Giới hạn lưu trữ và chính sách giữ lại dữ liệu
+
+1. **Phân đoạn xoay vòng:** Dữ liệu telemetry được lưu trong các phân đoạn xoay vòng cấp phát trước (8×8 MiB), giới hạn tối đa 16 thế hệ nhằm ngăn chặn sự phình to không kiểm soát của ổ đĩa.
+2. **Sàn replay và khử trùng lặp:** Các gói gửi trùng lặp được khử trùng lặp qua bộ đệm trong bộ nhớ (lên tới 262.144 hash) cùng sàn số thứ tự đơn điệu không tái sinh.
+3. **Giới hạn thời gian lưu trữ:** Bản ghi telemetry phía server chịu sự chi phối của chu kỳ lưu trữ tối đa nghiêm ngặt 30 ngày. Các thế hệ quá hạn sẽ tự động bị xóa dọn, và dữ liệu cũ hơn có thể bị hủy nếu vượt quá hạn mức (quota) cục bộ.

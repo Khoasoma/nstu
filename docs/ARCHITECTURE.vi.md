@@ -77,6 +77,13 @@ Package .nstuexam (server sở hữu; yêu cầu ký release cho production)
   -> outbox client DPAPI (chỉ retry)
   -> control channel TCP đã xác thực
   -> AnswerJournal chỉ-ghi-thêm phía server (nguồn chân lý)
+
+Pipeline telemetry đo thời gian rời rạc (kênh cô lập):
+  -> bộ thu thập thời gian rời rạc phía client (nstu_exam_telemetry_collector)
+  -> outbox DPAPI phạm vi máy có giới hạn (nstu_exam_telemetry_outbox)
+  -> exam_telemetry_batch / exam_telemetry_ack đã xác thực
+  -> journal xoay vòng an toàn trước crash phía server (nstu_exam_telemetry_journal, 8x8 MiB)
+  -> worker lưu trữ bất đồng bộ (nstu_exam_telemetry_worker)
 ```
 
 Server giữ package, record answer journal, state export và dữ liệu chấm điểm ngoài
