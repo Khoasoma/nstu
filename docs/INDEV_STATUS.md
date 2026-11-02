@@ -34,8 +34,8 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Task 19** | `EXAM-APP-SUPPRESSION-SERVICE-WIRING-1` | Wire active application suppression service lifecycle to terminate unauthorized student apps | **Merged to main** (`b622ac3`) |
 | **Task 20** | `CONTROL-CHANNEL-AEAD-ENCRYPTION-1` | Confidentiality & AEAD authenticated encryption (AES-256-GCM) for control plane payloads | **Merged to main** (`23c7e97`) |
 | **Task 21** | `INSTRUCTOR-SESSION-AUTHORIZATION-BINDING-1` | Cryptographic instructor authorization tickets binding official assessment sessions | **Merged to main** (`79a4fea`) |
-| **Task 22** | `SERVER-SIDE-GRADING-SEALED-EXPORT-1` | Automated objective scoring, manual essay review workflow, and sealed export container | **Next in loop** |
-| **Task 23** | `TEACHER-EXAM-OPERATOR-CONSOLE-1` | Native Dear ImGui teacher console exam management tab with live client monitoring | Planned |
+| **Task 22** | `SERVER-SIDE-GRADING-SEALED-EXPORT-1` | Automated objective scoring, manual essay review workflow, and sealed export container | **Merged to main** (`4082646`) |
+| **Task 23** | `TEACHER-EXAM-OPERATOR-CONSOLE-1` | Native Dear ImGui teacher console exam management tab with live client monitoring | **Next in loop** |
 
 ## Acceptance That Remains Open Before Production Release
 
