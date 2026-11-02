@@ -21,10 +21,21 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 62/62 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 63/63 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
+
+## Integrated Operator Surfaces & Role Separation (Roadmap P2.1 / Task 24)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Domain Role & Permission Matrix** | Pure `OperatorRole` (Teacher, Technician, Developer) and `OperatorAction` matrix in `nstu::server::is_action_permitted`, preventing unauthorized execution of disruptive fleet actions | **Merged to main** (`b37c2ee`) |
+| **Teacher Mode Clean Workspace** | Default role providing focused classroom operations; disruptive maintenance (UWF configuration, client reboot) and raw telemetry exports guarded with explanatory tooltips | **Merged to main** (`b37c2ee`) |
+| **Dedicated Technician Fleet Surface** | Full `draw_technician_fleet_health` dashboard displaying fleet inventory metrics, reboot-to-restore active/pending status, average latency, and table with ping, loss, UWF badges, and UWF arming actions | **Merged to main** (`b37c2ee`) |
+| **Developer Advanced Controls** | Retained raw DirectX/D3D11 graphics diagnostics modal and telemetry markdown review behind Developer mode | **Merged to main** (`b37c2ee`) |
+| **Operator Surface Switcher & Fallback** | Top menu strip and Settings surface switcher with automatic fallback from `fleet_health` to `room_screens` when transitioning to Teacher role | **Merged to main** (`b37c2ee`) |
+| **Permission Test Suite** | 33-cell permission matrix verification, bilingual localization tests (EN/VI), and string conversions in `tests/operator_role_tests.cpp` | **Merged to main** (`b37c2ee`) |
 
 ## Integrated Mutual Pairing & Student Confirmation (Stream S3 / Roadmap P0-03 & P1.2)
 
