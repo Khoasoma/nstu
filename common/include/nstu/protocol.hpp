@@ -122,6 +122,9 @@ enum class ConnectionRole : std::uint8_t {
     diagnostic = 3,
 };
 
+inline constexpr std::uint8_t kPreambleFlagNone = 0x00;
+inline constexpr std::uint8_t kPreambleFlagAead = 0x01;
+
 struct ConnectionPreamble {
     std::uint16_t version = kCommandVersion;
     ConnectionRole role = ConnectionRole::client;

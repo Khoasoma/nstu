@@ -569,6 +569,341 @@ void test_native_deadline_setup_profile() {
     assert(evidence.owners_closed && evidence.elapsed_ms < 15000);
 }
 
+void test_aead_roundtrip_and_tamper() {
+    std::string error;
+    nstu::security::Sha256Digest session_key{};
+    for (std::size_t i = 0; i < session_key.size(); ++i) {
+        session_key[i] = static_cast<std::byte>(0x55 + i);
+    }
+    const auto keys = nstu::control::derive_aead_session_keys(session_key);
+    assert(keys.has_value());
+    assert(keys->client_to_server_key != keys->server_to_client_key);
+    assert(keys->client_to_server_iv != keys->server_to_client_iv);
+
+    // Nonce uniqueness across sequence
+    const auto nonce0 = nstu::control::construct_aead_nonce(keys->client_to_server_iv, 0);
+    const auto nonce1 = nstu::control::construct_aead_nonce(keys->client_to_server_iv, 1);
+    assert(nonce0 != nonce1);
+
+    const std::vector<std::byte> payload{
+        std::byte{'s'}, std::byte{'e'}, std::byte{'c'}, std::byte{'r'},
+        std::byte{'e'}, std::byte{'t'}, std::byte{'_'}, std::byte{'d'},
+        std::byte{'a'}, std::byte{'t'}, std::byte{'a'}};
+    nstu::protocol::CommandEnvelope envelope{
+        .version = nstu::protocol::kCommandVersion,
+        .type = nstu::protocol::CommandType::chat,
+        .payload_bytes = static_cast<std::uint32_t>(payload.size()),
+        .request_id = 987654321,
+    };
+
+    const auto wire = nstu::control::encode_authenticated_command_aead(
+        keys->client_to_server_key, keys->client_to_server_iv, envelope, 42, payload);
+    assert(!wire.empty());
+
+    // Verify wire does not expose plaintext payload
+    nstu::protocol::TcpFrameParser parser;
+    std::vector<nstu::protocol::TcpFrame> frames;
+    assert(parser.feed(wire, frames));
+    assert(frames.size() == 1);
+    const auto& wire_payload = frames[0].payload;
+    assert(wire_payload.size() == 24 + payload.size());
+    const auto ciphertext = std::span<const std::byte>(wire_payload).subspan(24);
+    assert(!std::equal(ciphertext.begin(), ciphertext.end(), payload.begin(), payload.end()));
+
+    // Successful decode
+    const auto decoded = nstu::control::decode_authenticated_command_aead(
+        keys->client_to_server_key, keys->client_to_server_iv, frames[0], &error);
+    assert(decoded.has_value());
+    assert(decoded->envelope.type == envelope.type);
+    assert(decoded->envelope.request_id == envelope.request_id);
+    assert(decoded->sequence == 42);
+    assert(decoded->payload == payload);
+
+    // 1. Tamper ciphertext: must fail
+    {
+        auto corrupt = frames[0];
+        corrupt.payload.back() ^= std::byte{1};
+        assert(!nstu::control::decode_authenticated_command_aead(
+                    keys->client_to_server_key, keys->client_to_server_iv, corrupt, &error)
+                    .has_value());
+    }
+
+    // 2. Tamper sequence number in payload (first 8 bytes): must fail
+    {
+        auto corrupt = frames[0];
+        corrupt.payload[0] ^= std::byte{1};
+        assert(!nstu::control::decode_authenticated_command_aead(
+                    keys->client_to_server_key, keys->client_to_server_iv, corrupt, &error)
+                    .has_value());
+    }
+
+    // 3. Tamper auth tag (bytes 8..23): must fail
+    {
+        auto corrupt = frames[0];
+        corrupt.payload[8] ^= std::byte{1};
+        assert(!nstu::control::decode_authenticated_command_aead(
+                    keys->client_to_server_key, keys->client_to_server_iv, corrupt, &error)
+                    .has_value());
+    }
+
+    // 4. Tamper envelope header (AAD integrity): modify CommandType
+    {
+        auto corrupt = frames[0];
+        corrupt.envelope.type = nstu::protocol::CommandType::unlock;
+        assert(!nstu::control::decode_authenticated_command_aead(
+                    keys->client_to_server_key, keys->client_to_server_iv, corrupt, &error)
+                    .has_value());
+    }
+
+    // 5. Tamper envelope request_id (AAD integrity)
+    {
+        auto corrupt = frames[0];
+        corrupt.envelope.request_id ^= 0x1234;
+        assert(!nstu::control::decode_authenticated_command_aead(
+                    keys->client_to_server_key, keys->client_to_server_iv, corrupt, &error)
+                    .has_value());
+    }
+
+    // 6. Wrong key: must fail
+    {
+        auto wrong_key = keys->client_to_server_key;
+        wrong_key[0] ^= std::byte{1};
+        assert(!nstu::control::decode_authenticated_command_aead(
+                    wrong_key, keys->client_to_server_iv, frames[0], &error)
+                    .has_value());
+    }
+
+    // Handshake commands are prohibited in authenticated envelope
+    envelope.type = nstu::protocol::CommandType::auth_hello;
+    assert(nstu::control::encode_authenticated_command_aead(
+               keys->client_to_server_key, keys->client_to_server_iv, envelope, 43, payload)
+               .empty());
+
+    nstu::security::secure_zero(session_key);
+}
+
+void test_aead_zero_byte_payload() {
+    std::string error;
+    nstu::security::Sha256Digest session_key{};
+    session_key.fill(std::byte{0x77});
+    const auto keys = nstu::control::derive_aead_session_keys(session_key);
+    assert(keys.has_value());
+
+    nstu::protocol::CommandEnvelope envelope{
+        .version = nstu::protocol::kCommandVersion,
+        .type = nstu::protocol::CommandType::status_request,
+        .payload_bytes = 0,
+        .request_id = 112233,
+    };
+    const auto wire = nstu::control::encode_authenticated_command_aead(
+        keys->server_to_client_key, keys->server_to_client_iv, envelope, 100, {});
+    assert(!wire.empty());
+
+    nstu::protocol::TcpFrameParser parser;
+    std::vector<nstu::protocol::TcpFrame> frames;
+    assert(parser.feed(wire, frames));
+    assert(frames.size() == 1);
+    assert(frames[0].payload.size() == 24);
+
+    const auto decoded = nstu::control::decode_authenticated_command_aead(
+        keys->server_to_client_key, keys->server_to_client_iv, frames[0], &error);
+    assert(decoded.has_value());
+    assert(decoded->envelope.type == nstu::protocol::CommandType::status_request);
+    assert(decoded->payload.empty());
+    assert(decoded->sequence == 100);
+
+    frames[0].payload[10] ^= std::byte{1};
+    assert(!nstu::control::decode_authenticated_command_aead(
+                keys->server_to_client_key, keys->server_to_client_iv, frames[0], &error)
+                .has_value());
+
+    nstu::security::secure_zero(session_key);
+}
+
+void test_aead_channel_end_to_end() {
+    const auto id = client_id();
+    auto key = pre_shared_key();
+    constexpr std::uint32_t key_id = 99;
+    constexpr std::uint64_t now = 50'000;
+
+    nstu::net::TcpSocket listener;
+    std::string error;
+    assert(listener.listen(0, 8, &error));
+    const auto port = listener.local_port(&error);
+    assert(port != 0);
+
+    std::atomic_bool server_done = false;
+    std::thread server([&] {
+        std::string server_error;
+        auto socket = listener.accept(&server_error);
+        assert(socket.is_open());
+        assert(socket.set_io_timeouts(5000, 5000, &server_error));
+        nstu::security::ReplayProtector replay;
+        const nstu::control::KeyResolver resolver =
+            [&](const nstu::security::ClientId& requested_id, std::uint32_t requested_key_id)
+            -> std::optional<std::vector<std::byte>> {
+            if (requested_id != id || requested_key_id != key_id) {
+                return std::nullopt;
+            }
+            return key;
+        };
+        auto session = nstu::control::server_handshake(
+            socket, resolver, replay, now, &server_error, true);
+        assert(session.has_value());
+        assert(session->aead_enabled);
+        assert(session->role == nstu::protocol::ConnectionRole::server);
+
+        nstu::control::AuthenticatedControlChannel channel(
+            std::move(socket), std::move(*session));
+        assert(channel.is_aead());
+
+        const auto cmd = channel.receive(&server_error);
+        assert(cmd.has_value());
+        assert(cmd->envelope.type == nstu::protocol::CommandType::exam_answer_event);
+        assert(cmd->sequence == 0);
+        const std::string received_text(
+            reinterpret_cast<const char*>(cmd->payload.data()), cmd->payload.size());
+        assert(received_text == "Candidate Q1: option_B");
+
+        const std::string ack_text = "ACK-Q1-RECORDED";
+        const std::span<const std::byte> ack_bytes(
+            reinterpret_cast<const std::byte*>(ack_text.data()), ack_text.size());
+        assert(channel.send(nstu::protocol::CommandType::exam_answer_ack, 1001,
+                            ack_bytes, &server_error));
+        server_done = true;
+    });
+
+    nstu::net::TcpSocket client_socket;
+    assert(client_socket.connect("127.0.0.1", port, &error));
+    assert(client_socket.set_io_timeouts(5000, 5000, &error));
+
+    auto client_session = nstu::control::client_handshake(
+        client_socket, id, key_id, key, now, std::chrono::seconds(120), &error, true);
+    assert(client_session.has_value());
+    assert(client_session->aead_enabled);
+    assert(client_session->role == nstu::protocol::ConnectionRole::client);
+
+    nstu::control::AuthenticatedControlChannel client_channel(
+        std::move(client_socket), std::move(*client_session));
+    assert(client_channel.is_aead());
+
+    const std::string send_text = "Candidate Q1: option_B";
+    const std::span<const std::byte> send_bytes(
+        reinterpret_cast<const std::byte*>(send_text.data()), send_text.size());
+    assert(client_channel.send(nstu::protocol::CommandType::exam_answer_event, 1001,
+                               send_bytes, &error));
+
+    const auto response = client_channel.receive(&error);
+    assert(response.has_value());
+    assert(response->envelope.type == nstu::protocol::CommandType::exam_answer_ack);
+    assert(response->sequence == 0);
+    const std::string ack_received(
+        reinterpret_cast<const char*>(response->payload.data()), response->payload.size());
+    assert(ack_received == "ACK-Q1-RECORDED");
+
+    server.join();
+    assert(server_done);
+    nstu::security::secure_zero(key);
+}
+
+void test_aead_backward_compatibility() {
+    const auto id = client_id();
+    auto key = pre_shared_key();
+    constexpr std::uint32_t key_id = 99;
+    constexpr std::uint64_t now = 50'000;
+
+    // Case A: Client does NOT request AEAD, Server allows AEAD -> falls back to legacy
+    {
+        nstu::net::TcpSocket listener;
+        std::string error;
+        assert(listener.listen(0, 8, &error));
+        const auto port = listener.local_port(&error);
+
+        std::thread server([&] {
+            std::string server_error;
+            auto socket = listener.accept(&server_error);
+            assert(socket.is_open());
+            nstu::security::ReplayProtector replay;
+            const nstu::control::KeyResolver resolver =
+                [&](const nstu::security::ClientId&, std::uint32_t)
+                -> std::optional<std::vector<std::byte>> { return key; };
+            auto session = nstu::control::server_handshake(
+                socket, resolver, replay, now, &server_error, true);
+            assert(session.has_value());
+            assert(!session->aead_enabled);
+
+            nstu::control::AuthenticatedControlChannel channel(
+                std::move(socket), std::move(*session));
+            assert(!channel.is_aead());
+
+            const auto cmd = channel.receive(&server_error);
+            assert(cmd.has_value());
+            assert(cmd->envelope.type == nstu::protocol::CommandType::chat);
+        });
+
+        nstu::net::TcpSocket client_socket;
+        assert(client_socket.connect("127.0.0.1", port, &error));
+        auto client_session = nstu::control::client_handshake(
+            client_socket, id, key_id, key, now, std::chrono::seconds(120), &error, false);
+        assert(client_session.has_value());
+        assert(!client_session->aead_enabled);
+
+        nstu::control::AuthenticatedControlChannel client_channel(
+            std::move(client_socket), std::move(*client_session));
+        assert(!client_channel.is_aead());
+
+        const std::array<std::byte, 4> payload{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+        assert(client_channel.send(nstu::protocol::CommandType::chat, 201, payload, &error));
+        server.join();
+    }
+
+    // Case B: Client requests AEAD, Server disallows AEAD -> falls back to legacy
+    {
+        nstu::net::TcpSocket listener;
+        std::string error;
+        assert(listener.listen(0, 8, &error));
+        const auto port = listener.local_port(&error);
+
+        std::thread server([&] {
+            std::string server_error;
+            auto socket = listener.accept(&server_error);
+            assert(socket.is_open());
+            nstu::security::ReplayProtector replay;
+            const nstu::control::KeyResolver resolver =
+                [&](const nstu::security::ClientId&, std::uint32_t)
+                -> std::optional<std::vector<std::byte>> { return key; };
+            auto session = nstu::control::server_handshake(
+                socket, resolver, replay, now, &server_error, false);
+            assert(session.has_value());
+            assert(!session->aead_enabled);
+
+            nstu::control::AuthenticatedControlChannel channel(
+                std::move(socket), std::move(*session));
+            assert(!channel.is_aead());
+
+            const auto cmd = channel.receive(&server_error);
+            assert(cmd.has_value());
+            assert(cmd->envelope.type == nstu::protocol::CommandType::chat);
+        });
+
+        nstu::net::TcpSocket client_socket;
+        assert(client_socket.connect("127.0.0.1", port, &error));
+        auto client_session = nstu::control::client_handshake(
+            client_socket, id, key_id, key, now, std::chrono::seconds(120), &error, true);
+        assert(client_session.has_value());
+        assert(!client_session->aead_enabled);
+
+        nstu::control::AuthenticatedControlChannel client_channel(
+            std::move(client_socket), std::move(*client_session));
+        assert(!client_channel.is_aead());
+
+        const std::array<std::byte, 4> payload{std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8}};
+        assert(client_channel.send(nstu::protocol::CommandType::chat, 202, payload, &error));
+        server.join();
+    }
+    nstu::security::secure_zero(key);
+}
+
 } // namespace
 
 int main() {
@@ -579,6 +914,10 @@ int main() {
     test_scripted_deadline_success_and_failures();
     test_deadline_wait_duration_bounds();
     test_deadline_then_legacy_channel_commands();
+    test_aead_roundtrip_and_tamper();
+    test_aead_zero_byte_payload();
+    test_aead_channel_end_to_end();
+    test_aead_backward_compatibility();
     const auto id = client_id();
     auto key = pre_shared_key();
     constexpr std::uint32_t key_id = 42;

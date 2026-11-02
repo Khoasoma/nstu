@@ -177,6 +177,7 @@ public:
     [[nodiscard]] std::vector<std::uint64_t> ready_exam_clients() const;
     [[nodiscard]] std::vector<ExamClientState> exam_client_states() const;
     [[nodiscard]] bool exam_active(std::uint64_t client_id) const;
+    [[nodiscard]] bool is_client_aead(std::uint64_t client_id) const;
     void record_remote_session_audit(
         std::uint64_t client_id, std::string_view action,
         std::string_view result, std::string_view detail = {});

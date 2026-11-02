@@ -343,6 +343,10 @@ public:
         ~ConnectionState() {
             security::secure_zero(pre_shared_key);
             security::secure_zero(session_key);
+            security::secure_zero(send_key);
+            security::secure_zero(receive_key);
+            security::secure_zero(send_iv_base);
+            security::secure_zero(receive_iv_base);
         }
 
         net::ConnectionId connection_id = 0;
@@ -355,6 +359,11 @@ public:
         security::AuthChallenge challenge;
         std::vector<std::byte> pre_shared_key;
         security::Sha256Digest session_key{};
+        bool aead_enabled = false;
+        security::Sha256Digest send_key{};
+        std::array<std::byte, control::kAeadNonceBytes> send_iv_base{};
+        security::Sha256Digest receive_key{};
+        std::array<std::byte, control::kAeadNonceBytes> receive_iv_base{};
         security::ControlSequenceGuard receive_sequence;
         std::uint64_t send_sequence = 0;
         std::uint64_t handshake_request_id = 0;
@@ -985,6 +994,15 @@ public:
         return active_exam_contexts_.find(registry_id) != active_exam_contexts_.end();
     }
 
+    bool is_client_aead(std::uint64_t client_id) const {
+        const auto state = state_for_client(client_id);
+        if (!state) {
+            return false;
+        }
+        std::scoped_lock lock(state->mutex);
+        return state->aead_enabled;
+    }
+
     void record_remote_session_audit(
         std::uint64_t client_id, std::string_view action,
         std::string_view result, std::string_view detail) {
@@ -1355,8 +1373,14 @@ private:
             .payload_bytes = static_cast<std::uint32_t>(payload.size()),
             .request_id = request_id,
         };
-        const auto wire = control::encode_authenticated_command(
-            state.session_key, envelope, state.send_sequence, payload);
+        std::vector<std::byte> wire;
+        if (state.aead_enabled) {
+            wire = control::encode_authenticated_command_aead(
+                state.send_key, state.send_iv_base, envelope, state.send_sequence, payload);
+        } else {
+            wire = control::encode_authenticated_command(
+                state.session_key, envelope, state.send_sequence, payload);
+        }
         if (wire.empty() ||
             !dispatcher_.send(state.connection_id, wire, error)) {
             return false;
@@ -1862,6 +1886,10 @@ private:
         }
         protocol::ConnectionPreamble server_preamble;
         server_preamble.role = protocol::ConnectionRole::server;
+        if ((state.preamble.flags & protocol::kPreambleFlagAead) != 0) {
+            server_preamble.flags |= protocol::kPreambleFlagAead;
+            state.aead_enabled = true;
+        }
         auto wire = protocol::encode_connection_preamble(server_preamble);
         const auto challenge = plain_frame(
             protocol::CommandType::auth_challenge, frame.envelope.request_id,
@@ -1920,6 +1948,17 @@ private:
         }
         state.session_key = *session_key;
         security::secure_zero(*session_key);
+        if (state.aead_enabled) {
+            const auto keys = control::derive_aead_session_keys(state.session_key);
+            if (!keys) {
+                fail_handshake(state, "AEAD session key derivation failed");
+                return false;
+            }
+            state.send_key = keys->server_to_client_key;
+            state.send_iv_base = keys->server_to_client_iv;
+            state.receive_key = keys->client_to_server_key;
+            state.receive_iv_base = keys->client_to_server_iv;
+        }
         state.receive_sequence.reset(0);
         state.send_sequence = 0;
         const auto registry_id = registry_id_for(state.hello.client_id);
@@ -1977,8 +2016,14 @@ private:
     bool process_authenticated(ConnectionState& state,
                                const protocol::TcpFrame& frame) {
         std::string decode_error;
-        const auto command = control::decode_authenticated_command(
-            state.session_key, frame, &decode_error);
+        std::optional<control::AuthenticatedCommand> command;
+        if (state.aead_enabled) {
+            command = control::decode_authenticated_command_aead(
+                state.receive_key, state.receive_iv_base, frame, &decode_error);
+        } else {
+            command = control::decode_authenticated_command(
+                state.session_key, frame, &decode_error);
+        }
         if (!command || !state.receive_sequence.accept(command->sequence)) {
             dispatcher_.disconnect(state.connection_id);
             return false;
@@ -2713,6 +2758,10 @@ std::vector<ExamClientState> ServerControlPlane::exam_client_states() const {
 
 bool ServerControlPlane::exam_active(std::uint64_t client_id) const {
     return impl_->exam_active(client_id);
+}
+
+bool ServerControlPlane::is_client_aead(std::uint64_t client_id) const {
+    return impl_->is_client_aead(client_id);
 }
 
 void ServerControlPlane::record_remote_session_audit(
