@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 63/63 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 64/64 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -73,6 +73,15 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Agent IPC Protocol & Relay** | `AgentMessageType::help_request = 38` and `help_ack = 39` with length-validated bidirectional forwarding between student agent named pipe and server socket | **Merged to main** (`2e5155d`) |
 | **Student Hand-Raise Interaction** | High-DPI dark/amber styled "Raise Hand" / "Lower Hand" button in chat UI, notes input capture, visual notifications, and reconnect re-transmission on `server_online` | **Merged to main** (`2e5155d`) |
 | **Teacher Console Visualization & Actions** | Toolbar "Help" filter chip with live `counts.help`, grid card amber badge `[?]`, table row badge with single-click "Ack Help" action, bulk acknowledgment, and `#help-banner` in detail view | **Merged to main** (`2e5155d`) |
+
+## Integrated Daily Teaching Workflows: Website & Quick Launch Core (Roadmap P2.3 / Core)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **URL Security & Validation** | Pure `is_valid_launch_url` and `sanitize_launch_url` enforcing strict `http://` / `https://` allowlist, 2048-byte limit, host presence, and rejection of shell metacharacters, control bytes, and unencoded spaces | **Merged to main** (`c14bfcb`) |
+| **Wire Command & Codecs** | Protocol command `launch_url = 60` with length-prefixed binary codecs (`encode_launch_url` / `decode_launch_url`) in `control_messages` preventing buffer overruns or malformed payloads | **Merged to main** (`c14bfcb`) |
+| **Server Control Plane Dispatch** | `ServerControlPlane::launch_url` validating client authentication and URL safety before routing command | **Merged to main** (`c14bfcb`) |
+| **Classroom Roster Bulk Launch** | `BulkActionKind::launch_url = 4` with backward-compatible `extra_payload` parameter in `execute_bulk_action`, plus bilingual EN/VI confirmation and result status formatters | **Merged to main** (`c14bfcb`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
