@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nstu/client_registry.hpp"
+#include "nstu/exam_auth.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/iocp_dispatcher.hpp"
@@ -35,7 +36,10 @@ struct ServerControlPlaneConfig {
     // on a shared VLAN can target the right classroom by name. A display hint,
     // never a credential: an empty value falls back to the computer name at the
     // call site. Sanitized to the discovery name bound before it reaches the
-    // wire.
+    // Instructor authorization ticket verification key (32 bytes HMAC-SHA256).
+    // If configured or required, start_exam enforces valid, signed instructor tickets.
+    std::vector<std::byte> instructor_key;
+    bool require_instructor_ticket = false;
     std::string server_name;
 };
 
@@ -67,6 +71,7 @@ struct ExamLaunchRequest {
     std::string package_id;
     std::string candidate_id;
     security::Sha256Digest package_digest{};
+    std::optional<exam::auth::InstructorAuthorizationTicket> authorization_ticket;
 };
 
 struct ExamClientState {
@@ -159,9 +164,23 @@ public:
     [[nodiscard]] bool launch_exam(
         std::uint64_t client_id, const ExamLaunchRequest& request,
         std::string* error = nullptr);
+    [[nodiscard]] bool launch_exam(
+        std::uint64_t client_id, const ExamLaunchRequest& request,
+        const exam::auth::InstructorAuthorizationTicket& ticket,
+        std::string* error = nullptr);
     [[nodiscard]] bool start_exam(
         std::uint64_t client_id, const exam::ExamStartRequest& request,
         std::string* error = nullptr);
+    [[nodiscard]] bool start_exam(
+        std::uint64_t client_id, const exam::ExamStartRequest& request,
+        const exam::auth::InstructorAuthorizationTicket& ticket,
+        std::string* error = nullptr);
+    void set_instructor_key(std::vector<std::byte> key);
+    [[nodiscard]] bool has_instructor_key() const;
+    void set_require_instructor_ticket(bool required);
+    [[nodiscard]] bool requires_instructor_ticket() const;
+    [[nodiscard]] bool is_exam_instructor_authorized(std::uint64_t client_id) const;
+    [[nodiscard]] std::string exam_instructor_id(std::uint64_t client_id) const;
     [[nodiscard]] bool stop_exam(std::uint64_t client_id,
                                  std::string* error = nullptr);
     // Synchronized-start barrier. Clients report readiness over the control

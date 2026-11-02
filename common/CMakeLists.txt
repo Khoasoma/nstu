@@ -5,6 +5,7 @@ add_library(nstu_common STATIC
     src/deployment.cpp
     src/discovery.cpp
     src/exam_control.cpp
+    src/exam_auth.cpp
     src/exam_sync.cpp
     src/exam_telemetry.cpp
     src/exam_telemetry_outbox.cpp

@@ -1072,6 +1072,305 @@ void test_async_telemetry_persistence_and_ack() {
     }
 }
 
+void test_instructor_ticket_codec_and_crypto() {
+    std::vector<std::byte> instructor_key(32);
+    for (std::size_t i = 0; i < instructor_key.size(); ++i) {
+        instructor_key[i] = static_cast<std::byte>(0x55u + i);
+    }
+
+    nstu::exam::auth::InstructorAuthorizationTicket ticket;
+    ticket.instructor_id = "instructor-42@university.edu";
+    ticket.package_id = "finals-2026-cs";
+    for (std::size_t i = 0; i < ticket.package_digest.size(); ++i) {
+        ticket.package_digest[i] = static_cast<std::byte>(0x80u + i);
+    }
+    for (std::size_t i = 0; i < ticket.session_id.size(); ++i) {
+        ticket.session_id[i] = static_cast<std::byte>(0x30u + i);
+    }
+    ticket.candidate_id = "student-101";
+    ticket.valid_from_ms = 1'000'000ULL;
+    ticket.valid_until_ms = 2'000'000ULL;
+
+    // Sign ticket
+    assert(nstu::exam::auth::sign_ticket(instructor_key, ticket));
+    assert(nstu::exam::auth::verify_ticket_signature(instructor_key, ticket));
+
+    // Wrong key signature verification must fail
+    std::vector<std::byte> wrong_key = instructor_key;
+    wrong_key[0] ^= std::byte{0xFF};
+    assert(!nstu::exam::auth::verify_ticket_signature(wrong_key, ticket));
+
+    // Tampered instructor_id must fail signature verification
+    auto tampered = ticket;
+    tampered.instructor_id = "hacker@evil.com";
+    assert(!nstu::exam::auth::verify_ticket_signature(instructor_key, tampered));
+
+    // Tampered validity bounds must fail signature verification
+    tampered = ticket;
+    tampered.valid_until_ms += 1000;
+    assert(!nstu::exam::auth::verify_ticket_signature(instructor_key, tampered));
+
+    // Tampered package_digest must fail signature verification
+    tampered = ticket;
+    tampered.package_digest[0] ^= std::byte{0x01};
+    assert(!nstu::exam::auth::verify_ticket_signature(instructor_key, tampered));
+
+    // Valid time window checks
+    assert(nstu::exam::auth::validate_ticket(ticket, 1'500'000ULL));
+    assert(!nstu::exam::auth::validate_ticket(ticket, 500'000ULL));
+    assert(!nstu::exam::auth::validate_ticket(ticket, 2'500'000ULL));
+
+    // Encode and decode roundtrip
+    const auto wire = nstu::exam::auth::encode_instructor_ticket(ticket);
+    assert(!wire.empty());
+    const auto decoded = nstu::exam::auth::decode_instructor_ticket(wire);
+    assert(decoded.has_value());
+    assert(decoded->instructor_id == ticket.instructor_id);
+    assert(decoded->package_id == ticket.package_id);
+    assert(decoded->package_digest == ticket.package_digest);
+    assert(decoded->session_id == ticket.session_id);
+    assert(decoded->candidate_id == ticket.candidate_id);
+    assert(decoded->valid_from_ms == ticket.valid_from_ms);
+    assert(decoded->valid_until_ms == ticket.valid_until_ms);
+    assert(decoded->instructor_signature == ticket.instructor_signature);
+    assert(nstu::exam::auth::verify_ticket_signature(instructor_key, *decoded));
+
+    // Truncated wire must fail decode
+    assert(!nstu::exam::auth::decode_instructor_ticket(std::span(wire.data(), wire.size() - 5)));
+}
+
+void test_instructor_ticket_exam_binding() {
+    std::vector<std::byte> instructor_key(32, std::byte{0x77});
+    const auto id = client_id();
+    auto start_req = make_start(id);
+
+    nstu::exam::auth::InstructorAuthorizationTicket ticket;
+    ticket.instructor_id = "prof-smith";
+    ticket.package_id = start_req.package_id;
+    ticket.package_digest = start_req.package_digest;
+    ticket.session_id = start_req.session_id;
+    ticket.candidate_id = start_req.candidate_id;
+    ticket.valid_from_ms = 1000;
+    ticket.valid_until_ms = 5000;
+    assert(nstu::exam::auth::sign_ticket(instructor_key, ticket));
+
+    // Perfect match within validity window
+    auto res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, ticket, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::valid);
+
+    // Mismatched package_id
+    auto bad_pkg = ticket;
+    bad_pkg.package_id = "different-pkg";
+    assert(nstu::exam::auth::sign_ticket(instructor_key, bad_pkg));
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, bad_pkg, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::package_mismatch);
+
+    // Mismatched package_digest
+    auto bad_digest = ticket;
+    bad_digest.package_digest[0] ^= std::byte{0x01};
+    assert(nstu::exam::auth::sign_ticket(instructor_key, bad_digest));
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, bad_digest, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::package_mismatch);
+
+    // Mismatched session_id
+    auto bad_session = ticket;
+    bad_session.session_id[0] ^= std::byte{0x01};
+    assert(nstu::exam::auth::sign_ticket(instructor_key, bad_session));
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, bad_session, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::session_mismatch);
+
+    // Mismatched candidate_id (when candidate is specified in ticket)
+    auto bad_candidate = ticket;
+    bad_candidate.candidate_id = "wrong-student";
+    assert(nstu::exam::auth::sign_ticket(instructor_key, bad_candidate));
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, bad_candidate, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::candidate_mismatch);
+
+    // Wildcard candidate (empty candidate_id in ticket matches any candidate)
+    auto wildcard_candidate = ticket;
+    wildcard_candidate.candidate_id.clear();
+    assert(nstu::exam::auth::sign_ticket(instructor_key, wildcard_candidate));
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, wildcard_candidate, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::valid);
+
+    // Expired ticket
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, ticket, start_req, 6000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::expired);
+
+    // Not yet valid ticket
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, ticket, start_req, 500);
+    assert(res == nstu::exam::auth::TicketVerificationResult::not_yet_valid);
+
+    // Bad signature
+    auto bad_sig = ticket;
+    bad_sig.instructor_signature[0] ^= std::byte{0x55};
+    res = nstu::exam::auth::verify_ticket_for_exam(
+        instructor_key, bad_sig, start_req, 3000);
+    assert(res == nstu::exam::auth::TicketVerificationResult::signature_mismatch);
+}
+
+void test_control_plane_instructor_ticket_admission() {
+    nstu::server::ClientRegistry registry;
+    nstu::security::KeyStore key_store;
+    nstu::server::ServerControlPlane control_plane(registry, key_store);
+
+    std::vector<std::byte> instructor_key(32, std::byte{0x99});
+
+    nstu::server::ServerControlPlaneConfig config;
+    config.port = 0;
+    config.keyring_path = L":memory:";
+    config.keyring_entropy = {std::byte{0x01}};
+    config.instructor_key = instructor_key;
+    config.require_instructor_ticket = true;
+
+    const auto path = journal_path();
+    config.exam_journal_path = path;
+
+    std::string error;
+    assert(control_plane.start(config, &error));
+    assert(control_plane.has_instructor_key());
+    assert(control_plane.requires_instructor_ticket());
+
+    const auto id = client_id();
+    const auto key = client_key();
+    constexpr std::uint32_t key_id = 9;
+    assert(key_store.enroll(id, key_id, key, &error));
+
+    auto channel = connect_channel(control_plane, id, key_id, key, &error);
+    assert(channel.has_value());
+
+    assert(wait_until([&] {
+        return control_plane.authenticated_client_count() == 1;
+    }));
+
+    const auto snapshot = registry.snapshot();
+    assert(snapshot.size() == 1);
+    const auto registry_id = snapshot.front().id;
+
+    // Prove UWF protection
+    nstu::control::UwfFleetStatusReport uwf_verified;
+    uwf_verified.phase = nstu::control::UwfFleetPhase::verified_protected;
+    uwf_verified.probe.probe_succeeded = true;
+    uwf_verified.probe.filter_current_enabled = true;
+    uwf_verified.probe.system_volume_current_protected = true;
+    for (std::size_t i = 0; i < uwf_verified.boot_id.size(); ++i) {
+        uwf_verified.boot_id[i] = static_cast<std::byte>(0xAAu + i);
+    }
+    uwf_verified.detail = "UWF verified";
+    assert(registry.set_uwf_fleet_status(registry_id, uwf_verified));
+
+    const auto start = make_start(id);
+
+    // 1. Calling start_exam WITHOUT ticket must fail because require_instructor_ticket=true
+    assert(!control_plane.start_exam(registry_id, start, &error));
+    assert(error.find("ticket required") != std::string::npos);
+
+    // 2. Calling start_exam with an EXPIRED ticket must fail
+    nstu::exam::auth::InstructorAuthorizationTicket expired_ticket;
+    expired_ticket.instructor_id = "prof-test";
+    expired_ticket.package_id = start.package_id;
+    expired_ticket.package_digest = start.package_digest;
+    expired_ticket.session_id = start.session_id;
+    expired_ticket.candidate_id = start.candidate_id;
+    expired_ticket.valid_from_ms = 1000;
+    expired_ticket.valid_until_ms = 2000;
+    assert(nstu::exam::auth::sign_ticket(instructor_key, expired_ticket));
+    assert(!control_plane.start_exam(registry_id, start, expired_ticket, &error));
+    assert(error.find("expired") != std::string::npos);
+
+    // 3. Calling start_exam with a TAMPERED ticket must fail
+    const auto now_ms = nstu::server::telemetry_clock_now().wall_ms;
+    nstu::exam::auth::InstructorAuthorizationTicket valid_ticket;
+    valid_ticket.instructor_id = "prof-test";
+    valid_ticket.package_id = start.package_id;
+    valid_ticket.package_digest = start.package_digest;
+    valid_ticket.session_id = start.session_id;
+    valid_ticket.candidate_id = start.candidate_id;
+    valid_ticket.valid_from_ms = (now_ms > 60000 ? now_ms - 60000 : 0);
+    valid_ticket.valid_until_ms = now_ms + 3600000;
+    assert(nstu::exam::auth::sign_ticket(instructor_key, valid_ticket));
+
+    auto tampered_ticket = valid_ticket;
+    tampered_ticket.instructor_signature[0] ^= std::byte{0xFF};
+    assert(!control_plane.start_exam(registry_id, start, tampered_ticket, &error));
+    assert(error.find("signature_mismatch") != std::string::npos);
+
+    // 4. Calling start_exam with VALID ticket must succeed!
+    assert(control_plane.start_exam(registry_id, start, valid_ticket, &error));
+    assert(control_plane.exam_active(registry_id));
+    assert(control_plane.is_exam_instructor_authorized(registry_id));
+    assert(control_plane.exam_instructor_id(registry_id) == valid_ticket.instructor_id);
+
+    const auto start_cmd = channel->receive(&error);
+    assert(start_cmd.has_value());
+    assert(start_cmd->envelope.type == nstu::protocol::CommandType::exam_start);
+    const auto enable_cmd = channel->receive(&error);
+    assert(enable_cmd.has_value());
+    assert(enable_cmd->envelope.type == nstu::protocol::CommandType::exam_telemetry_enable);
+
+    // Stop exam
+    assert(control_plane.stop_exam(registry_id, &error));
+    const auto stop_cmd = channel->receive(&error);
+    assert(stop_cmd.has_value());
+    assert(stop_cmd->envelope.type == nstu::protocol::CommandType::exam_stop);
+    assert(!control_plane.exam_active(registry_id));
+
+    // 5. Test launch_exam with ticket
+    nstu::server::ExamLaunchRequest launch;
+    launch.package_root = "C:/ProgramData/NSTU/exams/packages/auth-test/";
+    launch.web_root = launch.package_root + "exam/web";
+    launch.user_data_root = "C:/ProgramData/NSTU/exam-user-data/launch-test";
+    launch.package_id = "auth-test-package";
+    launch.candidate_id = "candidate-launch-01";
+    launch.package_digest = start.package_digest;
+
+    nstu::exam::auth::InstructorAuthorizationTicket launch_ticket;
+    launch_ticket.instructor_id = "prof-launch";
+    launch_ticket.package_id = launch.package_id;
+    launch_ticket.package_digest = launch.package_digest;
+    for (std::size_t i = 0; i < launch_ticket.session_id.size(); ++i) {
+        launch_ticket.session_id[i] = static_cast<std::byte>(0x7B + i);
+    }
+    launch_ticket.candidate_id = launch.candidate_id;
+    launch_ticket.valid_from_ms = (now_ms > 60000 ? now_ms - 60000 : 0);
+    launch_ticket.valid_until_ms = now_ms + 3600000;
+    assert(nstu::exam::auth::sign_ticket(instructor_key, launch_ticket));
+
+    assert(control_plane.launch_exam(registry_id, launch, launch_ticket, &error));
+    assert(control_plane.exam_active(registry_id));
+    assert(control_plane.is_exam_instructor_authorized(registry_id));
+    assert(control_plane.exam_instructor_id(registry_id) == "prof-launch");
+
+    const auto launch_cmd = channel->receive(&error);
+    assert(launch_cmd.has_value());
+    assert(launch_cmd->envelope.type == nstu::protocol::CommandType::exam_start);
+    const auto launch_enable = channel->receive(&error);
+    assert(launch_enable.has_value());
+    assert(launch_enable->envelope.type == nstu::protocol::CommandType::exam_telemetry_enable);
+
+    assert(control_plane.stop_exam(registry_id, &error));
+    const auto launch_stop = channel->receive(&error);
+    assert(launch_stop.has_value());
+    assert(launch_stop->envelope.type == nstu::protocol::CommandType::exam_stop);
+
+    channel->close();
+    control_plane.stop();
+    nstu::security::secure_zero(instructor_key);
+    std::error_code cleanup_error;
+    std::filesystem::remove(path, cleanup_error);
+    auto lock_path = path;
+    lock_path += L".lock";
+    std::filesystem::remove(lock_path, cleanup_error);
+}
+
 } // namespace
 
 
@@ -1588,5 +1887,8 @@ int main() {
     test_authenticated_ownership_regressions();
     test_exam_admission_regressions();
     test_async_telemetry_persistence_and_ack();
+    test_instructor_ticket_codec_and_crypto();
+    test_instructor_ticket_exam_binding();
+    test_control_plane_instructor_ticket_admission();
     return 0;
 }

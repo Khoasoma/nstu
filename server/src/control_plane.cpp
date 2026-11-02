@@ -5,6 +5,7 @@
 #include "nstu/control_messages.hpp"
 #include "nstu/discovery.hpp"
 #include "nstu/enrollment.hpp"
+#include "nstu/exam_auth.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
 #include "nstu/exam_telemetry.hpp"
@@ -55,6 +56,12 @@ inline constexpr std::chrono::seconds kPairingApprovalWindow{180};
 void set_error(std::string* error, const char* message) {
     if (error != nullptr) {
         *error = message;
+    }
+}
+
+void set_error(std::string* error, std::string message) {
+    if (error != nullptr) {
+        *error = std::move(message);
     }
 }
 
@@ -407,6 +414,8 @@ public:
         exam::SessionId session_id{};
         std::string package_id;
         std::string candidate_id;
+        std::string instructor_id;
+        bool instructor_authorized = false;
         // Set when the client reports exam_ready (package staged and verified,
         // kiosk locked, loading screen up). The cohort coordinator reads this
         // to decide when to release the synchronized start. `begun` makes the
@@ -721,6 +730,13 @@ public:
     bool launch_exam(std::uint64_t client_id,
                      const ExamLaunchRequest& launch,
                      std::string* error) {
+        return launch_exam(client_id, launch, launch.authorization_ticket, error);
+    }
+
+    bool launch_exam(std::uint64_t client_id,
+                     const ExamLaunchRequest& launch,
+                     const std::optional<exam::auth::InstructorAuthorizationTicket>& ticket,
+                     std::string* error) {
         const auto state = state_for_client(client_id);
         if (!state) {
             set_error(error, "client is not authenticated");
@@ -742,15 +758,26 @@ public:
             }
             request.client_id = state->hello.client_id;
         }
-        if (!security::generate_random(request.session_id)) {
+        if (ticket.has_value() &&
+            std::any_of(ticket->session_id.begin(), ticket->session_id.end(),
+                        [](std::byte b) { return b != std::byte{0}; })) {
+            request.session_id = ticket->session_id;
+        } else if (!security::generate_random(request.session_id)) {
             set_error(error, "could not generate exam session identity");
             return false;
         }
-        return start_exam(client_id, request, error);
+        return start_exam(client_id, request, ticket, error);
     }
 
     bool start_exam(std::uint64_t client_id,
                     const exam::ExamStartRequest& request,
+                    std::string* error) {
+        return start_exam(client_id, request, std::nullopt, error);
+    }
+
+    bool start_exam(std::uint64_t client_id,
+                    const exam::ExamStartRequest& request,
+                    const std::optional<exam::auth::InstructorAuthorizationTicket>& ticket,
                     std::string* error) {
         if (!exam::validate_exam_start_request(request)) {
             set_error(error, "invalid exam start request");
@@ -761,6 +788,63 @@ public:
             set_error(error, "client is not authenticated");
             return false;
         }
+
+        std::string authorized_instructor;
+        bool instructor_authorized = false;
+        const auto created = telemetry_clock_now();
+
+        std::vector<std::byte> instructor_key;
+        bool require_ticket = false;
+        {
+            std::scoped_lock lock(states_mutex_);
+            instructor_key = config_.instructor_key;
+            require_ticket = config_.require_instructor_ticket || !instructor_key.empty();
+        }
+
+        if (ticket.has_value()) {
+            const auto result = exam::auth::verify_ticket_for_exam(
+                instructor_key, *ticket, request, created.wall_ms);
+            if (result != exam::auth::TicketVerificationResult::valid) {
+                audit::Event rejected;
+                rejected.category = audit::Category::exam;
+                rejected.severity = audit::Severity::warning;
+                rejected.component = "exam_auth";
+                rejected.action = "ticket_verify_failed";
+                rejected.result = exam::auth::ticket_verification_result_to_string(result);
+                rejected.client_id = client_id;
+                rejected.detail = std::string("instructor ticket rejected: ") +
+                                  exam::auth::ticket_verification_result_to_string(result);
+                audit_emit(rejected);
+                set_error(error, std::string("instructor authorization failed: ") +
+                                 exam::auth::ticket_verification_result_to_string(result));
+                return false;
+            }
+            audit::Event verified;
+            verified.category = audit::Category::exam;
+            verified.severity = audit::Severity::info;
+            verified.component = "exam_auth";
+            verified.action = "ticket_verified";
+            verified.result = "authorized";
+            verified.client_id = client_id;
+            verified.detail = std::string("instructor authorization ticket verified for instructor: ") +
+                              ticket->instructor_id;
+            audit_emit(verified);
+            authorized_instructor = ticket->instructor_id;
+            instructor_authorized = true;
+        } else if (require_ticket) {
+            audit::Event missing;
+            missing.category = audit::Category::exam;
+            missing.severity = audit::Severity::warning;
+            missing.component = "exam_auth";
+            missing.action = "ticket_missing";
+            missing.result = "unauthorized";
+            missing.client_id = client_id;
+            missing.detail = "exam blocked: instructor authorization ticket required";
+            audit_emit(missing);
+            set_error(error, "exam blocked: instructor authorization ticket required");
+            return false;
+        }
+
         const auto payload = exam::encode_exam_start_request(request);
         if (payload.empty()) {
             set_error(error, "exam start request could not be encoded");
@@ -772,6 +856,8 @@ public:
         context.session_id = request.session_id;
         context.package_id = request.package_id;
         context.candidate_id = request.candidate_id;
+        context.instructor_id = std::move(authorized_instructor);
+        context.instructor_authorized = instructor_authorized;
 
         // Existing state/context serialization prevents inbound answer traffic
         // from observing a half-started session. Take both locks before the
@@ -783,7 +869,6 @@ public:
 #endif
         std::scoped_lock state_lock(state->mutex);
         std::scoped_lock context_lock(exam_contexts_mutex_);
-        const auto created = telemetry_clock_now();
         context.telemetry = {created.wall_ms, created.steady + std::chrono::hours(25), false};
         const auto registry_id = state->registry_id.load();
         bool protection_proven = false;
@@ -1001,6 +1086,41 @@ public:
         }
         std::scoped_lock lock(state->mutex);
         return state->aead_enabled;
+    }
+
+    void set_instructor_key(std::vector<std::byte> key) {
+        std::scoped_lock lock(states_mutex_);
+        config_.instructor_key = std::move(key);
+    }
+
+    bool has_instructor_key() const {
+        std::scoped_lock lock(states_mutex_);
+        return !config_.instructor_key.empty();
+    }
+
+    void set_require_instructor_ticket(bool require) {
+        std::scoped_lock lock(states_mutex_);
+        config_.require_instructor_ticket = require;
+    }
+
+    bool requires_instructor_ticket() const {
+        std::scoped_lock lock(states_mutex_);
+        return config_.require_instructor_ticket;
+    }
+
+    bool is_exam_instructor_authorized(std::uint64_t client_id) const {
+        std::scoped_lock lock(exam_contexts_mutex_);
+        const auto it = active_exam_contexts_.find(client_id);
+        return it != active_exam_contexts_.end() && it->second.instructor_authorized;
+    }
+
+    std::string exam_instructor_id(std::uint64_t client_id) const {
+        std::scoped_lock lock(exam_contexts_mutex_);
+        const auto it = active_exam_contexts_.find(client_id);
+        if (it != active_exam_contexts_.end()) {
+            return it->second.instructor_id;
+        }
+        return {};
     }
 
     void record_remote_session_audit(
@@ -2731,10 +2851,48 @@ bool ServerControlPlane::launch_exam(
     return impl_->launch_exam(client_id, request, error);
 }
 
+bool ServerControlPlane::launch_exam(
+    std::uint64_t client_id, const ExamLaunchRequest& request,
+    const exam::auth::InstructorAuthorizationTicket& ticket,
+    std::string* error) {
+    return impl_->launch_exam(client_id, request, ticket, error);
+}
+
 bool ServerControlPlane::start_exam(
     std::uint64_t client_id, const exam::ExamStartRequest& request,
     std::string* error) {
     return impl_->start_exam(client_id, request, error);
+}
+
+bool ServerControlPlane::start_exam(
+    std::uint64_t client_id, const exam::ExamStartRequest& request,
+    const exam::auth::InstructorAuthorizationTicket& ticket,
+    std::string* error) {
+    return impl_->start_exam(client_id, request, ticket, error);
+}
+
+void ServerControlPlane::set_instructor_key(std::vector<std::byte> key) {
+    impl_->set_instructor_key(std::move(key));
+}
+
+bool ServerControlPlane::has_instructor_key() const {
+    return impl_->has_instructor_key();
+}
+
+void ServerControlPlane::set_require_instructor_ticket(bool required) {
+    impl_->set_require_instructor_ticket(required);
+}
+
+bool ServerControlPlane::requires_instructor_ticket() const {
+    return impl_->requires_instructor_ticket();
+}
+
+bool ServerControlPlane::is_exam_instructor_authorized(std::uint64_t client_id) const {
+    return impl_->is_exam_instructor_authorized(client_id);
+}
+
+std::string ServerControlPlane::exam_instructor_id(std::uint64_t client_id) const {
+    return impl_->exam_instructor_id(client_id);
 }
 
 bool ServerControlPlane::stop_exam(std::uint64_t client_id,
