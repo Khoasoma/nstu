@@ -13,6 +13,7 @@
 #include "nstu/exam_grader.hpp"
 #include "nstu/sealed_export.hpp"
 #include "nstu/classroom_roster.hpp"
+#include "nstu/operator_role.hpp"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -399,11 +400,16 @@ enum class DashboardView : int {
     room_screens,
     selected_client,
     exam,
+    fleet_health,
 };
 
 using nstu::server::ClassDisplayMode;
 using nstu::server::RoomFilter;
 using nstu::server::BulkActionKind;
+using nstu::server::OperatorRole;
+using nstu::server::OperatorAction;
+using nstu::server::is_action_permitted;
+using nstu::server::role_label;
 
 enum class IconKind : int {
     grid,
@@ -436,6 +442,7 @@ Language g_language = Language::english;
 
 struct DashboardState {
     DashboardView view = DashboardView::room_screens;
+    OperatorRole current_role = OperatorRole::teacher;
     ClassDisplayMode display_mode = ClassDisplayMode::grid;
     RoomFilter room_filter = RoomFilter::all;
     std::unordered_set<std::uint64_t> checked_client_ids;
@@ -2121,6 +2128,48 @@ void draw_telemetry_card(const char* label, const char* value, float width) {
     ImGui::PopID();
 }
 
+void draw_uwf_confirmation_popup(
+    DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    if (state.uwf_confirmation_open &&
+        ImGui::BeginPopupModal("uwf-confirmation", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextWrapped("%s", tr(
+            state,
+            "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing. A successful setup shows a 60-second countdown and restarts the client automatically.",
+            "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục. Khi thiết lập thành công, máy client sẽ hiển thị đếm ngược 60 giây rồi tự khởi động lại."));
+        if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
+                             "Đã xác minh điểm khôi phục; bật"))) {
+            if (!is_action_permitted(state.current_role, OperatorAction::configure_uwf)) {
+                state.control_status = tr(state,
+                    "Reboot-to-restore configuration requires Technician or Developer role.",
+                    "Cấu hình khôi phục sau reboot yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển.");
+            } else {
+                std::string error;
+                // Fleet path: arm UWF and request the visible client restart, so a
+                // fresh boot-bound probe can prove current-session protection.
+                const bool sent = control_plane.configure_uwf_fleet(
+                    state.uwf_confirmation_client_id, true, true, &error);
+                state.control_status = sent
+                    ? tr(state, "UWF readiness request sent.",
+                         "Đã gửi yêu cầu kiểm tra và bật UWF.")
+                    : error;
+                if (!sent) {
+                    record_operation_failure("UWF", "UWF command failed", error);
+                }
+            }
+            state.uwf_confirmation_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(tr(state, "Cancel", "Hủy"))) {
+            state.uwf_confirmation_open = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void draw_selected_client(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
@@ -2189,7 +2238,8 @@ void draw_selected_client(
     const bool uwf_unsupported =
         selected_client->uwf.reported &&
         selected_client->uwf.phase == nstu::control::UwfFleetPhase::unsupported;
-    ImGui::BeginDisabled(uwf_unsupported);
+    const bool permitted = is_action_permitted(state.current_role, OperatorAction::configure_uwf);
+    ImGui::BeginDisabled(uwf_unsupported || !permitted);
     if (ImGui::Button(tr(state, "Enable reboot-to-restore",
                          "Bật khôi phục sau reboot"))) {
         state.uwf_confirmation_client_id = selected_client->id;
@@ -2197,7 +2247,11 @@ void draw_selected_client(
         ImGui::OpenPopup("uwf-confirmation");
     }
     ImGui::EndDisabled();
-    if (uwf_unsupported &&
+    if (!permitted && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state,
+            "Reboot-to-restore configuration requires Technician or Developer role.",
+            "Cấu hình khôi phục sau reboot yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển."));
+    } else if (uwf_unsupported &&
         ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("%s", tr(state,
             "This computer does not meet reboot-to-restore requirements "
@@ -2231,37 +2285,7 @@ void draw_selected_client(
                    "chế độ thi."));
         }
     }
-    if (state.uwf_confirmation_open &&
-        ImGui::BeginPopupModal("uwf-confirmation", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextWrapped("%s", tr(
-            state,
-            "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing. A successful setup shows a 60-second countdown and restarts the client automatically.",
-            "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục. Khi thiết lập thành công, máy client sẽ hiển thị đếm ngược 60 giây rồi tự khởi động lại."));
-        if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
-                             "Đã xác minh điểm khôi phục; bật"))) {
-            std::string error;
-            // Fleet path: arm UWF and request the visible client restart, so a
-            // fresh boot-bound probe can prove current-session protection.
-            const bool sent = control_plane.configure_uwf_fleet(
-                state.uwf_confirmation_client_id, true, true, &error);
-            state.control_status = sent
-                ? tr(state, "UWF readiness request sent.",
-                     "Đã gửi yêu cầu kiểm tra và bật UWF.")
-                : error;
-            if (!sent) {
-                record_operation_failure("UWF", "UWF command failed", error);
-            }
-            state.uwf_confirmation_open = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button(tr(state, "Cancel", "Hủy"))) {
-            state.uwf_confirmation_open = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
+    draw_uwf_confirmation_popup(state, control_plane);
 
     char latency[32]{};
     char packet_loss[32]{};
@@ -2809,19 +2833,39 @@ bool draw_segment_option(const char* label, bool selected, float width) {
     return pressed;
 }
 
-void draw_preferences(DashboardState& state) {
-    const float settings_width = scaled(108.0f);
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - settings_width);
+void draw_preferences(DashboardState& state, float pos_x, float settings_width) {
+    ImGui::SameLine(pos_x);
     if (ImGui::Button(tr(state, "Settings", "Cài đặt"),
                       {settings_width, scaled(28.0f)})) {
         ImGui::OpenPopup("settings-popup");
     }
-    ImGui::SetNextWindowSize({scaled(390.0f), 0.0f}, ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize({scaled(410.0f), 0.0f}, ImGuiCond_Appearing);
     if (!ImGui::BeginPopup("settings-popup")) {
         return;
     }
     ImGui::TextUnformatted(tr(state, "Settings", "Cài đặt"));
     ImGui::Separator();
+    ImGui::TextDisabled("%s", tr(state, "Operator surface", "Giao diện vận hành"));
+    const bool is_vi = (state.language == Language::vietnamese);
+    if (draw_segment_option(role_label(OperatorRole::teacher, is_vi),
+                            state.current_role == OperatorRole::teacher, scaled(88.0f))) {
+        state.current_role = OperatorRole::teacher;
+        if (!is_action_permitted(state.current_role, OperatorAction::view_fleet_health) &&
+            state.view == DashboardView::fleet_health) {
+            state.view = DashboardView::room_screens;
+        }
+    }
+    ImGui::SameLine();
+    if (draw_segment_option(role_label(OperatorRole::technician, is_vi),
+                            state.current_role == OperatorRole::technician, scaled(100.0f))) {
+        state.current_role = OperatorRole::technician;
+    }
+    ImGui::SameLine();
+    if (draw_segment_option(role_label(OperatorRole::developer, is_vi),
+                            state.current_role == OperatorRole::developer, scaled(156.0f))) {
+        state.current_role = OperatorRole::developer;
+    }
+    ImGui::Spacing();
     ImGui::TextDisabled("%s", tr(state, "Language", "Ngôn ngữ"));
     if (draw_segment_option("EN", state.language == Language::english,
                             scaled(42.0f))) {
@@ -2911,10 +2955,18 @@ void draw_preferences(DashboardState& state) {
                     static_cast<unsigned long long>(g_telemetry_events.size()),
                     static_cast<unsigned long long>(
                         nstu::telemetry::kMaximumEvents));
+        const bool can_export = is_action_permitted(state.current_role, OperatorAction::export_telemetry_report);
+        ImGui::BeginDisabled(!can_export);
         if (ImGui::Button(tr(state, "Review report", "Xem báo cáo"),
                           {scaled(116.0f), 0.0f})) {
             state.telemetry_report_requested = true;
             ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        if (!can_export && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", tr(state,
+                "Telemetry report review requires Developer role.",
+                "Xem báo cáo đo từ xa yêu cầu vai trò Nhà phát triển."));
         }
         ImGui::SameLine();
         if (ImGui::Button(tr(state, "Clear data", "Xóa dữ liệu"),
@@ -2929,6 +2981,36 @@ void draw_preferences(DashboardState& state) {
         }
     }
     ImGui::EndPopup();
+}
+
+void draw_role_switcher(DashboardState& state, float pos_x, float width) {
+    ImGui::SameLine(pos_x);
+    const bool is_vietnamese = (state.language == Language::vietnamese);
+    char role_btn_text[128]{};
+    sprintf_s(role_btn_text, "%s: %s##role-btn",
+              tr(state, "Role", "Vai trò"),
+              role_label(state.current_role, is_vietnamese));
+    if (ImGui::Button(role_btn_text, {width, scaled(28.0f)})) {
+        ImGui::OpenPopup("role-selector-popup");
+    }
+    if (ImGui::BeginPopup("role-selector-popup")) {
+        ImGui::TextDisabled("%s", tr(state, "Operator surface", "Giao diện vận hành"));
+        ImGui::Separator();
+        auto select_role = [&](OperatorRole target_role) {
+            const bool is_selected = (state.current_role == target_role);
+            if (ImGui::Selectable(role_label(target_role, is_vietnamese), is_selected)) {
+                state.current_role = target_role;
+                if (!is_action_permitted(state.current_role, OperatorAction::view_fleet_health) &&
+                    state.view == DashboardView::fleet_health) {
+                    state.view = DashboardView::room_screens;
+                }
+            }
+        };
+        select_role(OperatorRole::teacher);
+        select_role(OperatorRole::technician);
+        select_role(OperatorRole::developer);
+        ImGui::EndPopup();
+    }
 }
 
 void set_room_lock(const std::vector<nstu::server::ClientRecord>& clients,
@@ -2972,9 +3054,8 @@ void toggle_teacher_broadcast(DashboardState& state,
                               "Đã bắt đầu phát màn hình giáo viên.");
 }
 
-void draw_diagnostics_popup(DashboardState& state) {
-    const float button_width = scaled(118.0f);
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - scaled(116.0f));
+void draw_diagnostics_popup(DashboardState& state, float pos_x, float button_width) {
+    ImGui::SameLine(pos_x);
     if (ImGui::Button(tr(state, "Diagnostics", "Chẩn đoán"),
                       {button_width, scaled(28.0f)})) {
         refresh_graphics_report();
@@ -3024,7 +3105,8 @@ void draw_diagnostics_popup(DashboardState& state) {
     if (ImGui::Button(tr(state, "Refresh", "Làm mới"), {scaled(90.0f), 0.0f})) {
         refresh_graphics_report();
     }
-    if (g_telemetry_policy.collect_in_background) {
+    if (g_telemetry_policy.collect_in_background &&
+        is_action_permitted(state.current_role, OperatorAction::export_telemetry_report)) {
         ImGui::SameLine();
         if (ImGui::Button(tr(state, "Review report", "Xem báo cáo"),
                           {scaled(118.0f), 0.0f})) {
@@ -3301,9 +3383,9 @@ void draw_pairing_requests(DashboardState& state,
 }
 
 void draw_pairing_popup(DashboardState& state,
-                        nstu::server::ServerControlPlane& control_plane) {
-    const float button_width = scaled(140.0f);
-    ImGui::SameLine(ImGui::GetContentRegionMax().x - button_width - scaled(242.0f));
+                        nstu::server::ServerControlPlane& control_plane,
+                        float pos_x, float button_width) {
+    ImGui::SameLine(pos_x);
     bool focus_panel = false;
     if (ImGui::Button(
             tr(state,
@@ -3821,9 +3903,34 @@ void draw_menu_strip(DashboardState& state, bool has_clients,
                             scaled(60.0f))) {
         state.view = DashboardView::exam;
     }
-    draw_pairing_popup(state, control_plane);
-    draw_diagnostics_popup(state);
-    draw_preferences(state);
+    if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health)) {
+        ImGui::SameLine();
+        if (draw_segment_option(tr(state, "Fleet", "Hệ thống"),
+                                state.view == DashboardView::fleet_health,
+                                scaled(68.0f))) {
+            state.view = DashboardView::fleet_health;
+        }
+    }
+
+    const float right_x = ImGui::GetContentRegionMax().x;
+    const float gap = scaled(8.0f);
+    const float settings_w = scaled(104.0f);
+    const float role_w = scaled(160.0f);
+    const bool show_diag = is_action_permitted(state.current_role, OperatorAction::view_diagnostics_raw);
+    const float diag_w = show_diag ? scaled(118.0f) : 0.0f;
+    const float pair_w = scaled(136.0f);
+
+    const float x_settings = right_x - settings_w;
+    const float x_role = x_settings - gap - role_w;
+    const float x_diag = show_diag ? (x_role - gap - diag_w) : x_role;
+    const float x_pair = x_diag - gap - pair_w;
+
+    draw_pairing_popup(state, control_plane, x_pair, pair_w);
+    if (show_diag) {
+        draw_diagnostics_popup(state, x_diag, diag_w);
+    }
+    draw_role_switcher(state, x_role, role_w);
+    draw_preferences(state, x_settings, settings_w);
     ImGui::EndChild();
 }
 
@@ -4110,6 +4217,14 @@ void draw_navigation_rail(
                          true, false)) {
         state.view = DashboardView::exam;
     }
+    if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health)) {
+        if (draw_icon_button("nav-fleet", tr(state, "Fleet health", "Sức khỏe hệ thống"),
+                             IconKind::monitor, {scaled(36.0f), scaled(38.0f)},
+                             state.view == DashboardView::fleet_health,
+                             true, false)) {
+            state.view = DashboardView::fleet_health;
+        }
+    }
     ImGui::Separator();
     if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
                          IconKind::lock, {scaled(36.0f), scaled(38.0f)}, false,
@@ -4233,10 +4348,177 @@ void draw_bulk_action_confirmation_popup(
     ImGui::EndPopup();
 }
 
+void draw_technician_fleet_health(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    if (clients.empty()) {
+        ImGui::SetCursorPosY(scaled(80.0f));
+        ImGui::TextDisabled("%s", tr(state, "No computers enrolled or discovered in fleet.",
+                                     "Chưa có máy tính nào trong hệ thống."));
+        return;
+    }
+
+    // 1. Metric summaries
+    std::size_t online_count = 0;
+    std::size_t uwf_proven_count = 0;
+    std::size_t uwf_awaiting_count = 0;
+    std::size_t uwf_unsupported_count = 0;
+    std::uint32_t total_latency = 0;
+    std::size_t latency_samples = 0;
+
+    for (const auto& client : clients) {
+        if (client.status != nstu::server::ClientStatus::offline) {
+            online_count++;
+            total_latency += client.latency_ms;
+            latency_samples++;
+        }
+        if (client.uwf.proves_current_protection()) {
+            uwf_proven_count++;
+        } else if (client.uwf.phase == nstu::control::UwfFleetPhase::awaiting_restart) {
+            uwf_awaiting_count++;
+        } else if (client.uwf.phase == nstu::control::UwfFleetPhase::unsupported) {
+            uwf_unsupported_count++;
+        }
+    }
+
+    const float card_gap = ImGui::GetStyle().ItemSpacing.x;
+    const float card_width = (ImGui::GetContentRegionAvail().x - card_gap * 3.0f) / 4.0f;
+
+    char total_buf[32]{};
+    sprintf_s(total_buf, "%zu (%zu online)", clients.size(), online_count);
+    draw_telemetry_card(tr(state, "Fleet Inventory", "Tổng số máy"), total_buf, card_width);
+
+    ImGui::SameLine();
+    char uwf_buf[32]{};
+    sprintf_s(uwf_buf, "%zu / %zu", uwf_proven_count, clients.size());
+    draw_telemetry_card(tr(state, "Reboot-to-Restore Active", "Đã bật khôi phục reboot"), uwf_buf, card_width);
+
+    ImGui::SameLine();
+    char pending_buf[64]{};
+    sprintf_s(pending_buf, "%zu pending / %zu unsupported", uwf_awaiting_count, uwf_unsupported_count);
+    draw_telemetry_card(tr(state, "Pending / Unsupported", "Chờ khởi động / Không hỗ trợ"), pending_buf, card_width);
+
+    ImGui::SameLine();
+    char avg_lat_buf[32]{};
+    if (latency_samples > 0) {
+        sprintf_s(avg_lat_buf, "%u ms", total_latency / static_cast<std::uint32_t>(latency_samples));
+    } else {
+        strcpy_s(avg_lat_buf, "-");
+    }
+    draw_telemetry_card(tr(state, "Average Network Latency", "Độ trễ mạng trung bình"), avg_lat_buf, card_width);
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 2. Fleet Table
+    const bool can_configure_uwf = is_action_permitted(state.current_role, OperatorAction::configure_uwf);
+    const ImGuiTableFlags table_flags =
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders |
+        ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
+
+    std::uint64_t target_uwf_arm_client_id = 0;
+
+    if (ImGui::BeginTable("fleet-health-table", 7, table_flags, {0, ImGui::GetContentRegionAvail().y - scaled(10.0f)})) {
+        ImGui::TableSetupColumn(tr(state, "Computer", "Máy tính"), ImGuiTableColumnFlags_WidthStretch, 1.2f);
+        ImGui::TableSetupColumn(tr(state, "Address", "Địa chỉ"), ImGuiTableColumnFlags_WidthFixed, scaled(110.0f));
+        ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"), ImGuiTableColumnFlags_WidthFixed, scaled(95.0f));
+        ImGui::TableSetupColumn(tr(state, "Latency", "Độ trễ"), ImGuiTableColumnFlags_WidthFixed, scaled(75.0f));
+        ImGui::TableSetupColumn(tr(state, "Loss", "Mất gói"), ImGuiTableColumnFlags_WidthFixed, scaled(65.0f));
+        ImGui::TableSetupColumn(tr(state, "Reboot-to-Restore", "Khôi phục reboot"), ImGuiTableColumnFlags_WidthStretch, 1.6f);
+        ImGui::TableSetupColumn(tr(state, "Action", "Thao tác"), ImGuiTableColumnFlags_WidthFixed, scaled(100.0f));
+        ImGui::TableHeadersRow();
+
+        for (const auto& client : clients) {
+            ImGui::TableNextRow();
+            push_client_id(client.id);
+
+            // Computer name
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(client.hostname.c_str());
+
+            // Address
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextDisabled("%s", client.address.c_str());
+
+            // Status
+            ImGui::TableSetColumnIndex(2);
+            const bool is_online = (client.status != nstu::server::ClientStatus::offline);
+            ImGui::TextColored(
+                is_online ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f} : ImVec4{0.70f, 0.70f, 0.70f, 1.0f},
+                "%s", nstu::server::to_string(client.status));
+
+            // Latency
+            ImGui::TableSetColumnIndex(3);
+            if (is_online) {
+                ImGui::Text("%u ms", client.latency_ms);
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            // Packet loss
+            ImGui::TableSetColumnIndex(4);
+            if (is_online) {
+                ImGui::Text("%.1f%%", client.packet_loss_per_mille / 10.0f);
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            // Reboot-to-restore (UWF) phase
+            ImGui::TableSetColumnIndex(5);
+            const bool proven = client.uwf.proves_current_protection();
+            const ImVec4 badge_color = proven
+                ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
+                : (client.uwf.phase == nstu::control::UwfFleetPhase::awaiting_restart
+                       ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
+                       : (client.uwf.phase == nstu::control::UwfFleetPhase::unsupported
+                              ? ImVec4{0.80f, 0.40f, 0.40f, 1.0f}
+                              : ImVec4{0.65f, 0.65f, 0.65f, 1.0f}));
+            ImGui::TextColored(badge_color, "%s", nstu::server::to_string(client.uwf.phase));
+            if (!client.uwf.detail.empty() && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", client.uwf.detail.c_str());
+            }
+
+            // Maintenance Action
+            ImGui::TableSetColumnIndex(6);
+            const bool uwf_unsupported =
+                client.uwf.reported && client.uwf.phase == nstu::control::UwfFleetPhase::unsupported;
+            const bool can_enable = can_configure_uwf && !proven && !uwf_unsupported && is_online;
+            ImGui::BeginDisabled(!can_enable);
+            if (ImGui::Button(tr(state, "Arm UWF", "Bật UWF"), {scaled(80.0f), 0})) {
+                target_uwf_arm_client_id = client.id;
+            }
+            ImGui::EndDisabled();
+            if (!can_configure_uwf && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s", tr(state,
+                    "Requires Technician or Developer role.",
+                    "Yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển."));
+            } else if (proven && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("%s", tr(state, "Already protected.", "Đã được bảo vệ."));
+            }
+
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    if (target_uwf_arm_client_id != 0) {
+        state.uwf_confirmation_client_id = target_uwf_arm_client_id;
+        state.uwf_confirmation_open = true;
+        ImGui::OpenPopup("uwf-confirmation");
+    }
+    draw_uwf_confirmation_popup(state, control_plane);
+}
+
 void draw_dashboard_shell(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
+    if (!is_action_permitted(state.current_role, OperatorAction::view_fleet_health) &&
+        state.view == DashboardView::fleet_health) {
+        state.view = DashboardView::room_screens;
+    }
     draw_menu_strip(state, !clients.empty(), control_plane);
     draw_telemetry_report_popup(state, clients.size());
     draw_bulk_action_confirmation_popup(clients, state, control_plane);
@@ -4260,6 +4542,8 @@ void draw_dashboard_shell(
             } else if (state.view == DashboardView::selected_client) {
                 draw_selected_client(clients, selected_client, state,
                                      control_plane);
+            } else if (state.view == DashboardView::fleet_health) {
+                draw_technician_fleet_health(clients, state, control_plane);
             } else {
                 draw_exam_panel(clients, selected_client, state,
                                 control_plane);
