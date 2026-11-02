@@ -32,6 +32,7 @@ enum class BulkActionKind : int {
     unlock = 1,
     refresh_snapshots = 2,
     acknowledge_help = 3,
+    launch_url = 4,
 };
 
 struct RoomCounts {
@@ -97,7 +98,8 @@ void toggle_selected(
     const std::vector<ClientRecord>& clients,
     const std::unordered_set<std::uint64_t>& selected_ids,
     BulkActionKind action,
-    std::uint16_t snapshot_interval_seconds);
+    std::uint16_t snapshot_interval_seconds,
+    std::string_view extra_payload = {});
 
 [[nodiscard]] std::string format_bulk_confirmation_title(
     BulkActionKind action,

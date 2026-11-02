@@ -170,7 +170,8 @@ BulkActionResult execute_bulk_action(
     const std::vector<ClientRecord>& clients,
     const std::unordered_set<std::uint64_t>& selected_ids,
     BulkActionKind action,
-    std::uint16_t snapshot_interval_seconds) {
+    std::uint16_t snapshot_interval_seconds,
+    std::string_view extra_payload) {
     BulkActionResult result;
     for (const auto& client : clients) {
         if (selected_ids.find(client.id) == selected_ids.end()) {
@@ -194,6 +195,9 @@ BulkActionResult execute_bulk_action(
             break;
         case BulkActionKind::acknowledge_help:
             ok = control_plane.resolve_help_request(client.id, &error);
+            break;
+        case BulkActionKind::launch_url:
+            ok = control_plane.launch_url(client.id, std::string(extra_payload), &error);
             break;
         }
         if (ok) {
@@ -219,6 +223,8 @@ std::string format_bulk_confirmation_title(BulkActionKind action, bool vietnames
         return vietnamese ? "Xác nhận làm mới ảnh hàng loạt" : "Confirm Bulk Snapshot Refresh";
     case BulkActionKind::acknowledge_help:
         return vietnamese ? "Xác nhận giải quyết yêu cầu trợ giúp" : "Confirm Acknowledge Help";
+    case BulkActionKind::launch_url:
+        return vietnamese ? "Xác nhận mở trang web hàng loạt" : "Confirm Bulk Open Website";
     }
     return "Confirm Bulk Action";
 }
@@ -244,6 +250,9 @@ std::string format_bulk_confirmation_message(
         case BulkActionKind::acknowledge_help:
             stream << "Bạn có chắc chắn muốn GIẢI QUYẾT yêu cầu trợ giúp cho " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không?";
             break;
+        case BulkActionKind::launch_url:
+            stream << "Bạn có chắc chắn muốn MỞ TRANG WEB trên " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không?";
+            break;
         }
     } else {
         switch (action) {
@@ -258,6 +267,9 @@ std::string format_bulk_confirmation_message(
             break;
         case BulkActionKind::acknowledge_help:
             stream << "Are you sure you want to ACKNOWLEDGE help requests for " << target_count << " selected computer(s) in room '" << room_label << "'?";
+            break;
+        case BulkActionKind::launch_url:
+            stream << "Are you sure you want to OPEN the website on " << target_count << " selected computer(s) in room '" << room_label << "'?";
             break;
         }
     }
@@ -276,6 +288,7 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::unlock: action_str = "mở khóa"; break;
         case BulkActionKind::refresh_snapshots: action_str = "làm mới ảnh chụp"; break;
         case BulkActionKind::acknowledge_help: action_str = "giải quyết trợ giúp"; break;
+        case BulkActionKind::launch_url: action_str = "mở trang web"; break;
         }
         stream << "Hoàn tất " << action_str << " hàng loạt: "
                << result.succeeded << " thành công, "
@@ -287,6 +300,7 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::unlock: action_str = "unlock"; break;
         case BulkActionKind::refresh_snapshots: action_str = "snapshot refresh"; break;
         case BulkActionKind::acknowledge_help: action_str = "acknowledge help"; break;
+        case BulkActionKind::launch_url: action_str = "open website"; break;
         }
         stream << "Bulk " << action_str << " completed: "
                << result.succeeded << " succeeded, "

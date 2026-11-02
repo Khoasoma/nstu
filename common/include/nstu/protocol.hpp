@@ -119,6 +119,9 @@ enum class CommandType : std::uint16_t {
     help_request = 58,
     // server -> client: carries teacher acknowledgment/resolution.
     help_ack = 59,
+    // Teacher website push / quick launch.
+    // server -> client: carries validated http(s) URL to open in student browser.
+    launch_url = 60,
 };
 
 enum class ConnectionRole : std::uint8_t {

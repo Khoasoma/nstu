@@ -12,6 +12,7 @@
 #include "nstu/exam_telemetry_journal.hpp"
 #include "nstu/keyring.hpp"
 #include "nstu/pairing.hpp"
+#include "nstu/url_validation.hpp"
 
 #include <windows.h>
 
@@ -2715,6 +2716,24 @@ bool ServerControlPlane::resolve_help_request(std::uint64_t client_id,
     });
     (void)impl_->registry_.set_help_request(client_id, false, "", 0);
     return send_command(client_id, protocol::CommandType::help_ack,
+                        payload, error);
+}
+
+bool ServerControlPlane::launch_url(std::uint64_t client_id, const std::string& url,
+                                    std::string* error) {
+    if (!url::is_valid_launch_url(url, error)) {
+        return false;
+    }
+    const auto payload = control::encode_launch_url(control::LaunchUrlMessage{
+        .url = url,
+    });
+    if (payload.empty()) {
+        if (error != nullptr) {
+            *error = "Failed to encode launch URL payload.";
+        }
+        return false;
+    }
+    return send_command(client_id, protocol::CommandType::launch_url,
                         payload, error);
 }
 

@@ -561,4 +561,42 @@ std::optional<HelpAckMessage> decode_help_ack(std::span<const std::byte> payload
     };
 }
 
+std::vector<std::byte> encode_launch_url(const LaunchUrlMessage& message) {
+    if (!url::is_valid_launch_url(message.url)) {
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(sizeof(std::uint16_t) + message.url.size());
+    append_le(bytes, static_cast<std::uint16_t>(message.url.size()));
+    for (char c : message.url) {
+        bytes.push_back(static_cast<std::byte>(c));
+    }
+    return bytes;
+}
+
+std::optional<LaunchUrlMessage> decode_launch_url(std::span<const std::byte> payload) {
+    if (payload.size() < sizeof(std::uint16_t)) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    std::uint16_t url_len = 0;
+    if (!read_le(payload, offset, url_len)) {
+        return std::nullopt;
+    }
+    if (url_len > url::kMaximumUrlBytes || offset + url_len != payload.size()) {
+        return std::nullopt;
+    }
+    std::string url_str;
+    url_str.reserve(url_len);
+    for (std::size_t i = 0; i < url_len; ++i) {
+        url_str.push_back(static_cast<char>(payload[offset++]));
+    }
+    if (!url::is_valid_launch_url(url_str)) {
+        return std::nullopt;
+    }
+    return LaunchUrlMessage{
+        .url = std::move(url_str),
+    };
+}
+
 } // namespace nstu::control

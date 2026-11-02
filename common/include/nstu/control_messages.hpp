@@ -2,6 +2,7 @@
 
 #include "nstu/auth.hpp"
 #include "nstu/network.hpp"
+#include "nstu/url_validation.hpp"
 
 #include <array>
 #include <cstddef>
@@ -245,6 +246,15 @@ struct HelpAckMessage {
 [[nodiscard]] std::vector<std::byte> encode_help_ack(
     const HelpAckMessage& message);
 [[nodiscard]] std::optional<HelpAckMessage> decode_help_ack(
+    std::span<const std::byte> payload);
+
+struct LaunchUrlMessage {
+    std::string url;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_launch_url(
+    const LaunchUrlMessage& message);
+[[nodiscard]] std::optional<LaunchUrlMessage> decode_launch_url(
     std::span<const std::byte> payload);
 
 } // namespace nstu::control
