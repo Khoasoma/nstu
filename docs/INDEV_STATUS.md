@@ -21,10 +21,18 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 58/58 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 60/60 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
+
+## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Typed UWF WMI Management** | `UwfWmi` interface and `ProductionUwfWmi` implementation; safe RAM/disk overlay sizing (`uwf_maximum_size_mb`), strictly ordered warning/critical thresholds, and transactional rollback | **Merged to main** (`471553e`) |
+| **UWF Overlay Reporting Codec** | `nstu::uwf::OverlayReport` 23-byte binary codec with bounds validation, WMI signed VT_I4 limits, and pending-reboot threshold handling | **Merged to main** (`471553e`) |
+| **Servicing & Decommissioning** | `set_uwf_servicing` for Windows Update maintenance, `disable_uwf` for controlled decommissioning, and `add_uwf_defender_exclusions` | **Merged to main** (`471553e`) |
 
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
