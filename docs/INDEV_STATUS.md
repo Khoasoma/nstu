@@ -21,12 +21,12 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 57/57 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 58/58 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
 
-## Phase 5 Security Delivery Roadmap (Tasks 18–23)
+## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
 | Task | Title | Key Objective | Status |
 |---|---|---|---|
@@ -35,7 +35,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Task 20** | `CONTROL-CHANNEL-AEAD-ENCRYPTION-1` | Confidentiality & AEAD authenticated encryption (AES-256-GCM) for control plane payloads | **Merged to main** (`23c7e97`) |
 | **Task 21** | `INSTRUCTOR-SESSION-AUTHORIZATION-BINDING-1` | Cryptographic instructor authorization tickets binding official assessment sessions | **Merged to main** (`79a4fea`) |
 | **Task 22** | `SERVER-SIDE-GRADING-SEALED-EXPORT-1` | Automated objective scoring, manual essay review workflow, and sealed export container | **Merged to main** (`4082646`) |
-| **Task 23** | `TEACHER-EXAM-OPERATOR-CONSOLE-1` | Native Dear ImGui teacher console exam management tab with live client monitoring | **Next in loop** |
+| **Task 23** | `TEACHER-EXAM-OPERATOR-CONSOLE-1` | Native Dear ImGui teacher console exam management tab with live client monitoring | **Merged to main** (`b2b3024`) |
 
 ## Acceptance That Remains Open Before Production Release
 
