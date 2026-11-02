@@ -119,6 +119,9 @@ enum class ConfirmationRole : std::uint16_t {
 
 void secure_zero(PairingSecrets& secrets) noexcept;
 
+[[nodiscard]] std::string format_short_authentication_string(
+    std::string_view sas);
+
 // Wire messages. These are the payloads of the pairing_* control commands;
 // the framing itself belongs to nstu::protocol.
 inline constexpr std::size_t kMaximumPairingMessageBytes = 1024;

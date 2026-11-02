@@ -45,13 +45,19 @@ nstu::client::PairingAttemptOptions test_options() {
 
 void run_pairing(const nstu::discovery::PairingCandidate& candidate,
                  PairingRun& run, std::stop_token token) {
+    auto options = test_options();
+    options.student_confirmation = [&run](const std::string&,
+            const std::string&, auto, std::stop_token) {
+        return nstu::client::StudentConfirmation{
+            nstu::client::StudentConfirmationChoice::confirmed, run.code};
+    };
     run.result = nstu::client::pair_with_server(
         candidate, kClientUuid, kClientHostname,
         [&run](const std::string& code, const std::string& server_name) {
             run.code = code;
             run.server_name = server_name;
         },
-        std::move(token), test_options(), &run.error);
+        std::move(token), options, &run.error);
 }
 
 std::vector<nstu::server::PendingPairing> wait_for_pending(
@@ -159,6 +165,27 @@ int main() {
     }
 
     server.set_pairing_window(true, kServerName);
+
+    // Seeing the code is not approval: without a local callback there is no key.
+    {
+        const auto keys_before = key_store.active_key_count();
+        PairingRun no_confirmation;
+        no_confirmation.result = nstu::client::pair_with_server(
+            candidate, kClientUuid, kClientHostname,
+            [&no_confirmation](const std::string& code,
+                               const std::string& server_name) {
+                no_confirmation.code = code;
+                no_confirmation.server_name = server_name;
+            },
+            std::stop_token{}, test_options(), &no_confirmation.error);
+        assert(!no_confirmation.code.empty());
+        assert(no_confirmation.result.outcome ==
+               nstu::client::PairingOutcome::failed);
+        assert(no_confirmation.result.config.key_id == 0);
+        assert(no_confirmation.result.config.pre_shared_key.empty());
+        assert(no_confirmation.error == "student confirmation unavailable");
+        assert(key_store.active_key_count() == keys_before);
+    }
 
     // An operator who says no leaves the client unenrolled and the key store
     // untouched.

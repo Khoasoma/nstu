@@ -552,6 +552,18 @@ void secure_zero(PairingSecrets& secrets) noexcept {
     }
 }
 
+std::string format_short_authentication_string(std::string_view sas) {
+    if (sas.size() == kSasDigits) {
+        std::string formatted;
+        formatted.reserve(kSasDigits + 1);
+        formatted.append(sas.substr(0, 3));
+        formatted.push_back(' ');
+        formatted.append(sas.substr(3));
+        return formatted;
+    }
+    return std::string(sas);
+}
+
 const char* pairing_reject_reason_text(PairingRejectReason reason) noexcept {
     switch (reason) {
     case PairingRejectReason::operator_declined:

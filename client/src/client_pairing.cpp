@@ -253,6 +253,60 @@ private:
 
 } // namespace
 
+const char* student_confirmation_choice_text(
+    StudentConfirmationChoice choice) noexcept {
+    switch (choice) {
+    case StudentConfirmationChoice::confirmed:
+        return "confirmed";
+    case StudentConfirmationChoice::rejected:
+        return "rejected";
+    case StudentConfirmationChoice::mismatched_code:
+        return "mismatched code";
+    case StudentConfirmationChoice::timed_out:
+        return "timed out";
+    case StudentConfirmationChoice::no_ui:
+        return "no UI session";
+    case StudentConfirmationChoice::waiting:
+        return "waiting";
+    }
+    return "unknown";
+}
+
+const char* student_confirmation_decision_text(
+    StudentConfirmationDecision decision) noexcept {
+    switch (decision) {
+    case StudentConfirmationDecision::save:
+        return "save";
+    case StudentConfirmationDecision::refuse:
+        return "refuse";
+    }
+    return "unknown";
+}
+
+StudentConfirmationDecision evaluate_student_confirmation(
+    bool code_shown,
+    StudentConfirmationChoice choice,
+    std::string_view expected_code,
+    std::string_view confirmed_code) noexcept {
+    if (!code_shown) {
+        return StudentConfirmationDecision::refuse;
+    }
+    switch (choice) {
+    case StudentConfirmationChoice::confirmed:
+        return !expected_code.empty() && !confirmed_code.empty() &&
+                       expected_code == confirmed_code
+                   ? StudentConfirmationDecision::save
+                   : StudentConfirmationDecision::refuse;
+    case StudentConfirmationChoice::rejected:
+    case StudentConfirmationChoice::mismatched_code:
+    case StudentConfirmationChoice::timed_out:
+    case StudentConfirmationChoice::no_ui:
+    case StudentConfirmationChoice::waiting:
+        return StudentConfirmationDecision::refuse;
+    }
+    return StudentConfirmationDecision::refuse;
+}
+
 const char* pairing_outcome_text(PairingOutcome outcome) noexcept {
     switch (outcome) {
     case PairingOutcome::enrolled:
@@ -263,6 +317,8 @@ const char* pairing_outcome_text(PairingOutcome outcome) noexcept {
         return "nobody approved this computer in time";
     case PairingOutcome::unavailable:
         return "the server is not accepting new computers right now";
+    case PairingOutcome::student_refused:
+        return "student refused pairing / Hoc sinh da tu choi ghep noi";
     case PairingOutcome::failed:
         break;
     }
@@ -319,6 +375,11 @@ PairingAttemptResult pair_with_server(
     const PairingCodeObserver& code_observer, std::stop_token stop_token,
     const PairingAttemptOptions& options, std::string* error) {
     PairingAttemptResult result;
+    if (!code_observer) {
+        set_error(error, "the pairing code cannot be displayed (no UI session)");
+        result.outcome = PairingOutcome::failed;
+        return result;
+    }
     const auto client_id = pairing::client_id_from_uuid(client_uuid);
     if (!client_id) {
         set_error(error, "this computer has no usable identity");
@@ -401,11 +462,97 @@ PairingAttemptResult pair_with_server(
     }
     const SecretsGuard guard(*secrets);
 
+
     // Showing the code before the confirmation goes out means the operator is
     // already reading it while the server is still deciding what to display.
-    if (code_observer) {
-        code_observer(secrets->short_authentication_string,
-                      candidate.server_name);
+    code_observer(secrets->short_authentication_string,
+                  candidate.server_name);
+
+    // A missing local confirmation UI cannot authorize a key or a confirm tag.
+    if (!options.student_confirmation) {
+        set_error(error, "student confirmation unavailable");
+        return result;
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + options.approval_timeout;
+    auto next_heartbeat = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(options.heartbeat_interval_ms);
+    for (;;) {
+        if (stop_token.stop_requested()) {
+            set_error(error, "pairing was cancelled");
+            return result;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline) {
+            result.outcome = PairingOutcome::timed_out;
+            set_error(error, pairing_outcome_text(result.outcome));
+            return result;
+        }
+        const auto choice = options.student_confirmation(
+            secrets->short_authentication_string, candidate.server_name,
+            std::min(deadline, now + std::chrono::milliseconds(kWaitSliceMs)),
+            stop_token);
+        // The callback may have finished after the deadline or cancellation.
+        if (stop_token.stop_requested()) {
+            set_error(error, "pairing was cancelled");
+            return result;
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            result.outcome = PairingOutcome::timed_out;
+            set_error(error, pairing_outcome_text(result.outcome));
+            return result;
+        }
+        if (choice.choice != StudentConfirmationChoice::waiting) {
+            const auto decision = evaluate_student_confirmation(
+                /*code_shown=*/true, choice.choice,
+                secrets->short_authentication_string, choice.confirmed_code);
+            if (decision == StudentConfirmationDecision::save) {
+                break;
+            }
+            result.outcome = choice.choice == StudentConfirmationChoice::timed_out
+                ? PairingOutcome::timed_out : PairingOutcome::student_refused;
+            set_error(error, pairing_outcome_text(result.outcome));
+            return result;
+        }
+        if (std::chrono::steady_clock::now() >= next_heartbeat) {
+            if (!send_frame(socket, protocol::CommandType::heartbeat,
+                            request_id, {}, error)) {
+                return result;
+            }
+            next_heartbeat = std::chrono::steady_clock::now() +
+                std::chrono::milliseconds(options.heartbeat_interval_ms);
+        }
+        // Wait at most one slice if the callback returned immediately; also
+        // drain frames buffered alongside the offer without another read.
+        auto frame = reader.take();
+        if (!frame) {
+            const auto remaining = std::chrono::duration_cast<
+                std::chrono::milliseconds>(deadline -
+                    std::chrono::steady_clock::now()).count();
+            const auto slice = static_cast<std::uint32_t>(
+                std::clamp<std::int64_t>(remaining, 0, kWaitSliceMs));
+            if (socket.wait_readable(slice, nullptr)) {
+                if (!reader.pump(socket, error)) {
+                    return result;
+                }
+                frame = reader.take();
+            }
+        }
+        while (frame) {
+            if (frame->envelope.type == protocol::CommandType::heartbeat) {
+                frame = reader.take();
+                continue;
+            }
+            if (frame->envelope.type == protocol::CommandType::pairing_reject) {
+                const auto reason = pairing::decode_pairing_reject(frame->payload);
+                result.outcome = reason ? outcome_from_reject(*reason)
+                                        : PairingOutcome::failed;
+                set_error(error, pairing_outcome_text(result.outcome));
+                return result;
+            }
+            set_error(error, "the server sent an unexpected pairing reply");
+            return result;
+        }
     }
     const auto tag = pairing::confirmation_tag(
         *secrets, *transcript, pairing::ConfirmationRole::client);
@@ -419,13 +566,11 @@ PairingAttemptResult pair_with_server(
         return result;
     }
 
-    const auto deadline =
+    const auto approval_deadline =
         std::chrono::steady_clock::now() + options.approval_timeout;
-    auto next_heartbeat = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(options.heartbeat_interval_ms);
     while (!stop_token.stop_requested()) {
         const auto now = std::chrono::steady_clock::now();
-        if (now >= deadline) {
+        if (now >= approval_deadline) {
             result.outcome = PairingOutcome::timed_out;
             set_error(error, pairing_outcome_text(result.outcome));
             return result;
@@ -434,7 +579,7 @@ PairingAttemptResult pair_with_server(
         if (!frame) {
             const auto remaining =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
-                    deadline - now)
+                    approval_deadline - now)
                     .count();
             const auto slice = static_cast<std::uint32_t>(
                 std::min<std::int64_t>(remaining, kWaitSliceMs));
