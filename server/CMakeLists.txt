@@ -3,6 +3,8 @@ add_library(nstu_server_state STATIC
     src/control_plane.cpp
     src/remote_session_process.cpp
     src/exam_telemetry_journal.cpp
+    src/exam_grader.cpp
+    src/sealed_export.cpp
 )
 target_include_directories(nstu_server_state PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(nstu_server_state PUBLIC cxx_std_20)

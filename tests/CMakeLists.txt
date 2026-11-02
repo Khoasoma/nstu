@@ -256,6 +256,12 @@ if(TARGET nstu_server_state)
     nstu_enable_warnings(nstu_operator_login_tests)
     nstu_enable_test_assertions(nstu_operator_login_tests)
     add_test(NAME nstu.operator_login COMMAND nstu_operator_login_tests)
+
+    add_executable(nstu_exam_grader_tests exam_grader_tests.cpp)
+    target_link_libraries(nstu_exam_grader_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_exam_grader_tests)
+    nstu_enable_test_assertions(nstu_exam_grader_tests)
+    add_test(NAME nstu.exam_grader COMMAND nstu_exam_grader_tests)
 endif()
 
 if(TARGET nstu_client_platform)
