@@ -14,7 +14,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install NSIS
-        run: choco install nsis --no-progress --yes --force
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress --yes
+          }
       - name: Configure
         run: cmake -S . -B build -A x64 -DNSTU_ENABLE_WERROR=ON -DNSTU_INTERNAL_TEST_BUILD=OFF
       - name: Build
@@ -89,7 +93,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install NSIS
-        run: choco install nsis --no-progress --yes --force
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress --yes
+          }
       - name: Configure internal build
         run: >-
           cmake -S . -B build-internal -A x64
@@ -121,7 +129,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install NSIS
-        run: choco install nsis --no-progress --yes --force
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress --yes
+          }
       - name: Configure DEV unprotected build
         run: >-
           cmake -S . -B build-dev -A x64
@@ -153,7 +165,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Install NSIS
-        run: choco install nsis --no-progress --yes --force
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis.exe -ErrorAction SilentlyContinue)) {
+            choco install nsis --no-progress --yes
+          }
       - name: Acquire WebView2 SDK
         shell: pwsh
         run: |
