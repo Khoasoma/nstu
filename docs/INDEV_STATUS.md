@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 61/61 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 62/62 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -41,6 +41,15 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Server Firewall Provisioning** | Self-contained least-privilege Windows Defender Firewall rules for TCP 47001 (control plane) and UDP 47001 (discovery beacon) scoped strictly to `nstu-server.exe` on `private,domain` profiles | **Merged to main** (`420dacb`) |
 | **Uninstall & Rollback Teardown** | Automatic deletion of server firewall rules during uninstall and install abort/rollback, preventing orphaned firewall entries | **Merged to main** (`420dacb`) |
 | **Firewall Provisioning Validation** | Automated test `packaging/test-installer-firewall-provisioning.ps1` integrated into Windows CI validating rule specifications, absence of public profiles, and rollback cleanup | **Merged to main** (`420dacb`) |
+
+## Integrated Classroom Roster & Safe Bulk Actions (Roadmap P2.2 / Order 10)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Classroom Tabular View** | Dense 7-column tabular roster view (`draw_room_client_table`) with multi-select checkboxes, hostname & unread chat badges, IP, status badges, latency & loss, and UWF protection indicators | **Merged to main** (`24701ca`) |
+| **Grid / List Workspace Toggle** | Seamless toggle between visual thumbnail wall and compact list view in `draw_workspace_toolbar` | **Merged to main** (`24701ca`) |
+| **Safe Multi-Selection & Bulk Actions** | Multi-select state machine with "Select All" (filtered subset) and "Clear", plus modal confirmation dialog requiring explicit human authorization and stating exact target counts, room context, and offline exclusions | **Merged to main** (`24701ca`) |
+| **Roster Scalability Benchmarks** | Headless unit tests in `tests/classroom_roster_tests.cpp` benchmarking 10, 30, and 50 client cohorts with sub-millisecond execution (<5 µs) | **Merged to main** (`24701ca`) |
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
 

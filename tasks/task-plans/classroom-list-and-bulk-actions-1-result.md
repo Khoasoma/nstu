@@ -2,7 +2,11 @@
 
 - **Task Identifier**: `CLASSROOM-LIST-AND-BULK-ACTIONS-1`
 - **Stream**: Roadmap P2.2 (Classroom/List view and safe bulk actions) / Order 10
-- **Status**: **REVIEWED & PASSING**
+- **Status**: **COMPLETE & INTEGRATED TO MAIN**
+- **Feature Commit**: `24701ca1bee198b8e1de32d572be62b3503048e9`
+- **Main Commit**: `24701ca1bee198b8e1de32d572be62b3503048e9`
+- **Feature CI Run**: `41481301678` (4/4 jobs green)
+- **Main Release CI Run**: `41482501241` (5/5 jobs green)
 - **Allowlisted Files**:
   - `server/include/nstu/classroom_roster.hpp`
   - `server/src/classroom_roster.cpp`
