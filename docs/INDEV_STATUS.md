@@ -62,7 +62,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Safe Multi-Selection & Bulk Actions** | Multi-select state machine with "Select All" (filtered subset) and "Clear", plus modal confirmation dialog requiring explicit human authorization and stating exact target counts, room context, and offline exclusions | **Merged to main** (`24701ca`) |
 | **Roster Scalability Benchmarks** | Headless unit tests in `tests/classroom_roster_tests.cpp` benchmarking 10, 30, and 50 client cohorts with sub-millisecond execution (<5 µs) | **Merged to main** (`24701ca`) |
 
-## Integrated Daily Teaching Workflows: Student Help Requests (Roadmap P2.3 / Core)
+## Integrated Daily Teaching Workflows: Student Help Requests (Roadmap P2.3 / Core & UI)
 
 | Work Area | Scope & Implementation | Status |
 |---|---|---|
@@ -70,6 +70,9 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Registry Help State & Upsert Invariant** | Thread-safe `ClientRegistry::set_help_request` and status report upsert invariant copying existing help state forward to prevent periodic status reports from wiping active student hand-raises | **Merged to main** (`7477902`) |
 | **Server Control Plane Resolution** | Inbound `help_request` dispatch in `ServerControlPlane` and teacher-driven `resolve_help_request` updating local registry and dispatching `help_ack` command | **Merged to main** (`7477902`) |
 | **Classroom Filtering & Bulk Resolution** | Orthogonal `RoomFilter::help` filter and `RoomCounts::help` counter maintaining status partition invariants (`online + attention + locked + offline == total`), plus `BulkActionKind::acknowledge_help` with EN/VI localization formatters | **Merged to main** (`7477902`) |
+| **Agent IPC Protocol & Relay** | `AgentMessageType::help_request = 38` and `help_ack = 39` with length-validated bidirectional forwarding between student agent named pipe and server socket | **Merged to main** (`2e5155d`) |
+| **Student Hand-Raise Interaction** | High-DPI dark/amber styled "Raise Hand" / "Lower Hand" button in chat UI, notes input capture, visual notifications, and reconnect re-transmission on `server_online` | **Merged to main** (`2e5155d`) |
+| **Teacher Console Visualization & Actions** | Toolbar "Help" filter chip with live `counts.help`, grid card amber badge `[?]`, table row badge with single-click "Ack Help" action, bulk acknowledgment, and `#help-banner` in detail view | **Merged to main** (`2e5155d`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
