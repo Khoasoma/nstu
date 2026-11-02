@@ -114,6 +114,11 @@ enum class CommandType : std::uint16_t {
     exam_telemetry_batch = 56,
     // server -> client: carries receipt acknowledgment with terminal/retry status.
     exam_telemetry_ack = 57,
+    // Student help request (raise hand) and teacher acknowledgment.
+    // client -> server: carries active flag, timestamp, and optional brief note.
+    help_request = 58,
+    // server -> client: carries teacher acknowledgment/resolution.
+    help_ack = 59,
 };
 
 enum class ConnectionRole : std::uint8_t {

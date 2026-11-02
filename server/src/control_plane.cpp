@@ -149,6 +149,7 @@ struct RegistryMutationRendezvous {
         case protocol::CommandType::uwf_report:
         case protocol::CommandType::uwf_fleet_status:
         case protocol::CommandType::freeze_report:
+        case protocol::CommandType::help_request:
         case protocol::CommandType::status_report:
         case protocol::CommandType::hello:
         case protocol::CommandType::snapshot_frame:
@@ -2254,6 +2255,21 @@ private:
             }
             return true;
         }
+        if (command->envelope.type ==
+            protocol::CommandType::help_request) {
+            const auto help =
+                control::decode_help_request(command->payload);
+            if (!help || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_help_request(
+                            id, help->active, help->message,
+                            help->timestamp_unix_ms);
+                    })) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
         if (command->envelope.type == protocol::CommandType::status_report ||
             command->envelope.type == protocol::CommandType::hello) {
             const auto report = control::decode_status_report(command->payload);
@@ -2684,6 +2700,21 @@ bool ServerControlPlane::set_frozen(std::uint64_t client_id, bool frozen,
                                     std::string* error) {
     const auto payload = control::encode_freeze_state(frozen);
     return send_command(client_id, protocol::CommandType::freeze_set,
+                        payload, error);
+}
+
+bool ServerControlPlane::resolve_help_request(std::uint64_t client_id,
+                                              std::string* error) {
+    const auto now_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    const auto payload = control::encode_help_ack(control::HelpAckMessage{
+        .resolved = true,
+        .timestamp_unix_ms = now_ms,
+    });
+    (void)impl_->registry_.set_help_request(client_id, false, "", 0);
+    return send_command(client_id, protocol::CommandType::help_ack,
                         payload, error);
 }
 

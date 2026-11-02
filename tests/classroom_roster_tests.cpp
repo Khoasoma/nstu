@@ -1,5 +1,6 @@
 #include "nstu/classroom_roster.hpp"
 #include "nstu/control_plane.hpp"
+#include "nstu/control_messages.hpp"
 #include <cassert>
 #include <chrono>
 #include <iostream>
@@ -242,6 +243,148 @@ void test_scalability_and_responsiveness_benchmarks() {
     }
 }
 
+void test_help_request_roster_and_codecs() {
+    using namespace nstu::control;
+    using namespace nstu::server;
+
+    // 1. Codec tests
+    HelpRequestMessage req;
+    req.active = true;
+    req.timestamp_unix_ms = 1730592000000ULL;
+    req.message = "I need help with problem #4";
+
+    auto encoded = encode_help_request(req);
+    assert(!encoded.empty());
+
+    auto decoded = decode_help_request(encoded);
+    assert(decoded.has_value());
+    assert(decoded->active == true);
+    assert(decoded->timestamp_unix_ms == req.timestamp_unix_ms);
+    assert(decoded->message == "I need help with problem #4");
+
+    // Codec test: inactive / lowered hand
+    HelpRequestMessage req_inactive;
+    req_inactive.active = false;
+    req_inactive.timestamp_unix_ms = 1730592100000ULL;
+    req_inactive.message = "";
+
+    auto encoded_inactive = encode_help_request(req_inactive);
+    auto decoded_inactive = decode_help_request(encoded_inactive);
+    assert(decoded_inactive.has_value());
+    assert(decoded_inactive->active == false);
+    assert(decoded_inactive->timestamp_unix_ms == req_inactive.timestamp_unix_ms);
+    assert(decoded_inactive->message.empty());
+
+    // Codec test: bounds check (exceeding 256 bytes rejected)
+    HelpRequestMessage req_oversized;
+    req_oversized.active = true;
+    req_oversized.timestamp_unix_ms = 1730592200000ULL;
+    req_oversized.message = std::string(300, 'X');
+    auto encoded_oversized = encode_help_request(req_oversized);
+    assert(encoded_oversized.empty());
+
+    // Codec test: truncated payload rejected
+    std::vector<std::byte> truncated(5, std::byte{0});
+    assert(!decode_help_request(truncated).has_value());
+
+    // Codec test: HelpAckMessage
+    HelpAckMessage ack;
+    ack.resolved = true;
+    ack.timestamp_unix_ms = 1730592300000ULL;
+    auto enc_ack = encode_help_ack(ack);
+    assert(!enc_ack.empty());
+    auto dec_ack = decode_help_ack(enc_ack);
+    assert(dec_ack.has_value());
+    assert(dec_ack->resolved == true);
+    assert(dec_ack->timestamp_unix_ms == ack.timestamp_unix_ms);
+
+    // 2. Roster counting & filtering tests
+    std::vector<ClientRecord> clients = {
+        make_dummy_client(1, "LAB01", "192.168.1.101", ClientStatus::online),
+        make_dummy_client(2, "LAB02", "192.168.1.102", ClientStatus::online),
+        make_dummy_client(3, "LAB03", "192.168.1.103", ClientStatus::connecting),
+        make_dummy_client(4, "LAB04", "192.168.1.104", ClientStatus::offline),
+    };
+    clients[0].help_requested = true;
+    clients[0].help_message = "Need paper";
+    clients[0].help_requested_at_unix_ms = 1730592000000ULL;
+
+    clients[2].help_requested = true;
+    clients[2].help_message = "Cannot login";
+    clients[2].help_requested_at_unix_ms = 1730592050000ULL;
+
+    auto counts = count_room_statuses(clients);
+    assert(counts.online == 2);
+    assert(counts.attention == 1);
+    assert(counts.offline == 1);
+    assert(counts.locked == 0);
+    assert(counts.help == 2);
+    assert(counts.online + counts.attention + counts.locked + counts.offline == clients.size());
+
+    // Filter by help
+    auto help_clients = filter_clients(clients, RoomFilter::help, true, "");
+    assert(help_clients.size() == 2);
+    assert(help_clients[0]->id == 1);
+    assert(help_clients[1]->id == 3);
+
+    // 3. ClientRegistry persistence and mutation tests
+    ClientRegistry registry;
+    ClientRecord rec;
+    rec.id = 42;
+    rec.hostname = "PC-42";
+    rec.status = ClientStatus::online;
+    registry.upsert(rec);
+
+    assert(registry.set_help_request(42, true, "Question on task 2", 1000));
+    auto snap1 = registry.snapshot();
+    assert(snap1.size() == 1);
+    assert(snap1[0].help_requested == true);
+    assert(snap1[0].help_message == "Question on task 2");
+    assert(snap1[0].help_requested_at_unix_ms == 1000);
+
+    // Upsert status report periodic refresh must PRESERVE active help request
+    ClientRecord refresh_rec;
+    refresh_rec.id = 42;
+    refresh_rec.hostname = "PC-42";
+    refresh_rec.status = ClientStatus::online;
+    registry.upsert(refresh_rec);
+
+    auto snap2 = registry.snapshot();
+    assert(snap2[0].help_requested == true);
+    assert(snap2[0].help_message == "Question on task 2");
+    assert(snap2[0].help_requested_at_unix_ms == 1000);
+
+    // Resolve / clear help request
+    assert(registry.set_help_request(42, false, "", 0));
+    auto snap3 = registry.snapshot();
+    assert(snap3[0].help_requested == false);
+    assert(snap3[0].help_message.empty());
+    assert(snap3[0].help_requested_at_unix_ms == 0);
+
+    // 4. Bulk action formatters for acknowledge_help
+    assert(format_bulk_confirmation_title(BulkActionKind::acknowledge_help, false) == "Confirm Acknowledge Help");
+    assert(format_bulk_confirmation_title(BulkActionKind::acknowledge_help, true) == "Xác nhận giải quyết yêu cầu trợ giúp");
+
+    std::string help_confirm_en = format_bulk_confirmation_message(
+        BulkActionKind::acknowledge_help, 5, "Room A", false);
+    assert(help_confirm_en.find("ACKNOWLEDGE") != std::string::npos);
+    assert(help_confirm_en.find("5") != std::string::npos);
+
+    std::string help_confirm_vi = format_bulk_confirmation_message(
+        BulkActionKind::acknowledge_help, 5, "Phòng A", true);
+    assert(help_confirm_vi.find("GIẢI QUYẾT") != std::string::npos);
+    assert(help_confirm_vi.find("5") != std::string::npos);
+
+    BulkActionResult b_res{.attempted = 5, .succeeded = 5, .failed = 0, .error_messages = {}};
+    std::string status_en = format_bulk_action_result_status(BulkActionKind::acknowledge_help, b_res, false);
+    assert(status_en.find("acknowledge help") != std::string::npos);
+    assert(status_en.find("5 succeeded") != std::string::npos);
+
+    std::string status_vi = format_bulk_action_result_status(BulkActionKind::acknowledge_help, b_res, true);
+    assert(status_vi.find("giải quyết trợ giúp") != std::string::npos);
+    assert(status_vi.find("5 thành công") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -252,6 +395,7 @@ int main() {
     test_bulk_action_target_evaluation();
     test_format_bulk_messages();
     test_scalability_and_responsiveness_benchmarks();
+    test_help_request_roster_and_codecs();
     std::cout << "All classroom roster tests passed successfully.\n";
     return 0;
 }

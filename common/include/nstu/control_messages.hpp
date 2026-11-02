@@ -224,4 +224,27 @@ decode_uwf_fleet_status_report(std::span<const std::byte> payload);
 [[nodiscard]] std::optional<VideoGroupKeyMessage> decode_video_group_key(
     std::span<const std::byte> payload);
 
+inline constexpr std::size_t kMaximumHelpMessageBytes = 256;
+
+struct HelpRequestMessage {
+    bool active = true;
+    std::uint64_t timestamp_unix_ms = 0;
+    std::string message;
+};
+
+struct HelpAckMessage {
+    bool resolved = true;
+    std::uint64_t timestamp_unix_ms = 0;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_help_request(
+    const HelpRequestMessage& message);
+[[nodiscard]] std::optional<HelpRequestMessage> decode_help_request(
+    std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_help_ack(
+    const HelpAckMessage& message);
+[[nodiscard]] std::optional<HelpAckMessage> decode_help_ack(
+    std::span<const std::byte> payload);
+
 } // namespace nstu::control

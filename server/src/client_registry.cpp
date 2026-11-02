@@ -57,6 +57,9 @@ void ClientRegistry::upsert(ClientRecord record) {
         // here, because upsert() also runs for every periodic status report.
         record.frozen = existing->second.frozen;
         record.uwf = existing->second.uwf;
+        record.help_requested = existing->second.help_requested;
+        record.help_message = existing->second.help_message;
+        record.help_requested_at_unix_ms = existing->second.help_requested_at_unix_ms;
     }
     if (existing != clients_.end() &&
         (!record.snapshot_jpeg || record.snapshot_jpeg->empty())) {
@@ -87,6 +90,21 @@ bool ClientRegistry::set_frozen(std::uint64_t id, bool frozen) {
         return false;
     }
     found->second.frozen = frozen;
+    found->second.last_seen = std::chrono::steady_clock::now();
+    return true;
+}
+
+bool ClientRegistry::set_help_request(
+    std::uint64_t id, bool active, std::string message,
+    std::uint64_t timestamp_unix_ms) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end()) {
+        return false;
+    }
+    found->second.help_requested = active;
+    found->second.help_message = active ? std::move(message) : std::string{};
+    found->second.help_requested_at_unix_ms = active ? timestamp_unix_ms : 0;
     found->second.last_seen = std::chrono::steady_clock::now();
     return true;
 }

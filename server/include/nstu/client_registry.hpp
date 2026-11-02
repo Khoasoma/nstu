@@ -99,6 +99,9 @@ struct ClientRecord {
     std::uint8_t bad_loss_windows = 0;
     std::uint8_t good_loss_windows = 0;
     std::chrono::steady_clock::time_point last_seen{};
+    bool help_requested = false;
+    std::string help_message{};
+    std::uint64_t help_requested_at_unix_ms = 0;
 };
 
 class ClientRegistry {
@@ -107,6 +110,9 @@ public:
     [[nodiscard]] bool set_status(std::uint64_t id, ClientStatus status);
     [[nodiscard]] bool touch(std::uint64_t id);
     [[nodiscard]] bool set_frozen(std::uint64_t id, bool frozen);
+    bool set_help_request(
+        std::uint64_t id, bool active, std::string message,
+        std::uint64_t timestamp_unix_ms);
     // Single-client reboot-to-restore report.  Describes an attempt, never a
     // proof: this call has no path to the verified phase.
     [[nodiscard]] bool set_uwf_report(

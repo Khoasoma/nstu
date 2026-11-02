@@ -493,4 +493,72 @@ std::optional<VideoGroupKeyMessage> decode_video_group_key(
     return message;
 }
 
+std::vector<std::byte> encode_help_request(const HelpRequestMessage& message) {
+    if (message.message.size() > kMaximumHelpMessageBytes) {
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(1 + sizeof(std::uint64_t) + sizeof(std::uint16_t) + message.message.size());
+    bytes.push_back(message.active ? std::byte{1} : std::byte{0});
+    append_le(bytes, message.timestamp_unix_ms);
+    append_le(bytes, static_cast<std::uint16_t>(message.message.size()));
+    for (char c : message.message) {
+        bytes.push_back(static_cast<std::byte>(c));
+    }
+    return bytes;
+}
+
+std::optional<HelpRequestMessage> decode_help_request(std::span<const std::byte> payload) {
+    if (payload.size() < 1 + sizeof(std::uint64_t) + sizeof(std::uint16_t)) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    const bool active = payload[offset++] != std::byte{0};
+    std::uint64_t timestamp_unix_ms = 0;
+    if (!read_le(payload, offset, timestamp_unix_ms)) {
+        return std::nullopt;
+    }
+    std::uint16_t msg_len = 0;
+    if (!read_le(payload, offset, msg_len)) {
+        return std::nullopt;
+    }
+    if (msg_len > kMaximumHelpMessageBytes || offset + msg_len != payload.size()) {
+        return std::nullopt;
+    }
+    std::string msg_text;
+    msg_text.reserve(msg_len);
+    for (std::size_t i = 0; i < msg_len; ++i) {
+        msg_text.push_back(static_cast<char>(payload[offset++]));
+    }
+    return HelpRequestMessage{
+        .active = active,
+        .timestamp_unix_ms = timestamp_unix_ms,
+        .message = std::move(msg_text),
+    };
+}
+
+std::vector<std::byte> encode_help_ack(const HelpAckMessage& message) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(1 + sizeof(std::uint64_t));
+    bytes.push_back(message.resolved ? std::byte{1} : std::byte{0});
+    append_le(bytes, message.timestamp_unix_ms);
+    return bytes;
+}
+
+std::optional<HelpAckMessage> decode_help_ack(std::span<const std::byte> payload) {
+    if (payload.size() != 1 + sizeof(std::uint64_t)) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    const bool resolved = payload[offset++] != std::byte{0};
+    std::uint64_t timestamp_unix_ms = 0;
+    if (!read_le(payload, offset, timestamp_unix_ms)) {
+        return std::nullopt;
+    }
+    return HelpAckMessage{
+        .resolved = resolved,
+        .timestamp_unix_ms = timestamp_unix_ms,
+    };
+}
+
 } // namespace nstu::control

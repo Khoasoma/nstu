@@ -24,12 +24,14 @@ enum class RoomFilter : int {
     attention = 2,
     locked = 3,
     offline = 4,
+    help = 5,
 };
 
 enum class BulkActionKind : int {
     lock = 0,
     unlock = 1,
     refresh_snapshots = 2,
+    acknowledge_help = 3,
 };
 
 struct RoomCounts {
@@ -37,6 +39,7 @@ struct RoomCounts {
     std::size_t attention = 0;
     std::size_t locked = 0;
     std::size_t offline = 0;
+    std::size_t help = 0;
 };
 
 struct BulkActionTargetSummary {

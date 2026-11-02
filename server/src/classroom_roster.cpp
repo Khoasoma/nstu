@@ -21,6 +21,9 @@ std::string lower_ascii(std::string_view value) {
 RoomCounts count_room_statuses(const std::vector<ClientRecord>& clients) noexcept {
     RoomCounts counts;
     for (const auto& client : clients) {
+        if (client.help_requested) {
+            ++counts.help;
+        }
         switch (client.status) {
         case ClientStatus::online:
             ++counts.online;
@@ -69,6 +72,11 @@ bool client_matches_filter(
         break;
     case RoomFilter::offline:
         if (client.status != ClientStatus::offline) {
+            return false;
+        }
+        break;
+    case RoomFilter::help:
+        if (!client.help_requested) {
             return false;
         }
         break;
@@ -184,6 +192,9 @@ BulkActionResult execute_bulk_action(
         case BulkActionKind::refresh_snapshots:
             ok = control_plane.set_snapshots(client.id, true, snapshot_interval_seconds, &error);
             break;
+        case BulkActionKind::acknowledge_help:
+            ok = control_plane.resolve_help_request(client.id, &error);
+            break;
         }
         if (ok) {
             ++result.succeeded;
@@ -206,6 +217,8 @@ std::string format_bulk_confirmation_title(BulkActionKind action, bool vietnames
         return vietnamese ? "Xác nhận mở khóa hàng loạt" : "Confirm Bulk Unlock";
     case BulkActionKind::refresh_snapshots:
         return vietnamese ? "Xác nhận làm mới ảnh hàng loạt" : "Confirm Bulk Snapshot Refresh";
+    case BulkActionKind::acknowledge_help:
+        return vietnamese ? "Xác nhận giải quyết yêu cầu trợ giúp" : "Confirm Acknowledge Help";
     }
     return "Confirm Bulk Action";
 }
@@ -228,6 +241,9 @@ std::string format_bulk_confirmation_message(
         case BulkActionKind::refresh_snapshots:
             stream << "Bạn có chắc chắn muốn làm mới ảnh chụp cho " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không?";
             break;
+        case BulkActionKind::acknowledge_help:
+            stream << "Bạn có chắc chắn muốn GIẢI QUYẾT yêu cầu trợ giúp cho " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không?";
+            break;
         }
     } else {
         switch (action) {
@@ -239,6 +255,9 @@ std::string format_bulk_confirmation_message(
             break;
         case BulkActionKind::refresh_snapshots:
             stream << "Are you sure you want to REFRESH snapshots for " << target_count << " selected computer(s) in room '" << room_label << "'?";
+            break;
+        case BulkActionKind::acknowledge_help:
+            stream << "Are you sure you want to ACKNOWLEDGE help requests for " << target_count << " selected computer(s) in room '" << room_label << "'?";
             break;
         }
     }
@@ -256,6 +275,7 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::lock: action_str = "khóa"; break;
         case BulkActionKind::unlock: action_str = "mở khóa"; break;
         case BulkActionKind::refresh_snapshots: action_str = "làm mới ảnh chụp"; break;
+        case BulkActionKind::acknowledge_help: action_str = "giải quyết trợ giúp"; break;
         }
         stream << "Hoàn tất " << action_str << " hàng loạt: "
                << result.succeeded << " thành công, "
@@ -266,6 +286,7 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::lock: action_str = "lock"; break;
         case BulkActionKind::unlock: action_str = "unlock"; break;
         case BulkActionKind::refresh_snapshots: action_str = "snapshot refresh"; break;
+        case BulkActionKind::acknowledge_help: action_str = "acknowledge help"; break;
         }
         stream << "Bulk " << action_str << " completed: "
                << result.succeeded << " succeeded, "

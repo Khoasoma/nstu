@@ -110,6 +110,8 @@ public:
                                   std::string* error = nullptr);
     [[nodiscard]] bool set_frozen(std::uint64_t client_id, bool frozen,
                                   std::string* error = nullptr);
+    [[nodiscard]] bool resolve_help_request(std::uint64_t client_id,
+                                            std::string* error = nullptr);
     [[nodiscard]] bool configure_uwf(
         std::uint64_t client_id, bool checkpoint_acknowledged,
         std::string* error = nullptr);
