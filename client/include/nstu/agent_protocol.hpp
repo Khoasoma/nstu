@@ -78,6 +78,11 @@ enum class AgentMessageType : std::uint16_t {
     exam_telemetry_enable = 36,
     // agent -> service: batches of sampled telemetry observations from browser/native
     exam_telemetry_samples = 37,
+    // Student help request (raise/lower hand) and teacher acknowledgment.
+    // agent -> service: student requested help or lowered hand.
+    help_request = 38,
+    // service -> agent: teacher acknowledged/resolved the help request.
+    help_ack = 39,
 };
 
 struct AgentMessage {

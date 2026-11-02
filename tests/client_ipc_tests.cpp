@@ -362,5 +362,45 @@ int main() {
     nstu::client::clear_client_runtime_config(runtime);
     nstu::client::clear_client_runtime_config(loaded);
     assert(DeleteFileW(config_path.c_str()));
+
+    {
+        // Student Help Request IPC and queue test
+        using nstu::client::AgentMessage;
+        using nstu::client::AgentMessageType;
+        nstu::client::AgentServiceQueue queue(10);
+
+        nstu::control::HelpRequestMessage req{
+            .active = true,
+            .timestamp_unix_ms = 1730592500000ULL,
+            .message = "Exam question 4 clarification",
+        };
+        const auto req_payload = nstu::control::encode_help_request(req);
+        assert(!req_payload.empty());
+        queue.push({AgentMessageType::help_request, req_payload});
+
+        nstu::control::HelpAckMessage ack{
+            .resolved = true,
+            .timestamp_unix_ms = 1730592505000ULL,
+        };
+        const auto ack_payload = nstu::control::encode_help_ack(ack);
+        assert(!ack_payload.empty());
+        queue.push({AgentMessageType::help_ack, ack_payload});
+
+        auto pending = queue.take_pending();
+        assert(pending.size() == 2);
+        assert(pending[0].type == AgentMessageType::help_request);
+        const auto decoded_req = nstu::control::decode_help_request(pending[0].payload);
+        assert(decoded_req.has_value());
+        assert(decoded_req->active == true);
+        assert(decoded_req->timestamp_unix_ms == req.timestamp_unix_ms);
+        assert(decoded_req->message == req.message);
+
+        assert(pending[1].type == AgentMessageType::help_ack);
+        const auto decoded_ack = nstu::control::decode_help_ack(pending[1].payload);
+        assert(decoded_ack.has_value());
+        assert(decoded_ack->resolved == true);
+        assert(decoded_ack->timestamp_unix_ms == ack.timestamp_unix_ms);
+    }
+
     return 0;
 }

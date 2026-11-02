@@ -1021,6 +1021,15 @@ void agent_pipe_loop() {
                             std::move(message->payload));
                     }
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::help_request) {
+                    // Relay the student's help request to the teacher server.
+                    if (!message->payload.empty() &&
+                        message->payload.size() <= nstu::control::kMaximumHelpMessageBytes + 16) {
+                        queue_outbound_message(
+                            nstu::protocol::CommandType::help_request,
+                            std::move(message->payload));
+                    }
+                } else if (message->type ==
                            nstu::client::AgentMessageType::exam_alive) {
                     const auto now_ms = static_cast<std::uint64_t>(
                         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1856,6 +1865,12 @@ void handle_server_command(
             const auto snapshot =
                 g_exam_telemetry_router.handle_explicit_stop_with_outcome();
             report_telemetry_stop(snapshot);
+        }
+        break;
+    case nstu::protocol::CommandType::help_ack:
+        if (nstu::control::decode_help_ack(command.payload).has_value()) {
+            queue_agent_message({nstu::client::AgentMessageType::help_ack,
+                                 command.payload});
         }
         break;
     case nstu::protocol::CommandType::exam_telemetry_enable: {

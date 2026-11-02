@@ -81,6 +81,7 @@ constexpr UINT kTrayId = 1;
 constexpr int kChatMessages = 1001;
 constexpr int kChatInput = 1002;
 constexpr int kChatSend = 1003;
+constexpr int kChatHelp = 1006;
 constexpr int kPairingList = 1004;
 constexpr int kPairingConnect = 1005;
 constexpr UINT_PTR kPairingStatusTimer = 1;
@@ -115,6 +116,8 @@ std::atomic_bool g_managed = false;
 // teacher is actually reachable, otherwise the agent shows "Something went
 // wrong." Driven by AgentMessageType::server_online from the service.
 std::atomic_bool g_server_connected = false;
+std::atomic_bool g_help_requested = false;
+std::string g_last_help_note;
 std::mutex g_annotation_mutex;
 std::vector<nstu::control::OverlayStroke> g_annotation_strokes;
 std::mutex g_broadcast_mutex;
@@ -731,6 +734,10 @@ void pipe_control_loop(HWND overlay) {
                                      reinterpret_cast<LPARAM>(labeled.c_str()));
                     }
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::help_ack) {
+                    SendMessageW(overlay, kAgentCommandMessage,
+                                 static_cast<WPARAM>(message->type), 0);
+                } else if (message->type ==
                            nstu::client::AgentMessageType::remote_start) {
                     // Arm remote control unconditionally. BlockInput(TRUE)
                     // fails for a non-elevated / RDP-session agent, and gating
@@ -1130,6 +1137,62 @@ void submit_chat_message() {
     SetWindowTextW(g_chat_input, L"");
 }
 
+void toggle_help_request() {
+    if (!g_server_connected.load()) {
+        append_chat_line(L"Not connected to the teacher. Cannot request help.");
+        return;
+    }
+    const bool new_active = !g_help_requested.load();
+    const auto now_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+
+    std::string note;
+    if (new_active && g_chat_input != nullptr) {
+        wchar_t message_text[256]{};
+        GetWindowTextW(g_chat_input, message_text,
+                       static_cast<int>(std::size(message_text)));
+        const int utf8_length = WideCharToMultiByte(
+            CP_UTF8, 0, message_text, -1, nullptr, 0, nullptr, nullptr);
+        if (utf8_length > 1) {
+            note.resize(static_cast<std::size_t>(utf8_length - 1));
+            WideCharToMultiByte(CP_UTF8, 0, message_text, -1, note.data(),
+                                utf8_length, nullptr, nullptr);
+        }
+    }
+
+    const auto payload = nstu::control::encode_help_request({
+        .active = new_active,
+        .timestamp_unix_ms = now_ms,
+        .message = new_active ? note : "",
+    });
+    if (payload.empty()) {
+        append_chat_line(L"Failed to encode help request.");
+        return;
+    }
+
+    queue_service_message({
+        nstu::client::AgentMessageType::help_request,
+        payload,
+    });
+    g_help_requested = new_active;
+    if (new_active) {
+        g_last_help_note = note;
+        append_chat_line(L"Help request (hand raised) sent to teacher.");
+    } else {
+        g_last_help_note.clear();
+        append_chat_line(L"Help request cancelled (hand lowered).");
+    }
+
+    if (g_chat_window != nullptr) {
+        if (const HWND help_button = GetDlgItem(g_chat_window, kChatHelp)) {
+            SetWindowTextW(help_button, new_active ? L"Lower Hand" : L"Raise Hand");
+            InvalidateRect(help_button, nullptr, TRUE);
+        }
+    }
+}
+
 LRESULT CALLBACK chat_input_window_proc(HWND control, UINT message,
                                         WPARAM wparam, LPARAM lparam) {
     if (message == WM_KEYDOWN && wparam == VK_RETURN) {
@@ -1339,6 +1402,12 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
             0, 0, 0, 0, window,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatSend)),
             GetModuleHandleW(nullptr), nullptr);
+        CreateWindowExW(
+            0, L"BUTTON", g_help_requested.load() ? L"Lower Hand" : L"Raise Hand",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+            0, 0, 0, 0, window,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(kChatHelp)),
+            GetModuleHandleW(nullptr), nullptr);
         EnumChildWindows(window, set_child_font,
                          reinterpret_cast<LPARAM>(ui_font(dpi)));
         append_chat_line(L"NSTU client chat ready.");
@@ -1351,13 +1420,17 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
         return themed_control_color(wparam, kSurfaceColor, surface_brush());
     case WM_DRAWITEM: {
         const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
-        if (item == nullptr || item->CtlID != kChatSend) {
+        if (item == nullptr ||
+            (item->CtlID != kChatSend && item->CtlID != kChatHelp)) {
             break;
         }
         const bool pressed = (item->itemState & ODS_SELECTED) != 0;
         const bool focused = (item->itemState & ODS_FOCUS) != 0;
-        const HBRUSH face = CreateSolidBrush(
-            pressed ? kButtonHoverColor : kButtonColor);
+        const bool is_active_help = (item->CtlID == kChatHelp && g_help_requested.load());
+        const COLORREF btn_color = is_active_help
+            ? (pressed ? RGB(160, 100, 20) : RGB(180, 115, 25))
+            : (pressed ? kButtonHoverColor : kButtonColor);
+        const HBRUSH face = CreateSolidBrush(btn_color);
         FillRect(item->hDC, &item->rcItem, face);
         DeleteObject(face);
         if (focused) {
@@ -1395,13 +1468,15 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
         const int pad = dpi_scaled(8, dpi);
         const int gap = dpi_scaled(8, dpi);
         const int row_height = dpi_scaled(28, dpi);
-        const int send_width = dpi_scaled(76, dpi);
+        const int send_width = dpi_scaled(68, dpi);
+        const int help_width = dpi_scaled(96, dpi);
         const int width = LOWORD(lparam);
         const int height = HIWORD(lparam);
         // Lay the bottom row out from the right edge so the input and the
-        // button always meet with one gap and neither overhangs the frame.
+        // buttons always meet with one gap and none overhangs the frame.
         const int row_y = std::max(pad, height - pad - row_height);
-        const int send_x = std::max(pad, width - pad - send_width);
+        const int help_x = std::max(pad, width - pad - help_width);
+        const int send_x = std::max(pad, help_x - gap - send_width);
         if (g_chat_messages != nullptr) {
             MoveWindow(g_chat_messages, pad, pad,
                        std::max(pad, width - pad * 2),
@@ -1415,12 +1490,20 @@ LRESULT CALLBACK chat_window_proc(HWND window, UINT message, WPARAM wparam,
             MoveWindow(send_button, send_x, row_y, send_width, row_height,
                        TRUE);
         }
+        if (const HWND help_button = GetDlgItem(window, kChatHelp)) {
+            MoveWindow(help_button, help_x, row_y, help_width, row_height,
+                       TRUE);
+        }
         return 0;
     }
     case WM_COMMAND:
         if (LOWORD(wparam) == kChatSend && HIWORD(wparam) == BN_CLICKED &&
             g_chat_input != nullptr) {
             submit_chat_message();
+            return 0;
+        }
+        if (LOWORD(wparam) == kChatHelp && HIWORD(wparam) == BN_CLICKED) {
+            toggle_help_request();
             return 0;
         }
         break;
@@ -1843,14 +1926,43 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                                       : L"NSTU client");
             Shell_NotifyIconW(NIM_MODIFY, &tray);
         } else if (type == nstu::client::AgentMessageType::server_online) {
-            g_server_connected = lparam != 0;
-            if (lparam == 0 && g_chat_window != nullptr) {
+            const bool was_connected = g_server_connected.load();
+            const bool now_connected = lparam != 0;
+            g_server_connected = now_connected;
+            if (!now_connected && g_chat_window != nullptr) {
                 // The teacher session dropped. Take the chat window down so it
                 // cannot sit open against a server that is no longer there, and
                 // make sure the exam-restore path does not bring it back while
                 // still disconnected.
                 ShowWindow(g_chat_window, SW_HIDE);
                 g_chat_was_visible_for_exam = false;
+            } else if (!was_connected && now_connected && g_help_requested.load()) {
+                // Reconnect semantics: Re-send active help request to restored session.
+                const auto now_ms = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count());
+                const auto payload = nstu::control::encode_help_request({
+                    .active = true,
+                    .timestamp_unix_ms = now_ms,
+                    .message = g_last_help_note,
+                });
+                if (!payload.empty()) {
+                    queue_service_message({
+                        nstu::client::AgentMessageType::help_request,
+                        payload,
+                    });
+                }
+            }
+        } else if (type == nstu::client::AgentMessageType::help_ack) {
+            g_help_requested = false;
+            g_last_help_note.clear();
+            append_chat_line(L"Teacher acknowledged your help request.");
+            if (g_chat_window != nullptr) {
+                if (const HWND help_button = GetDlgItem(g_chat_window, kChatHelp)) {
+                    SetWindowTextW(help_button, L"Raise Hand");
+                    InvalidateRect(help_button, nullptr, TRUE);
+                }
             }
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
             if (exam_host_engaged()) {

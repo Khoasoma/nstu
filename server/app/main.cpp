@@ -1875,6 +1875,19 @@ void draw_client_card(const nstu::server::ClientRecord& client, float width,
             state.annotation_enabled = false;
         }
         ImGui::TextUnformatted(client.hostname.c_str());
+        if (client.help_requested) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4{1.0f, 0.65f, 0.0f, 1.0f}, "[?]");
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::TextUnformatted(tr(state, "Help Requested", "Yêu cầu trợ giúp"));
+                if (!client.help_message.empty()) {
+                    ImGui::Separator();
+                    ImGui::TextWrapped("%s", client.help_message.c_str());
+                }
+                ImGui::EndTooltip();
+            }
+        }
         const float status_width =
             ImGui::CalcTextSize(client_status_label(client.status, state)).x;
         ImGui::SameLine(ImGui::GetContentRegionMax().x - status_width);
@@ -2014,6 +2027,19 @@ void draw_room_client_table(
                 ImGui::SameLine();
                 ImGui::TextColored(ImVec4{0.9f, 0.28f, 0.3f, 1.0f}, "●");
             }
+            if (client->help_requested) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4{1.0f, 0.65f, 0.0f, 1.0f}, "[?]");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::TextUnformatted(tr(state, "Help Requested", "Yêu cầu trợ giúp"));
+                    if (!client->help_message.empty()) {
+                        ImGui::Separator();
+                        ImGui::TextWrapped("%s", client->help_message.c_str());
+                    }
+                    ImGui::EndTooltip();
+                }
+            }
 
             // Column 2: IP Address
             ImGui::TableSetColumnIndex(2);
@@ -2060,6 +2086,13 @@ void draw_room_client_table(
                 const char* btn_label = locked ? tr(state, "Unlock", "Mở") : tr(state, "Lock", "Khóa");
                 if (ImGui::SmallButton(btn_label)) {
                     (void)control_plane.set_locked(client->id, !locked, nullptr);
+                }
+            }
+            if (client->help_requested) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(tr(state, "Ack Help", "Giải quyết"))) {
+                    std::string err;
+                    (void)control_plane.resolve_help_request(client->id, &err);
                 }
             }
 
@@ -2204,6 +2237,28 @@ void draw_selected_client(
     }
     ImGui::SameLine();
     draw_status_badge(selected_client->status, state);
+    if (selected_client->help_requested) {
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.32f, 0.20f, 0.05f, 1.0f});
+        if (ImGui::BeginChild("help-banner", {0, scaled(34.0f)}, true, ImGuiWindowFlags_NoScrollbar)) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(ImVec4{1.0f, 0.75f, 0.15f, 1.0f}, "[!] %s",
+                               tr(state, "Help Requested", "Yêu cầu trợ giúp"));
+            if (!selected_client->help_message.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("— %s", selected_client->help_message.c_str());
+            }
+            ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
+                                     ImGui::GetContentRegionMax().x - scaled(150.0f)));
+            if (ImGui::SmallButton(tr(state, "Acknowledge Help", "Giải quyết trợ giúp"))) {
+                std::string error;
+                (void)control_plane.resolve_help_request(selected_client->id, &error);
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+    }
     ImGui::TextDisabled("%s", selected_client->address.c_str());
     bool managed = selected_client->frozen;
     if (ImGui::Checkbox(
@@ -4120,6 +4175,12 @@ void draw_workspace_toolbar(
         state.room_filter = RoomFilter::offline;
         state.show_offline = true;
     }
+    ImGui::SameLine();
+    if (draw_filter_chip("help", tr(state, "Help", "Trợ giúp"),
+                         counts.help,
+                         state.room_filter == RoomFilter::help)) {
+        state.room_filter = RoomFilter::help;
+    }
 
     ImGui::SameLine();
     ImGui::TextDisabled("|");
@@ -4174,6 +4235,11 @@ void draw_workspace_toolbar(
             ImGui::SameLine();
             if (ImGui::SmallButton(tr(state, "Bulk Refresh", "Chụp lại"))) {
                 state.pending_bulk_action = BulkActionKind::refresh_snapshots;
+                state.bulk_confirmation_open = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Ack Help", "Giải quyết trợ giúp"))) {
+                state.pending_bulk_action = BulkActionKind::acknowledge_help;
                 state.bulk_confirmation_open = true;
             }
         }
