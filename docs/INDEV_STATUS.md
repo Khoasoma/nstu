@@ -34,6 +34,14 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **SAS Formatting Helper** | `format_short_authentication_string` in `nstu/pairing.hpp` formatting 6-digit SAS codes as `XXX YYY` for student visual inspection | **Merged to main** (`eb54145`) |
 | **Fail-Closed Pairing & Sliced Heartbeats** | Fail-closed pairing flow if code observer or confirmation callback is omitted; sliced confirmation loop maintaining keepalive heartbeats to prevent TCP timeout | **Merged to main** (`eb54145`) |
 
+## Integrated Installer Provisioning & Firewall Scoping (Roadmap P1.1 / Task 8)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Server Firewall Provisioning** | Self-contained least-privilege Windows Defender Firewall rules for TCP 47001 (control plane) and UDP 47001 (discovery beacon) scoped strictly to `nstu-server.exe` on `private,domain` profiles | **Merged to main** (`420dacb`) |
+| **Uninstall & Rollback Teardown** | Automatic deletion of server firewall rules during uninstall and install abort/rollback, preventing orphaned firewall entries | **Merged to main** (`420dacb`) |
+| **Firewall Provisioning Validation** | Automated test `packaging/test-installer-firewall-provisioning.ps1` integrated into Windows CI validating rule specifications, absence of public profiles, and rollback cleanup | **Merged to main** (`420dacb`) |
+
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
 
 | Work Area | Scope & Implementation | Status |
