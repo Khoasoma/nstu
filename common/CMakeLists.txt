@@ -26,6 +26,7 @@ add_library(nstu_common STATIC
     src/screen_snapshot.cpp
     src/secret_store.cpp
     src/telemetry.cpp
+    src/uwf_overlay_report.cpp
     src/video_transport.cpp
     src/wfp_allowlist.cpp
 )

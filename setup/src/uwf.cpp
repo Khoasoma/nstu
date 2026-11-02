@@ -5,9 +5,12 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <array>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace nstu::setup {
 namespace {
@@ -151,7 +154,7 @@ public:
         ULONG returned = 0;
         return enumerator->Next(3000, 1, object.GetAddressOf(), &returned) ==
                    WBEM_S_NO_ERROR &&
-               returned == 1 && object != nullptr;
+               returned == 1u && object != nullptr;
     }
 
     bool call(IWbemClassObject* instance, const wchar_t* method,
@@ -226,7 +229,7 @@ public:
         if (output_parameters != nullptr) {
             *output_parameters = output;
         }
-        return returned == 0;
+        return returned == 0u;
     }
 
     bool contains(IWbemClassObject* instance, const wchar_t* argument_name,
@@ -238,6 +241,81 @@ public:
             return false;
         }
         return variant_bool(output.Get(), L"bFound", found);
+    }
+
+    bool call_uint32(IWbemClassObject* instance, const wchar_t* method,
+                     std::wstring_view argument_name = {},
+                     std::uint32_t argument_value = 0,
+                     std::uint32_t* return_value = nullptr) {
+        if (instance == nullptr || services_ == nullptr) {
+            return false;
+        }
+        std::wstring object_path;
+        std::wstring class_name;
+        if (!variant_string(instance, L"__PATH", object_path) ||
+            !variant_string(instance, L"__CLASS", class_name)) {
+            return false;
+        }
+        Bstr class_path(class_name);
+        ComPtr<IWbemClassObject> class_object;
+        if (class_path.get() == nullptr ||
+            FAILED(services_->GetObject(class_path.get(), 0, nullptr,
+                                        &class_object, nullptr))) {
+            return false;
+        }
+        Bstr method_name(method);
+        ComPtr<IWbemClassObject> input_definition;
+        if (method_name.get() == nullptr ||
+            FAILED(class_object->GetMethod(method_name.get(), 0,
+                                           &input_definition, nullptr))) {
+            return false;
+        }
+        ComPtr<IWbemClassObject> input;
+        if (input_definition &&
+            FAILED(input_definition->SpawnInstance(0, &input))) {
+            return false;
+        }
+        if (!argument_name.empty()) {
+            if (!input) {
+                return false;
+            }
+            // Microsoft WMI CIM uint32 maps to Automation VT_I4 (4-byte signed integer):
+            // https://learn.microsoft.com/en-us/windows/win32/wmisdk/numbers
+            // Explicitly range-check against INT32_MAX to prevent signed overflow wrapping.
+            if (argument_value >
+                static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+                return false;
+            }
+            Bstr property(argument_name);
+            VARIANT variant;
+            VariantInit(&variant);
+            variant.vt = VT_I4;
+            variant.lVal = static_cast<LONG>(argument_value);
+            const HRESULT put = property.get() == nullptr
+                ? E_OUTOFMEMORY
+                : input->Put(property.get(), 0, &variant, 0);
+            VariantClear(&variant);
+            if (FAILED(put)) {
+                return false;
+            }
+        }
+        Bstr path(object_path);
+        ComPtr<IWbemClassObject> output;
+        if (path.get() == nullptr ||
+            FAILED(services_->ExecMethod(path.get(), method_name.get(), 0,
+                                         nullptr, input.Get(), &output,
+                                         nullptr)) ||
+            !output) {
+            return false;
+        }
+        std::uint32_t returned = 0;
+        if (!variant_uint32(output.Get(), L"ReturnValue", returned)) {
+            return false;
+        }
+        if (return_value != nullptr) {
+            *return_value = returned;
+        }
+        return returned == 0u;
     }
 
 private:
@@ -285,17 +363,17 @@ bool feature_state(bool& known, bool& enabled) {
     ULONG returned = 0;
     const HRESULT status =
         enumerator->Next(3000, 1, object.GetAddressOf(), &returned);
-    if (status == WBEM_S_FALSE && returned == 0) {
+    if (status == WBEM_S_FALSE && returned == 0u) {
         known = true;
         return true;
     }
     std::uint32_t install_state = 0;
-    if (status != WBEM_S_NO_ERROR || returned != 1 || !object ||
+    if (status != WBEM_S_NO_ERROR || returned != 1u || !object ||
         !variant_uint32(object.Get(), L"InstallState", install_state)) {
         return false;
     }
     known = true;
-    enabled = install_state == 1;
+    enabled = install_state == 1u;
     return true;
 }
 
@@ -310,7 +388,7 @@ std::optional<std::wstring> volume_exclusion(
     // than the path will actually use after restart.
     const auto root = data_root.root_path();
     const auto drive = root.root_name().wstring();
-    if (drive.size() != 2 || drive[1] != L':' ||
+    if (drive.size() != 2u || drive[1] != L':' ||
         !((drive[0] >= L'A' && drive[0] <= L'Z') ||
           (drive[0] >= L'a' && drive[0] <= L'z')) ||
         GetDriveTypeW(root.c_str()) != DRIVE_FIXED) {
@@ -392,7 +470,7 @@ bool is_uwf_supported_product(std::uint32_t product) noexcept {
 
 UwfEnableGate evaluate_uwf_enable(
     const UwfEnableReadiness& readiness) noexcept {
-    if (readiness.product_type == 0 || !readiness.feature_known) {
+    if (readiness.product_type == 0u || !readiness.feature_known) {
         return UwfEnableGate::probe_unavailable;
     }
     if (!is_uwf_supported_product(readiness.product_type)) {
@@ -613,7 +691,7 @@ UwfProtectionProbeResult probe_uwf_protection(
     }
 
     const auto product = product_type();
-    if (product == 0) {
+    if (product == 0u) {
         result.detail = "the Windows edition could not be determined";
         return result;
     }
@@ -705,6 +783,520 @@ UwfProtectionProbeResult probe_uwf_protection(
         result.detail = "UWF is protecting the NSTU volume in this session";
     }
     return result;
+}
+
+namespace {
+
+class ProductionUwfWmi final : public UwfWmi {
+public:
+    bool connect() { return writer_.connect(); }
+
+    bool read_filter(UwfFilterState& state) override {
+        ComPtr<IWbemClassObject> filter;
+        if (!writer_.query_one(
+                L"SELECT CurrentEnabled, NextEnabled FROM UWF_Filter", filter)) {
+            return false;
+        }
+        return variant_bool(filter.Get(), L"CurrentEnabled", state.current_enabled) &&
+               variant_bool(filter.Get(), L"NextEnabled", state.next_enabled);
+    }
+
+    bool read_overlay_config(bool current, UwfOverlayConfig& config) override {
+        const std::wstring query = current
+            ? L"SELECT * FROM UWF_OverlayConfig WHERE CurrentSession=TRUE"
+            : L"SELECT * FROM UWF_OverlayConfig WHERE CurrentSession=FALSE";
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(query.c_str(), obj)) {
+            return false;
+        }
+        std::uint32_t type_val = 0;
+        if (!variant_uint32(obj.Get(), L"Type", type_val) ||
+            !variant_uint32(obj.Get(), L"MaximumSize", config.maximum_size_mb)) {
+            return false;
+        }
+        if (type_val != static_cast<std::uint32_t>(UwfOverlayType::ram) &&
+            type_val != static_cast<std::uint32_t>(UwfOverlayType::disk)) {
+            return false;
+        }
+        config.type = static_cast<UwfOverlayType>(type_val);
+        return true;
+    }
+
+    bool read_overlay(UwfOverlayUsage& usage) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(L"SELECT * FROM UWF_Overlay", obj)) {
+            return false;
+        }
+        return variant_uint32(obj.Get(), L"OverlayConsumption", usage.consumption_mb) &&
+               variant_uint32(obj.Get(), L"AvailableSpace", usage.available_mb) &&
+               variant_uint32(obj.Get(), L"WarningOverlayThreshold", usage.warning_mb) &&
+               variant_uint32(obj.Get(), L"CriticalOverlayThreshold", usage.critical_mb);
+    }
+
+    bool read_servicing(bool current, bool& enabled) override {
+        const std::wstring query = current
+            ? L"SELECT * FROM UWF_Servicing WHERE CurrentSession=TRUE"
+            : L"SELECT * FROM UWF_Servicing WHERE CurrentSession=FALSE";
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(query.c_str(), obj)) {
+            return false;
+        }
+        return variant_bool(obj.Get(), L"ServicingEnabled", enabled);
+    }
+
+    bool set_overlay_type(UwfOverlayType type) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(
+                L"SELECT * FROM UWF_OverlayConfig WHERE CurrentSession=FALSE", obj)) {
+            return false;
+        }
+        return writer_.call_uint32(obj.Get(), L"SetType", L"Type",
+                                   static_cast<std::uint32_t>(type));
+    }
+
+    bool set_overlay_maximum_size(std::uint32_t size_mb) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(
+                L"SELECT * FROM UWF_OverlayConfig WHERE CurrentSession=FALSE", obj)) {
+            return false;
+        }
+        return writer_.call_uint32(obj.Get(), L"SetMaximumSize", L"size", size_mb);
+    }
+
+    bool set_warning_threshold(std::uint32_t size_mb) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(L"SELECT * FROM UWF_Overlay", obj)) {
+            return false;
+        }
+        return writer_.call_uint32(obj.Get(), L"SetWarningThreshold", L"size", size_mb);
+    }
+
+    bool set_critical_threshold(std::uint32_t size_mb) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(L"SELECT * FROM UWF_Overlay", obj)) {
+            return false;
+        }
+        return writer_.call_uint32(obj.Get(), L"SetCriticalThreshold", L"size", size_mb);
+    }
+
+    bool set_servicing(bool enabled) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(
+                L"SELECT * FROM UWF_Servicing WHERE CurrentSession=FALSE", obj)) {
+            return false;
+        }
+        return writer_.call(obj.Get(), enabled ? L"Enable" : L"Disable");
+    }
+
+    bool set_filter_enabled(bool enabled) override {
+        ComPtr<IWbemClassObject> obj;
+        if (!writer_.query_one(L"SELECT * FROM UWF_Filter", obj)) {
+            return false;
+        }
+        return writer_.call(obj.Get(), enabled ? L"Enable" : L"Disable");
+    }
+
+    bool find_file_exclusion(std::wstring_view path, bool& found) override {
+        found = false;
+        ComPtr<IWbemClassObject> volume;
+        if (!system_volume(volume)) {
+            return false;
+        }
+        return writer_.contains(volume.Get(), L"FileName", path, found);
+    }
+
+    bool add_file_exclusion(std::wstring_view path) override {
+        ComPtr<IWbemClassObject> volume;
+        if (!system_volume(volume)) {
+            return false;
+        }
+        return writer_.call(volume.Get(), L"AddExclusion", L"FileName", path);
+    }
+
+    bool remove_file_exclusion(std::wstring_view path) override {
+        ComPtr<IWbemClassObject> volume;
+        if (!system_volume(volume)) {
+            return false;
+        }
+        return writer_.call(volume.Get(), L"RemoveExclusion", L"FileName", path);
+    }
+
+private:
+    bool system_volume(ComPtr<IWbemClassObject>& volume) {
+        wchar_t win_dir[MAX_PATH] = {};
+        if (GetSystemWindowsDirectoryW(win_dir, MAX_PATH) == 0 || win_dir[0] == L'\0') {
+            return false;
+        }
+        const std::wstring drive{win_dir[0], L':'};
+        const std::wstring query =
+            L"SELECT * FROM UWF_Volume WHERE CurrentSession=FALSE AND DriveLetter='" +
+            drive + L"'";
+        return writer_.query_one(query.c_str(), volume);
+    }
+
+    WmiWriter writer_;
+};
+
+// Microsoft UWF Antimalware Support documentation:
+// https://learn.microsoft.com/en-us/windows-hardware/customize/enterprise/uwf-antimalware-support
+// Excluded paths persist across reboot-to-restore.
+constexpr std::wstring_view kDefenderExclusionPaths[] = {
+    L"\\Program Files\\Windows Defender",
+    L"\\ProgramData\\Microsoft\\Windows Defender",
+    L"\\Windows\\WindowsUpdate.log",
+    L"\\Windows\\Temp\\MpCmdRun.log",
+};
+
+} // namespace
+
+// MaximumSize sizing formula and clamps:
+// For RAM overlay (type == UwfOverlayType::ram):
+//   Requires at least 4096 MiB physical RAM.
+//   Formula: clamp(physical_ram_mb / 4, 1024, 4096) MiB.
+//   Warning threshold: 75% of maximum size ((max * 75) / 100).
+//   Critical threshold: 90% of maximum size ((max * 90) / 100).
+// For Disk overlay (type == UwfOverlayType::disk):
+//   Requires at least 2048 MiB free disk space on the protected volume.
+//   Formula: clamp(free_disk_mb / 4, 1024, 8192) MiB.
+//   Warning threshold: 75% of maximum size ((max * 75) / 100).
+//   Critical threshold: 90% of maximum size ((max * 90) / 100).
+std::optional<std::uint32_t> uwf_maximum_size_mb(
+    UwfOverlayType type, std::uint64_t physical_ram_mb,
+    std::uint64_t free_disk_mb) noexcept {
+    if (type == UwfOverlayType::ram) {
+        if (physical_ram_mb < 4096u) {
+            return std::nullopt;
+        }
+        const std::uint64_t size = std::clamp<std::uint64_t>(
+            physical_ram_mb / 4u, 1024u, 4096u);
+        return static_cast<std::uint32_t>(size);
+    }
+    if (type == UwfOverlayType::disk) {
+        if (free_disk_mb < 2048u) {
+            return std::nullopt;
+        }
+        const std::uint64_t size = std::clamp<std::uint64_t>(
+            free_disk_mb / 4u, 1024u, 8192u);
+        return static_cast<std::uint32_t>(size);
+    }
+    return std::nullopt;
+}
+
+UwfOperationResult configure_uwf_overlay(
+    UwfWmi& wmi, UwfOverlayType type, std::uint64_t physical_ram_mb,
+    std::uint64_t free_disk_mb) {
+    UwfFilterState filter_state;
+    if (!wmi.read_filter(filter_state) || filter_state.current_enabled) {
+        return {false, false, false, true};
+    }
+    const auto target_max_mb =
+        uwf_maximum_size_mb(type, physical_ram_mb, free_disk_mb);
+    if (!target_max_mb) {
+        return {false, false, false, true};
+    }
+
+    const std::uint32_t target_warning = static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(*target_max_mb) * 75ULL) / 100ULL);
+    const std::uint32_t target_critical = static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(*target_max_mb) * 90ULL) / 100ULL);
+
+    UwfOverlayConfig original_config;
+    if (!wmi.read_overlay_config(false, original_config)) {
+        return {false, false, false, true};
+    }
+    UwfOverlayUsage original_usage;
+    if (!wmi.read_overlay(original_usage)) {
+        return {false, false, false, true};
+    }
+
+    const bool need_type = original_config.type != type;
+    const bool need_size = original_config.maximum_size_mb != *target_max_mb;
+    const bool need_warning = original_usage.warning_mb != target_warning;
+    const bool need_critical = original_usage.critical_mb != target_critical;
+    if (!need_type && !need_size && !need_warning && !need_critical) {
+        return {true, false, false, true};
+    }
+
+    bool type_changed = false;
+    bool size_changed = false;
+    bool warning_changed = false;
+    bool critical_changed = false;
+    bool rollback_succeeded = true;
+
+    const bool switching_to_disk = need_type && type == UwfOverlayType::disk;
+    const bool raising_thresholds = need_critical
+        ? (target_critical >= original_usage.critical_mb)
+        : (target_warning >= original_usage.warning_mb);
+
+    auto rollback = [&]() {
+        // Rollback thresholds first (undoing threshold writes)
+        // Microsoft UWF threshold documentation:
+        // https://learn.microsoft.com/en-us/windows/configuration/unified-write-filter/uwf-overlaysetwarningthreshold
+        // https://learn.microsoft.com/en-us/windows/configuration/unified-write-filter/uwf-overlaysetcriticalthreshold
+        // Size 0 disables threshold notifications ("unset" state).
+        // When restoring original unset (0/0) thresholds, lowering-rollback restores warning
+        // to 0 first (strictly below the live critical threshold), then critical to 0 (disabling it).
+        if (raising_thresholds) {
+            // Forward was raising, so rollback is LOWERING: write warning first, then critical.
+            if (warning_changed) {
+                if (!wmi.set_warning_threshold(original_usage.warning_mb)) {
+                    rollback_succeeded = false;
+                }
+            }
+            if (critical_changed) {
+                if (!wmi.set_critical_threshold(original_usage.critical_mb)) {
+                    rollback_succeeded = false;
+                }
+            }
+        } else {
+            // Forward was lowering, so rollback is RAISING: write critical first, then warning.
+            if (critical_changed) {
+                if (!wmi.set_critical_threshold(original_usage.critical_mb)) {
+                    rollback_succeeded = false;
+                }
+            }
+            if (warning_changed) {
+                if (!wmi.set_warning_threshold(original_usage.warning_mb)) {
+                    rollback_succeeded = false;
+                }
+            }
+        }
+
+        // Rollback type and size
+        if (switching_to_disk) {
+            // Forward wrote size then type, so rollback restores type then size.
+            if (type_changed) {
+                if (!wmi.set_overlay_type(original_config.type)) {
+                    rollback_succeeded = false;
+                }
+            }
+            if (size_changed) {
+                if (!wmi.set_overlay_maximum_size(original_config.maximum_size_mb)) {
+                    rollback_succeeded = false;
+                }
+            }
+        } else {
+            // Forward wrote type then size, so rollback restores size then type.
+            if (size_changed) {
+                if (!wmi.set_overlay_maximum_size(original_config.maximum_size_mb)) {
+                    rollback_succeeded = false;
+                }
+            }
+            if (type_changed) {
+                if (!wmi.set_overlay_type(original_config.type)) {
+                    rollback_succeeded = false;
+                }
+            }
+        }
+    };
+
+    auto make_failure_result = [&]() -> UwfOperationResult {
+        rollback();
+        const bool state_changed = !rollback_succeeded;
+        return {false, state_changed, state_changed, rollback_succeeded};
+    };
+
+    if (switching_to_disk) {
+        if (need_size) {
+            if (!wmi.set_overlay_maximum_size(*target_max_mb)) {
+                return make_failure_result();
+            }
+            size_changed = true;
+        }
+        if (need_type) {
+            if (!wmi.set_overlay_type(type)) {
+                return make_failure_result();
+            }
+            type_changed = true;
+        }
+    } else {
+        if (need_type) {
+            if (!wmi.set_overlay_type(type)) {
+                return make_failure_result();
+            }
+            type_changed = true;
+        }
+        if (need_size) {
+            if (!wmi.set_overlay_maximum_size(*target_max_mb)) {
+                return make_failure_result();
+            }
+            size_changed = true;
+        }
+    }
+
+    if (raising_thresholds) {
+        if (need_critical) {
+            if (!wmi.set_critical_threshold(target_critical)) {
+                return make_failure_result();
+            }
+            critical_changed = true;
+        }
+        if (need_warning) {
+            if (!wmi.set_warning_threshold(target_warning)) {
+                return make_failure_result();
+            }
+            warning_changed = true;
+        }
+    } else {
+        if (need_warning) {
+            if (!wmi.set_warning_threshold(target_warning)) {
+                return make_failure_result();
+            }
+            warning_changed = true;
+        }
+        if (need_critical) {
+            if (!wmi.set_critical_threshold(target_critical)) {
+                return make_failure_result();
+            }
+            critical_changed = true;
+        }
+    }
+
+    return {true, true, true, true};
+}
+
+std::optional<UwfOverlayUsage> probe_uwf_overlay(UwfWmi& wmi) {
+    UwfOverlayUsage usage;
+    if (!wmi.read_overlay(usage)) {
+        return std::nullopt;
+    }
+    return usage;
+}
+
+UwfOperationResult set_uwf_servicing(UwfWmi& wmi, bool enabled) {
+    bool current_servicing = false;
+    bool next_servicing = false;
+    if (!wmi.read_servicing(true, current_servicing) ||
+        !wmi.read_servicing(false, next_servicing)) {
+        return {false, false, false, true};
+    }
+    if (current_servicing && enabled) {
+        return {false, false, false, true};
+    }
+    if (next_servicing == enabled) {
+        return {true, false, false, true};
+    }
+    if (!wmi.set_servicing(enabled)) {
+        return {false, false, false, true};
+    }
+    return {true, true, true, true};
+}
+
+UwfOperationResult disable_uwf(UwfWmi& wmi) {
+    UwfFilterState state;
+    if (!wmi.read_filter(state)) {
+        return {false, false, false, true};
+    }
+    if (!state.current_enabled && state.next_enabled) {
+        return {false, false, false, true};
+    }
+    if (!state.next_enabled) {
+        return {true, false, false, true};
+    }
+    if (!wmi.set_filter_enabled(false)) {
+        return {false, false, false, true};
+    }
+    return {true, true, true, true};
+}
+
+UwfOperationResult add_uwf_defender_exclusions(UwfWmi& wmi) {
+    std::vector<std::wstring_view> to_add;
+    to_add.reserve(std::size(kDefenderExclusionPaths));
+
+    for (const auto path : kDefenderExclusionPaths) {
+        bool found = false;
+        if (!wmi.find_file_exclusion(path, found)) {
+            return {false, false, false, true};
+        }
+        if (!found) {
+            to_add.push_back(path);
+        }
+    }
+
+    if (to_add.empty()) {
+        return {true, false, false, true};
+    }
+
+    std::vector<std::wstring_view> added;
+    added.reserve(to_add.size());
+    bool rollback_succeeded = true;
+
+    for (const auto path : to_add) {
+        if (!wmi.add_file_exclusion(path)) {
+            for (auto it = added.rbegin(); it != added.rend(); ++it) {
+                if (!wmi.remove_file_exclusion(*it)) {
+                    rollback_succeeded = false;
+                }
+            }
+            const bool state_changed = !rollback_succeeded;
+            return {false, state_changed, state_changed, rollback_succeeded};
+        }
+        added.push_back(path);
+    }
+
+    return {true, true, true, true};
+}
+
+UwfOperationResult configure_uwf_overlay(
+    UwfOverlayType type, std::uint64_t physical_ram_mb,
+    std::uint64_t free_disk_mb) {
+    ComApartment apartment;
+    if (!apartment.ready()) {
+        return {false, false, false, true};
+    }
+    ProductionUwfWmi wmi;
+    if (!wmi.connect()) {
+        return {false, false, false, true};
+    }
+    return configure_uwf_overlay(wmi, type, physical_ram_mb, free_disk_mb);
+}
+
+std::optional<UwfOverlayUsage> probe_uwf_overlay() {
+    ComApartment apartment;
+    if (!apartment.ready()) {
+        return std::nullopt;
+    }
+    ProductionUwfWmi wmi;
+    if (!wmi.connect()) {
+        return std::nullopt;
+    }
+    return probe_uwf_overlay(wmi);
+}
+
+UwfOperationResult set_uwf_servicing(bool enabled) {
+    ComApartment apartment;
+    if (!apartment.ready()) {
+        return {false, false, false, true};
+    }
+    ProductionUwfWmi wmi;
+    if (!wmi.connect()) {
+        return {false, false, false, true};
+    }
+    return set_uwf_servicing(wmi, enabled);
+}
+
+UwfOperationResult disable_uwf() {
+    ComApartment apartment;
+    if (!apartment.ready()) {
+        return {false, false, false, true};
+    }
+    ProductionUwfWmi wmi;
+    if (!wmi.connect()) {
+        return {false, false, false, true};
+    }
+    return disable_uwf(wmi);
+}
+
+UwfOperationResult add_uwf_defender_exclusions() {
+    ComApartment apartment;
+    if (!apartment.ready()) {
+        return {false, false, false, true};
+    }
+    ProductionUwfWmi wmi;
+    if (!wmi.connect()) {
+        return {false, false, false, true};
+    }
+    return add_uwf_defender_exclusions(wmi);
 }
 
 } // namespace nstu::setup

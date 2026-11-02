@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
+#include <string_view>
 
 namespace nstu::setup {
 
@@ -105,5 +107,81 @@ struct UwfProtectionProbeResult {
 // unprotected rather than unknown, so the exam gate fails closed.
 [[nodiscard]] UwfProtectionProbeResult probe_uwf_protection(
     const std::filesystem::path& data_root);
+
+// UWF_OverlayConfig and UWF_Servicing each have distinct current/next rows.
+// Only next-session rows may be changed; UWF_Overlay is a single live row.
+enum class UwfOverlayType : std::uint32_t { ram = 0, disk = 1 };
+struct UwfOverlayConfig {
+    UwfOverlayType type = UwfOverlayType::ram;
+    std::uint32_t maximum_size_mb = 0;
+};
+struct UwfOverlayUsage {
+    std::uint32_t consumption_mb = 0;
+    std::uint32_t available_mb = 0;
+    std::uint32_t warning_mb = 0;
+    std::uint32_t critical_mb = 0;
+};
+struct UwfFilterState {
+    bool current_enabled = false;
+    bool next_enabled = false;
+};
+
+// This seam is deliberately typed: tests supply a fake; the production adapter
+// issues only the named UWF provider methods. Every write targets a next-boot
+// setting except the provider's global warning/critical thresholds.
+class UwfWmi {
+public:
+    virtual ~UwfWmi() = default;
+    virtual bool read_filter(UwfFilterState& state) = 0;
+    virtual bool read_overlay_config(bool current, UwfOverlayConfig& config) = 0;
+    virtual bool read_overlay(UwfOverlayUsage& usage) = 0;
+    virtual bool read_servicing(bool current, bool& enabled) = 0;
+    virtual bool set_overlay_type(UwfOverlayType type) = 0;
+    virtual bool set_overlay_maximum_size(std::uint32_t size_mb) = 0;
+    virtual bool set_warning_threshold(std::uint32_t size_mb) = 0;
+    virtual bool set_critical_threshold(std::uint32_t size_mb) = 0;
+    virtual bool set_servicing(bool enabled) = 0;
+    virtual bool set_filter_enabled(bool enabled) = 0;
+    virtual bool find_file_exclusion(std::wstring_view path, bool& found) = 0;
+    virtual bool add_file_exclusion(std::wstring_view path) = 0;
+    virtual bool remove_file_exclusion(std::wstring_view path) = 0;
+};
+
+struct UwfOperationResult {
+    bool succeeded = false;
+    bool changed = false;
+    bool reboot_required = false;
+    // False means a prior successful write could not be restored. No automatic
+    // restart is safe until an operator has reconciled next-session state.
+    bool rollback_succeeded = true;
+};
+
+// Inputs are MiB, measured before the call; zero/insufficient capacity rejects
+// the request. Disk sizing uses available bytes on the protected system volume.
+[[nodiscard]] std::optional<std::uint32_t> uwf_maximum_size_mb(
+    UwfOverlayType type, std::uint64_t physical_ram_mb,
+    std::uint64_t free_disk_mb) noexcept;
+[[nodiscard]] UwfOperationResult configure_uwf_overlay(
+    UwfWmi& wmi, UwfOverlayType type, std::uint64_t physical_ram_mb,
+    std::uint64_t free_disk_mb);
+[[nodiscard]] std::optional<UwfOverlayUsage> probe_uwf_overlay(UwfWmi& wmi);
+[[nodiscard]] UwfOperationResult set_uwf_servicing(UwfWmi& wmi, bool enabled);
+// Controlled decommission: schedule filter disable only. Never remove operator
+// exclusions/protection or uninstall the optional Windows feature.
+[[nodiscard]] UwfOperationResult disable_uwf(UwfWmi& wmi);
+// Human sign-off required before any default-on use (installer page or service).
+// Explicit opt-in only; UWF exclusions are NOT Defender Antivirus scan
+// exclusions. The four Microsoft-listed paths alone are persisted by UWF.
+// Caveat: "If a Windows IoT Enterprise computer stops responding during Windows startup, see https://learn.microsoft.com/en-us/troubleshoot/windows-client/performance/windows-hangs-on-startup-after-excluding-uwf-from-microsoft-defender for a workaround." (https://learn.microsoft.com/en-us/windows-hardware/customize/enterprise/uwf-antimalware-support)
+[[nodiscard]] UwfOperationResult add_uwf_defender_exclusions(UwfWmi& wmi);
+
+// Production entry points establish COM/WMI without exposing COM to callers.
+[[nodiscard]] UwfOperationResult configure_uwf_overlay(
+    UwfOverlayType type, std::uint64_t physical_ram_mb,
+    std::uint64_t free_disk_mb);
+[[nodiscard]] std::optional<UwfOverlayUsage> probe_uwf_overlay();
+[[nodiscard]] UwfOperationResult set_uwf_servicing(bool enabled);
+[[nodiscard]] UwfOperationResult disable_uwf();
+[[nodiscard]] UwfOperationResult add_uwf_defender_exclusions();
 
 } // namespace nstu::setup
