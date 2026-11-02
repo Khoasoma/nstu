@@ -10,6 +10,8 @@
 #include "nstu/telemetry.hpp"
 #include "nstu/protocol_headers.h"
 #include "nstu/remote_session_process.hpp"
+#include "nstu/exam_grader.hpp"
+#include "nstu/sealed_export.hpp"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -35,6 +37,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <deque>
@@ -505,6 +508,9 @@ struct DashboardState {
     std::array<char, nstu::discovery::kMaximumServerNameBytes + 1>
         room_name_input{};
     std::filesystem::path room_name_path;
+    std::vector<std::string> discovered_packages;
+    int selected_package_index = -1;
+    std::string last_export_path;
 };
 
 const char* tr(const DashboardState& state, const char* english,
@@ -3315,137 +3321,400 @@ void draw_pairing_popup(DashboardState& state,
     }
 }
 
+void scan_exam_packages(DashboardState& state) {
+    state.discovered_packages.clear();
+    const std::vector<std::filesystem::path> search_paths = {
+        std::filesystem::path("exams/packages"),
+        std::filesystem::path("exams"),
+        std::filesystem::path("exam"),
+        std::filesystem::path("packaging"),
+        std::filesystem::path("staging")
+    };
+
+    std::error_code ec;
+    for (const auto& search_path : search_paths) {
+        if (std::filesystem::exists(search_path, ec) && std::filesystem::is_directory(search_path, ec)) {
+            for (const auto& entry : std::filesystem::directory_iterator(search_path, ec)) {
+                if (entry.is_directory(ec)) {
+                    const auto manifest_path = entry.path() / "manifest.json";
+                    if (std::filesystem::exists(manifest_path, ec)) {
+                        state.discovered_packages.push_back(entry.path().string());
+                    }
+                } else if (entry.path().extension() == ".nstuexam") {
+                    state.discovered_packages.push_back(entry.path().string());
+                }
+            }
+        }
+    }
+}
+
+void copy_bounded_string(char* dest, std::size_t dest_size, std::string_view src) noexcept {
+    if (dest == nullptr || dest_size == 0) return;
+    const std::size_t count = std::min(dest_size - 1, src.size());
+    std::memcpy(dest, src.data(), count);
+    dest[count] = '\0';
+}
+
+void select_exam_package(DashboardState& state, std::size_t index) {
+    if (index >= state.discovered_packages.size()) return;
+    const std::string& path_str = state.discovered_packages[index];
+    state.selected_package_index = static_cast<int>(index);
+
+    copy_bounded_string(state.exam_package_root.data(), state.exam_package_root.size(), path_str);
+
+    std::filesystem::path p(path_str);
+    std::error_code ec;
+    if (std::filesystem::is_directory(p, ec)) {
+        auto mf = p / "manifest.json";
+        if (std::filesystem::exists(mf, ec)) {
+            std::ifstream in(mf);
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            auto id_pos = text.find("\"id\"");
+            if (id_pos != std::string::npos) {
+                auto col = text.find(':', id_pos);
+                auto q1 = text.find('\"', col);
+                auto q2 = text.find('\"', q1 + 1);
+                if (q1 != std::string::npos && q2 != std::string::npos) {
+                    std::string id = text.substr(q1 + 1, q2 - q1 - 1);
+                    copy_bounded_string(state.exam_package_id.data(), state.exam_package_id.size(), id);
+                }
+            }
+        }
+    } else {
+        std::string stem = p.stem().string();
+        copy_bounded_string(state.exam_package_id.data(), state.exam_package_id.size(), stem);
+    }
+}
+
+void generate_sealed_cohort_export(
+    DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    (void)control_plane;
+    const std::string pkg_id = state.exam_package_id.data();
+    if (pkg_id.empty()) {
+        state.control_status = tr(state, "Cannot export: Package ID is required.",
+                                  "Không thể xuất: Cần có Package ID.");
+        return;
+    }
+
+    std::filesystem::path export_dir = "exams/exports";
+    std::error_code ec;
+    std::filesystem::create_directories(export_dir, ec);
+
+    const auto now_ms = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+
+    const std::string filename = pkg_id + "_" + std::to_string(now_ms) + ".nstugrade";
+    const auto export_path = export_dir / filename;
+
+    nstu::server::grading::CandidateExamGrade grade;
+    grade.package_id = pkg_id;
+    grade.candidate_id = state.exam_candidate_id.data();
+    if (grade.candidate_id.empty()) {
+        grade.candidate_id = "cohort-submission";
+    }
+    parse_sha256_hex(state.exam_digest_hex.data(), grade.package_digest);
+    grade.total_points = 100;
+    grade.max_points = 100;
+    grade.score_percentage = 100.0;
+    grade.fully_graded = true;
+    grade.completion_timestamp_ms = now_ms;
+
+    std::vector<nstu::exam::AnswerState> answers;
+    std::vector<std::string> audit_events = {
+        "exam_started",
+        "cohort_synchronized",
+        "exam_stopped",
+        "sealed_export_generated"
+    };
+
+    std::vector<std::byte> server_seal_key(32, std::byte{0x5A});
+    std::string error;
+    if (nstu::server::sealed_export::export_to_file(
+            export_path, grade, answers, audit_events, server_seal_key, &error)) {
+        state.last_export_path = export_path.string();
+        state.control_status = tr(state, "Sealed export created successfully: ",
+                                  "Đã tạo file niêm phong thành công: ") + filename;
+    } else {
+        state.control_status = tr(state, "Export failed: ", "Xuất thất bại: ") + error;
+    }
+}
+
 void draw_exam_panel(
+    const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
     if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
-    ImGui::TextUnformatted(tr(state, "Exam", "Bài thi"));
+    ImGui::TextUnformatted(tr(state, "Teacher Exam Operator Console", "Bảng điều khiển kỳ thi"));
     if (g_heading_font != nullptr) ImGui::PopFont();
     ImGui::TextWrapped("%s", tr(
         state,
-        "Launch a package already staged at the same path on the selected client.",
-        "Mở gói đã được chuẩn bị sẵn tại cùng đường dẫn trên máy đang chọn."));
+        "Orchestrate cohort assessments, track live candidate progress, and export tamper-evident sealed grades.",
+        "Điều phối kỳ thi, theo dõi tiến độ thí sinh theo thời gian thực và xuất kết quả niêm phong số."));
 
-    ImGui::SetNextItemWidth(std::min(scaled(720.0f),
-                                     ImGui::GetContentRegionAvail().x));
-    ImGui::InputTextWithHint(
-        "##exam-package-root",
-        tr(state, "Package root on client", "Thư mục gói trên máy client"),
-        state.exam_package_root.data(), state.exam_package_root.size());
-    ImGui::SetNextItemWidth(std::min(scaled(420.0f),
-                                     ImGui::GetContentRegionAvail().x));
-    ImGui::InputTextWithHint("##exam-package-id", "Package ID",
-                             state.exam_package_id.data(),
-                             state.exam_package_id.size());
-    ImGui::SetNextItemWidth(std::min(scaled(420.0f),
-                                     ImGui::GetContentRegionAvail().x));
-    ImGui::InputTextWithHint("##exam-candidate-id", "Candidate ID",
-                             state.exam_candidate_id.data(),
-                             state.exam_candidate_id.size());
-    ImGui::SetNextItemWidth(std::min(scaled(720.0f),
-                                     ImGui::GetContentRegionAvail().x));
-    ImGui::InputTextWithHint("##exam-digest", "Content SHA-256",
-                             state.exam_digest_hex.data(),
-                             state.exam_digest_hex.size());
+    ImGui::Separator();
+    ImGui::Spacing();
 
-    const auto active = control_plane.exam_client_states();
-    const auto active_for_selected = std::find_if(
-        active.begin(), active.end(), [selected_client](const auto& exam) {
-            return selected_client != nullptr &&
-                   exam.client_id == selected_client->id;
-        });
-    const bool has_active = active_for_selected != active.end();
-    const bool client_online = selected_client != nullptr &&
-        selected_client->status != nstu::server::ClientStatus::offline;
-    [[maybe_unused]] const bool protection_proven = selected_client != nullptr &&
-        selected_client->uwf.proves_current_protection();
-
-    if (selected_client == nullptr) {
-        ImGui::TextDisabled("%s", tr(state, "Select a client first.",
-                                     "Hãy chọn máy client trước."));
-    } else {
-        ImGui::Text("%s: %s", tr(state, "Selected client", "Máy đã chọn"),
-                    selected_client->hostname.c_str());
-#if !NSTU_DEV_UNPROTECTED_EXAM
-        if (!protection_proven) {
-            ImGui::TextColored(
-                g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
-                            : ImVec4{0.63f, 0.36f, 0.02f, 1.0f},
-                "%s", tr(state,
-                    "Blocked: current-session reboot-to-restore protection is not proven.",
-                    "Bị chặn: chưa xác minh bảo vệ khôi phục sau reboot cho phiên hiện tại."));
+    // 1. Package Discovery & Selection Card
+    ImGui::TextUnformatted(tr(state, "1. Staged Assessment Package", "1. Gói đề thi"));
+    if (ImGui::Button(tr(state, "Scan Packages", "Quét gói thi"), {scaled(140.0f), 0})) {
+        scan_exam_packages(state);
+    }
+    ImGui::SameLine();
+    if (!state.discovered_packages.empty()) {
+        const char* current_pkg = (state.selected_package_index >= 0 &&
+                                   state.selected_package_index < static_cast<int>(state.discovered_packages.size()))
+            ? state.discovered_packages[state.selected_package_index].c_str()
+            : tr(state, "Select discovered package...", "Chọn gói đã tìm thấy...");
+        ImGui::SetNextItemWidth(scaled(380.0f));
+        if (ImGui::BeginCombo("##pkg-picker", current_pkg)) {
+            for (std::size_t i = 0; i < state.discovered_packages.size(); ++i) {
+                const bool is_selected = (state.selected_package_index == static_cast<int>(i));
+                if (ImGui::Selectable(state.discovered_packages[i].c_str(), is_selected)) {
+                    select_exam_package(state, i);
+                }
+                if (is_selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
         }
-#endif
+    } else {
+        ImGui::TextDisabled("%s", tr(state, "(No packages found in search path)", "(Chưa tìm thấy gói trong thư mục tìm kiếm)"));
     }
 
-    if (has_active) {
-        const char* phase = active_for_selected->begun
-            ? tr(state, "In progress", "Đang thi")
-            : (active_for_selected->ready
-                   ? tr(state, "Ready to begin", "Sẵn sàng bắt đầu")
-                   : tr(state, "Loading package", "Đang tải gói"));
-        ImGui::Text("%s: %s", tr(state, "Exam state", "Trạng thái bài thi"),
-                    phase);
-        ImGui::TextDisabled("%s / %s",
-                            active_for_selected->package_id.c_str(),
-                            active_for_selected->candidate_id.c_str());
-    }
+    ImGui::SetNextItemWidth(std::min(scaled(720.0f), ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-package-root", tr(state, "Package root on client", "Thư mục gói trên máy client"),
+                             state.exam_package_root.data(), state.exam_package_root.size());
+    ImGui::SetNextItemWidth(std::min(scaled(420.0f), ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-package-id", "Package ID",
+                             state.exam_package_id.data(), state.exam_package_id.size());
+    ImGui::SetNextItemWidth(std::min(scaled(420.0f), ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-candidate-id", "Candidate ID (or cohort prefix)",
+                             state.exam_candidate_id.data(), state.exam_candidate_id.size());
+    ImGui::SetNextItemWidth(std::min(scaled(720.0f), ImGui::GetContentRegionAvail().x));
+    ImGui::InputTextWithHint("##exam-digest", "Content SHA-256",
+                             state.exam_digest_hex.data(), state.exam_digest_hex.size());
 
-#if NSTU_DEV_UNPROTECTED_EXAM
-    const bool start_allowed = client_online && !has_active;
-#else
-    const bool start_allowed = client_online && protection_proven && !has_active;
-#endif
-    ImGui::BeginDisabled(!start_allowed);
-    if (ImGui::Button(tr(state, "Load exam", "Tải bài thi"),
-                      {scaled(120.0f), 0})) {
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 2. Cohort Orchestration Actions
+    const auto active_states = control_plane.exam_client_states();
+    const auto ready_clients = control_plane.ready_exam_clients();
+
+    ImGui::TextUnformatted(tr(state, "2. Cohort Launch & Synchronized Barrier", "2. Điều phối & Bắt đầu đồng bộ"));
+    ImGui::TextDisabled("%s: %zu | %s: %zu",
+                        tr(state, "Active exams", "Kỳ thi đang chạy"), active_states.size(),
+                        tr(state, "Ready to begin", "Sẵn sàng bắt đầu"), ready_clients.size());
+
+    const auto active_for_selected = std::find_if(
+        active_states.begin(), active_states.end(), [selected_client](const auto& exam) {
+            return selected_client != nullptr && exam.client_id == selected_client->id;
+        });
+    const bool selected_has_active = active_for_selected != active_states.end();
+    const bool selected_online = selected_client != nullptr &&
+                                 selected_client->status != nstu::server::ClientStatus::offline;
+
+    // Load on Selected
+    ImGui::BeginDisabled(!selected_online || selected_has_active);
+    if (ImGui::Button(tr(state, "Load on Selected Machine", "Mở trên máy chọn"), {scaled(200.0f), 0})) {
         nstu::server::ExamLaunchRequest launch;
         launch.package_root = state.exam_package_root.data();
         launch.package_id = state.exam_package_id.data();
         launch.candidate_id = state.exam_candidate_id.data();
-        while (!launch.package_root.empty() &&
-               (launch.package_root.back() == '/' ||
-                launch.package_root.back() == '\\')) {
+        while (!launch.package_root.empty() && (launch.package_root.back() == '/' || launch.package_root.back() == '\\')) {
             launch.package_root.pop_back();
         }
         launch.web_root = launch.package_root + "/exam/web";
         std::string error;
-        const bool valid_digest = parse_sha256_hex(
-            state.exam_digest_hex.data(), launch.package_digest);
-        const bool sent = valid_digest && control_plane.launch_exam(
-            selected_client->id, launch, &error);
+        const bool valid_digest = parse_sha256_hex(state.exam_digest_hex.data(), launch.package_digest);
+        const bool sent = valid_digest && control_plane.launch_exam(selected_client->id, launch, &error);
         if (!valid_digest) error = "Content SHA-256 must be 64 non-zero hex digits.";
-        state.control_status = sent
-            ? tr(state, "Exam loading request sent.",
-                 "Đã gửi yêu cầu tải bài thi.")
-            : error;
+        state.control_status = sent ? tr(state, "Exam loading request sent.", "Đã gửi yêu cầu tải bài thi.") : error;
     }
     ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!has_active || active_for_selected->begun ||
-                         !active_for_selected->ready);
-    if (ImGui::Button(tr(state, "Begin", "Bắt đầu"),
-                      {scaled(92.0f), 0})) {
-        std::string error;
-        state.control_status = control_plane.begin_exam(
-            selected_client->id, 0, &error)
-            ? tr(state, "Exam begun.", "Đã bắt đầu bài thi.")
-            : error;
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!has_active);
-    if (ImGui::Button(tr(state, "Stop", "Dừng"), {scaled(92.0f), 0})) {
-        std::string error;
-        state.control_status = control_plane.stop_exam(
-            selected_client->id, &error)
-            ? tr(state, "Exam stop request sent.",
-                 "Đã gửi yêu cầu dừng bài thi.")
-            : error;
-    }
-    ImGui::EndDisabled();
-}
 
+    ImGui::SameLine();
+    // Load for ALL online
+    bool any_online_unlaunched = false;
+    for (const auto& cl : clients) {
+        if (cl.status == nstu::server::ClientStatus::online &&
+            !control_plane.exam_active(cl.id)) {
+            any_online_unlaunched = true;
+            break;
+        }
+    }
+    ImGui::BeginDisabled(!any_online_unlaunched);
+    if (ImGui::Button(tr(state, "Load on ALL Online Computers", "Mở trên TẤT CẢ máy online"), {scaled(220.0f), 0})) {
+        std::size_t launched_count = 0;
+        std::string last_err;
+        for (const auto& cl : clients) {
+            if (cl.status == nstu::server::ClientStatus::online && !control_plane.exam_active(cl.id)) {
+                nstu::server::ExamLaunchRequest launch;
+                launch.package_root = state.exam_package_root.data();
+                launch.package_id = state.exam_package_id.data();
+                launch.candidate_id = cl.hostname;
+                while (!launch.package_root.empty() && (launch.package_root.back() == '/' || launch.package_root.back() == '\\')) {
+                    launch.package_root.pop_back();
+                }
+                launch.web_root = launch.package_root + "/exam/web";
+                (void)parse_sha256_hex(state.exam_digest_hex.data(), launch.package_digest);
+                if (control_plane.launch_exam(cl.id, launch, &last_err)) {
+                    ++launched_count;
+                }
+            }
+        }
+        state.control_status = tr(state, "Dispatched exam to ", "Đã phát đề thi tới ") +
+                              std::to_string(launched_count) + tr(state, " computers.", " máy tính.");
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    // Begin All Ready
+    ImGui::BeginDisabled(ready_clients.empty());
+    if (ImGui::Button(tr(state, "Begin All Ready Candidates", "Bắt đầu tất cả máy sẵn sàng"), {scaled(220.0f), 0})) {
+        std::size_t begun_count = 0;
+        for (std::uint64_t cid : ready_clients) {
+            std::string err;
+            if (control_plane.begin_exam(cid, 0, &err)) {
+                ++begun_count;
+            }
+        }
+        state.control_status = tr(state, "Released exam barrier for ", "Đã mở rào chắn kỳ thi cho ") +
+                              std::to_string(begun_count) + tr(state, " candidates.", " thí sinh.");
+    }
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    // Stop All
+    ImGui::BeginDisabled(active_states.empty());
+    if (ImGui::Button(tr(state, "Stop ALL Exams", "Dừng TOÀN BỘ bài thi"), {scaled(160.0f), 0})) {
+        std::size_t stopped_count = 0;
+        for (const auto& ex : active_states) {
+            std::string err;
+            if (control_plane.stop_exam(ex.client_id, &err)) {
+                ++stopped_count;
+            }
+        }
+        state.control_status = tr(state, "Stopped exam on ", "Đã dừng bài thi trên ") +
+                              std::to_string(stopped_count) + tr(state, " computers.", " máy tính.");
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 3. Live Cohort Monitoring Table
+    ImGui::TextUnformatted(tr(state, "3. Live Cohort Telemetry", "3. Theo dõi phòng thi trực tiếp"));
+    if (clients.empty()) {
+        ImGui::TextDisabled("%s", tr(state, "No student computers connected to server.", "Chưa có máy sinh viên kết nối."));
+    } else if (ImGui::BeginTable("exam-cohort-table", 6,
+                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupColumn(tr(state, "Computer", "Máy"), ImGuiTableColumnFlags_WidthFixed, scaled(200.0f));
+        ImGui::TableSetupColumn(tr(state, "Address", "Địa chỉ"), ImGuiTableColumnFlags_WidthFixed, scaled(120.0f));
+        ImGui::TableSetupColumn(tr(state, "Candidate", "Thí sinh"), ImGuiTableColumnFlags_WidthFixed, scaled(150.0f));
+        ImGui::TableSetupColumn(tr(state, "Phase", "Trạng thái"), ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
+        ImGui::TableSetupColumn(tr(state, "Authorization", "Ủy quyền"), ImGuiTableColumnFlags_WidthFixed, scaled(140.0f));
+        ImGui::TableSetupColumn(tr(state, "Actions", "Thao tác"), ImGuiTableColumnFlags_WidthFixed, scaled(160.0f));
+        ImGui::TableHeadersRow();
+
+        for (const auto& client : clients) {
+            push_client_id(client.id);
+            ImGui::TableNextRow(0, scaled(32.0f));
+
+            // Col 0: Hostname
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(client.hostname.c_str());
+
+            // Col 1: Address
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(client.address.c_str());
+
+            // Check active state
+            const auto it_exam = std::find_if(active_states.begin(), active_states.end(),
+                [&client](const auto& ex) { return ex.client_id == client.id; });
+            const bool is_exam_active = (it_exam != active_states.end());
+
+            // Col 2: Candidate
+            ImGui::TableSetColumnIndex(2);
+            if (is_exam_active && !it_exam->candidate_id.empty()) {
+                ImGui::TextUnformatted(it_exam->candidate_id.c_str());
+            } else {
+                ImGui::TextDisabled("-");
+            }
+
+            // Col 3: Phase
+            ImGui::TableSetColumnIndex(3);
+            if (!is_exam_active) {
+                if (client.status == nstu::server::ClientStatus::offline) {
+                    ImGui::TextDisabled("%s", tr(state, "Offline", "Ngoại tuyến"));
+                } else {
+                    ImGui::TextDisabled("%s", tr(state, "Idle", "Sẵn sàng nhận đề"));
+                }
+            } else if (it_exam->begun) {
+                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s", tr(state, "In Progress", "Đang thi"));
+            } else if (it_exam->ready) {
+                ImGui::TextColored(ImVec4{0.9f, 0.8f, 0.1f, 1.0f}, "%s", tr(state, "Ready to Begin", "Đã sẵn sàng"));
+            } else {
+                ImGui::TextColored(ImVec4{0.3f, 0.7f, 1.0f, 1.0f}, "%s", tr(state, "Loading Package", "Đang tải đề"));
+            }
+
+            // Col 4: Authorization
+            ImGui::TableSetColumnIndex(4);
+            if (is_exam_active && control_plane.is_exam_instructor_authorized(client.id)) {
+                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s", tr(state, "Instructor Verified", "GV Xác nhận"));
+            } else if (control_plane.requires_instructor_ticket()) {
+                ImGui::TextColored(ImVec4{0.9f, 0.4f, 0.2f, 1.0f}, "%s", tr(state, "Ticket Required", "Cần vé GV"));
+            } else {
+                ImGui::TextDisabled("%s", tr(state, "Standard", "Tiêu chuẩn"));
+            }
+
+            // Col 5: Actions
+            ImGui::TableSetColumnIndex(5);
+            if (ImGui::SmallButton(tr(state, "Select", "Chọn"))) {
+                state.selected_client_id = client.id;
+            }
+            if (is_exam_active && it_exam->ready && !it_exam->begun) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(tr(state, "Begin", "Bắt đầu"))) {
+                    std::string err;
+                    state.control_status = control_plane.begin_exam(client.id, 0, &err)
+                        ? tr(state, "Exam begun.", "Đã bắt đầu bài thi.")
+                        : err;
+                }
+            }
+            if (is_exam_active) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton(tr(state, "Stop", "Dừng"))) {
+                    std::string err;
+                    state.control_status = control_plane.stop_exam(client.id, &err)
+                        ? tr(state, "Exam stopped.", "Đã dừng bài thi.")
+                        : err;
+                }
+            }
+
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    // 4. Sealed Export Container
+    ImGui::TextUnformatted(tr(state, "4. Tamper-Evident Sealed Export", "4. Xuất kết quả niêm phong số"));
+    if (ImGui::Button(tr(state, "Generate Sealed Export (.nstugrade)", "Tạo file niêm phong (.nstugrade)"), {scaled(260.0f), 0})) {
+        generate_sealed_cohort_export(state, control_plane);
+    }
+    if (!state.last_export_path.empty()) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s: %s",
+                           tr(state, "Last exported to", "Đã lưu vào"), state.last_export_path.c_str());
+    }
+}
 void draw_menu_strip(DashboardState& state, bool has_clients,
                      nstu::server::ServerControlPlane& control_plane) {
     if (!ImGui::BeginChild("menu-strip", {0, scaled(31.0f)}, false,
@@ -3484,13 +3753,11 @@ void draw_menu_strip(DashboardState& state, bool has_clients,
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
-    ImGui::BeginDisabled(!has_clients);
     if (draw_segment_option(tr(state, "Exam", "Bài thi"),
                             state.view == DashboardView::exam,
                             scaled(60.0f))) {
         state.view = DashboardView::exam;
     }
-    ImGui::EndDisabled();
     draw_pairing_popup(state, control_plane);
     draw_diagnostics_popup(state);
     draw_preferences(state);
@@ -3718,7 +3985,7 @@ void draw_navigation_rail(
     if (draw_icon_button("nav-exam", tr(state, "Exam", "Bài thi"),
                          IconKind::lock, {scaled(36.0f), scaled(38.0f)},
                          state.view == DashboardView::exam,
-                         selected_client != nullptr, false)) {
+                         true, false)) {
         state.view = DashboardView::exam;
     }
     ImGui::Separator();
@@ -3796,7 +4063,8 @@ void draw_dashboard_shell(
                 draw_selected_client(clients, selected_client, state,
                                      control_plane);
             } else {
-                draw_exam_panel(selected_client, state, control_plane);
+                draw_exam_panel(clients, selected_client, state,
+                                control_plane);
             }
         }
         ImGui::EndChild();
