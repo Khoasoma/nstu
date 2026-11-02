@@ -12,6 +12,7 @@
 #include "nstu/remote_session_process.hpp"
 #include "nstu/exam_grader.hpp"
 #include "nstu/sealed_export.hpp"
+#include "nstu/classroom_roster.hpp"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -47,6 +48,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #ifndef NSTU_PROJECT_VERSION
@@ -399,13 +401,9 @@ enum class DashboardView : int {
     exam,
 };
 
-enum class RoomFilter : int {
-    all,
-    online,
-    attention,
-    locked,
-    offline,
-};
+using nstu::server::ClassDisplayMode;
+using nstu::server::RoomFilter;
+using nstu::server::BulkActionKind;
 
 enum class IconKind : int {
     grid,
@@ -438,7 +436,11 @@ Language g_language = Language::english;
 
 struct DashboardState {
     DashboardView view = DashboardView::room_screens;
+    ClassDisplayMode display_mode = ClassDisplayMode::grid;
     RoomFilter room_filter = RoomFilter::all;
+    std::unordered_set<std::uint64_t> checked_client_ids;
+    bool bulk_confirmation_open = false;
+    BulkActionKind pending_bulk_action = BulkActionKind::lock;
     std::uint64_t selected_client_id = 0;
     int snapshot_interval_seconds = 7;
     // When set, every online computer is snapshotted continuously without the
@@ -706,12 +708,7 @@ void invalidate_snapshot_textures() noexcept {
     }
 }
 
-struct RoomCounts {
-    std::size_t online = 0;
-    std::size_t attention = 0;
-    std::size_t locked = 0;
-    std::size_t offline = 0;
-};
+using nstu::server::RoomCounts;
 
 void create_render_target() {
     Microsoft::WRL::ComPtr<ID3D11Texture2D> back_buffer;
@@ -1507,75 +1504,12 @@ const char* client_status_label(nstu::server::ClientStatus status,
     return "Không rõ";
 }
 
-RoomCounts count_room_statuses(
-    const std::vector<nstu::server::ClientRecord>& clients) {
-    RoomCounts counts;
-    for (const auto& client : clients) {
-        switch (client.status) {
-        case nstu::server::ClientStatus::online:
-            ++counts.online;
-            break;
-        case nstu::server::ClientStatus::connecting:
-        case nstu::server::ClientStatus::degraded:
-            ++counts.attention;
-            break;
-        case nstu::server::ClientStatus::locked:
-            ++counts.locked;
-            break;
-        case nstu::server::ClientStatus::offline:
-            ++counts.offline;
-            break;
-        }
-    }
-    return counts;
-}
-
-std::string lower_ascii(std::string_view value) {
-    std::string result(value);
-    std::transform(result.begin(), result.end(), result.begin(), [](char ch) {
-        return static_cast<char>(
-            std::tolower(static_cast<unsigned char>(ch)));
-    });
-    return result;
-}
+using nstu::server::count_room_statuses;
 
 bool client_matches_filter(const nstu::server::ClientRecord& client,
                            const DashboardState& state) {
-    if (!state.show_offline &&
-        client.status == nstu::server::ClientStatus::offline) {
-        return false;
-    }
-    switch (state.room_filter) {
-    case RoomFilter::all:
-        break;
-    case RoomFilter::online:
-        if (client.status != nstu::server::ClientStatus::online) {
-            return false;
-        }
-        break;
-    case RoomFilter::attention:
-        if (client.status != nstu::server::ClientStatus::connecting &&
-            client.status != nstu::server::ClientStatus::degraded) {
-            return false;
-        }
-        break;
-    case RoomFilter::locked:
-        if (client.status != nstu::server::ClientStatus::locked) {
-            return false;
-        }
-        break;
-    case RoomFilter::offline:
-        if (client.status != nstu::server::ClientStatus::offline) {
-            return false;
-        }
-        break;
-    }
-    if (state.client_filter[0] == '\0') {
-        return true;
-    }
-    const auto query = lower_ascii(state.client_filter.data());
-    return lower_ascii(client.hostname).find(query) != std::string::npos ||
-           lower_ascii(client.address).find(query) != std::string::npos;
+    return nstu::server::client_matches_filter(
+        client, state.room_filter, state.show_offline, state.client_filter.data());
 }
 
 void push_client_id(std::uint64_t id) {
@@ -1998,6 +1932,135 @@ void draw_room_screen_wall(
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
+}
+
+void draw_room_client_table(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    std::vector<const nstu::server::ClientRecord*> visible_clients;
+    visible_clients.reserve(clients.size());
+    for (const auto& client : clients) {
+        if (client_matches_filter(client, state)) {
+            visible_clients.push_back(&client);
+        }
+    }
+
+    if (visible_clients.empty()) {
+        const float offset = std::max(36.0f,
+                                      ImGui::GetContentRegionAvail().y * 0.34f);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offset);
+        const char* heading = clients.empty()
+            ? tr(state, "No clients connected", "Chưa có máy nào kết nối")
+            : tr(state, "No clients match this view",
+                 "Không có máy phù hợp với bộ lọc");
+        const ImVec2 heading_size = ImGui::CalcTextSize(heading);
+        ImGui::SetCursorPosX(
+            std::max(20.0f, (ImGui::GetWindowWidth() - heading_size.x) * 0.5f));
+        ImGui::TextDisabled("%s", heading);
+        return;
+    }
+
+    if (!ImGui::BeginChild("room-table-container", {0, 0}, false)) {
+        ImGui::EndChild();
+        return;
+    }
+
+    constexpr int kColumns = 7;
+    const ImGuiTableFlags table_flags =
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+
+    if (ImGui::BeginTable("room-client-table", kColumns, table_flags)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("##select", ImGuiTableColumnFlags_WidthFixed, scaled(32.0f));
+        ImGui::TableSetupColumn(tr(state, "Hostname", "Tên máy"), ImGuiTableColumnFlags_WidthStretch, 2.0f);
+        ImGui::TableSetupColumn(tr(state, "IP Address", "Địa chỉ IP"), ImGuiTableColumnFlags_WidthStretch, 1.5f);
+        ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"), ImGuiTableColumnFlags_WidthFixed, scaled(100.0f));
+        ImGui::TableSetupColumn(tr(state, "Latency / Loss", "Độ trễ / Mất gói"), ImGuiTableColumnFlags_WidthFixed, scaled(120.0f));
+        ImGui::TableSetupColumn(tr(state, "UWF Protection", "Bảo vệ UWF"), ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
+        ImGui::TableSetupColumn(tr(state, "Action", "Thao tác"), ImGuiTableColumnFlags_WidthFixed, scaled(110.0f));
+        ImGui::TableHeadersRow();
+
+        for (const auto* client : visible_clients) {
+            push_client_id(client->id);
+            ImGui::TableNextRow(0, scaled(28.0f));
+
+            // Column 0: Selection Checkbox
+            ImGui::TableSetColumnIndex(0);
+            bool is_chk = state.checked_client_ids.find(client->id) != state.checked_client_ids.end();
+            if (ImGui::Checkbox("##check", &is_chk)) {
+                if (is_chk) {
+                    state.checked_client_ids.insert(client->id);
+                } else {
+                    state.checked_client_ids.erase(client->id);
+                }
+            }
+
+            // Column 1: Hostname + chat badge
+            ImGui::TableSetColumnIndex(1);
+            const bool is_focused = (state.selected_client_id == client->id);
+            if (ImGui::Selectable(client->hostname.c_str(), is_focused, ImGuiSelectableFlags_SpanAllColumns)) {
+                state.selected_client_id = client->id;
+            }
+            if (client_has_unread_chat(state, client->id)) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4{0.9f, 0.28f, 0.3f, 1.0f}, "●");
+            }
+
+            // Column 2: IP Address
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextUnformatted(client->address.c_str());
+
+            // Column 3: Status
+            ImGui::TableSetColumnIndex(3);
+            draw_status_badge(client->status, state);
+
+            // Column 4: Latency & Loss
+            ImGui::TableSetColumnIndex(4);
+            if (client->status != nstu::server::ClientStatus::offline) {
+                ImGui::Text("%u ms  %.1f%%", client->latency_ms,
+                            client->packet_loss_per_mille / 10.0f);
+            } else {
+                ImGui::TextDisabled("—");
+            }
+
+            // Column 5: UWF Status
+            ImGui::TableSetColumnIndex(5);
+            if (client->uwf.proves_current_protection()) {
+                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s",
+                                   tr(state, "Protected", "Đã bảo vệ"));
+            } else if (client->uwf.phase == nstu::control::UwfFleetPhase::configuring ||
+                       client->uwf.phase == nstu::control::UwfFleetPhase::awaiting_restart) {
+                ImGui::TextColored(ImVec4{0.9f, 0.7f, 0.1f, 1.0f}, "%s",
+                                   tr(state, "Arming...", "Đang chuẩn bị"));
+            } else if (client->uwf.phase == nstu::control::UwfFleetPhase::unsupported) {
+                ImGui::TextDisabled("%s", tr(state, "Unsupported", "Không hỗ trợ"));
+            } else {
+                ImGui::TextDisabled("%s", tr(state, "Inactive", "Chưa kích hoạt"));
+            }
+
+            // Column 6: Action
+            ImGui::TableSetColumnIndex(6);
+            if (ImGui::SmallButton(tr(state, "Focus", "Tiêu điểm"))) {
+                state.selected_client_id = client->id;
+                state.view = DashboardView::selected_client;
+                state.annotation_enabled = false;
+            }
+            ImGui::SameLine();
+            if (client->status != nstu::server::ClientStatus::offline) {
+                const bool locked = (client->status == nstu::server::ClientStatus::locked);
+                const char* btn_label = locked ? tr(state, "Unlock", "Mở") : tr(state, "Lock", "Khóa");
+                if (ImGui::SmallButton(btn_label)) {
+                    (void)control_plane.set_locked(client->id, !locked, nullptr);
+                }
+            }
+
+            pop_client_id();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
 }
 
 void draw_focus_client_list(
@@ -3950,7 +4013,66 @@ void draw_workspace_toolbar(
         state.room_filter = RoomFilter::offline;
         state.show_offline = true;
     }
-    const float search_width = scaled(210.0f);
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+
+    // View mode toggle chips (Grid vs List)
+    if (draw_filter_chip("view-grid", tr(state, "Grid", "Lưới"), 0,
+                         state.display_mode == ClassDisplayMode::grid)) {
+        state.display_mode = ClassDisplayMode::grid;
+    }
+    ImGui::SameLine();
+    if (draw_filter_chip("view-list", tr(state, "List", "Danh sách"), 0,
+                         state.display_mode == ClassDisplayMode::list)) {
+        state.display_mode = ClassDisplayMode::list;
+    }
+
+    // Selection & Bulk Actions
+    if (!clients.empty()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+
+        if (ImGui::SmallButton(tr(state, "Select All", "Chọn tất cả"))) {
+            std::vector<const nstu::server::ClientRecord*> visible_clients;
+            visible_clients.reserve(clients.size());
+            for (const auto& c : clients) {
+                if (client_matches_filter(c, state)) {
+                    visible_clients.push_back(&c);
+                }
+            }
+            state.checked_client_ids = nstu::server::select_all_matching(visible_clients);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(tr(state, "Clear", "Bỏ chọn"))) {
+            state.checked_client_ids.clear();
+        }
+
+        if (!state.checked_client_ids.empty()) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%zu %s)", state.checked_client_ids.size(),
+                                tr(state, "selected", "đã chọn"));
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Bulk Lock", "Khóa đã chọn"))) {
+                state.pending_bulk_action = BulkActionKind::lock;
+                state.bulk_confirmation_open = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Bulk Unlock", "Mở khóa đã chọn"))) {
+                state.pending_bulk_action = BulkActionKind::unlock;
+                state.bulk_confirmation_open = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Bulk Refresh", "Chụp lại"))) {
+                state.pending_bulk_action = BulkActionKind::refresh_snapshots;
+                state.bulk_confirmation_open = true;
+            }
+        }
+    }
+
+    const float search_width = scaled(180.0f);
     ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
                              ImGui::GetContentRegionMax().x - search_width));
     ImGui::SetNextItemWidth(search_width);
@@ -4040,12 +4162,84 @@ void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
     ImGui::EndChild();
 }
 
+void draw_bulk_action_confirmation_popup(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    DashboardState& state,
+    nstu::server::ServerControlPlane& control_plane) {
+    if (state.bulk_confirmation_open) {
+        ImGui::OpenPopup("bulk-action-confirmation");
+    }
+    if (!ImGui::BeginPopupModal("bulk-action-confirmation", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    const bool is_vietnamese = (state.language == Language::vietnamese);
+    const auto target_summary =
+        nstu::server::evaluate_bulk_targets(clients, state.checked_client_ids);
+
+    ImGui::TextUnformatted(
+        nstu::server::format_bulk_confirmation_title(
+            state.pending_bulk_action, is_vietnamese).c_str());
+    ImGui::Separator();
+
+    const std::string room_name = state.room_name_input.data();
+    ImGui::TextWrapped("%s",
+        nstu::server::format_bulk_confirmation_message(
+            state.pending_bulk_action, target_summary.eligible_online,
+            room_name, is_vietnamese).c_str());
+
+    if (target_summary.skipped_offline > 0) {
+        ImGui::Spacing();
+        ImGui::TextColored(
+            ImVec4{0.9f, 0.7f, 0.1f, 1.0f},
+            "%s: %zu %s",
+            tr(state, "Notice", "Lưu ý"),
+            target_summary.skipped_offline,
+            tr(state, "offline computers will be skipped.", "máy ngoại tuyến sẽ được bỏ qua."));
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    const bool has_online_targets = (target_summary.eligible_online > 0);
+    if (!has_online_targets) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(tr(state, "Confirm & Execute", "Xác nhận thực hiện"),
+                      {scaled(160.0f), scaled(30.0f)})) {
+        const auto result = nstu::server::execute_bulk_action(
+            control_plane, clients, state.checked_client_ids,
+            state.pending_bulk_action,
+            static_cast<std::uint16_t>(state.snapshot_interval_seconds));
+        state.control_status =
+            nstu::server::format_bulk_action_result_status(
+                state.pending_bulk_action, result, is_vietnamese);
+        state.bulk_confirmation_open = false;
+        ImGui::CloseCurrentPopup();
+    }
+    if (!has_online_targets) {
+        ImGui::EndDisabled();
+    }
+
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Cancel", "Hủy bỏ"),
+                      {scaled(100.0f), scaled(30.0f)})) {
+        state.bulk_confirmation_open = false;
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
+}
+
 void draw_dashboard_shell(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
     draw_menu_strip(state, !clients.empty(), control_plane);
     draw_telemetry_report_popup(state, clients.size());
+    draw_bulk_action_confirmation_popup(clients, state, control_plane);
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);
 
@@ -4058,7 +4252,11 @@ void draw_dashboard_shell(
         ImGui::PushStyleColor(ImGuiCol_ChildBg, content_background);
         if (ImGui::BeginChild("workspace-content", {0, 0}, false)) {
             if (state.view == DashboardView::room_screens) {
-                draw_room_screen_wall(clients, state);
+                if (state.display_mode == ClassDisplayMode::grid) {
+                    draw_room_screen_wall(clients, state);
+                } else {
+                    draw_room_client_table(clients, state, control_plane);
+                }
             } else if (state.view == DashboardView::selected_client) {
                 draw_selected_client(clients, selected_client, state,
                                      control_plane);

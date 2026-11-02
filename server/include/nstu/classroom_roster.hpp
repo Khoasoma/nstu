@@ -1,0 +1,115 @@
+#pragma once
+
+#include "nstu/client_registry.hpp"
+#include <algorithm>
+#include <cctype>
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <unordered_set>
+#include <vector>
+
+namespace nstu::server {
+
+class ServerControlPlane;
+
+enum class ClassDisplayMode : int {
+    grid = 0,
+    list = 1,
+};
+
+enum class RoomFilter : int {
+    all = 0,
+    online = 1,
+    attention = 2,
+    locked = 3,
+    offline = 4,
+};
+
+enum class BulkActionKind : int {
+    lock = 0,
+    unlock = 1,
+    refresh_snapshots = 2,
+};
+
+struct RoomCounts {
+    std::size_t online = 0;
+    std::size_t attention = 0;
+    std::size_t locked = 0;
+    std::size_t offline = 0;
+};
+
+struct BulkActionTargetSummary {
+    std::size_t total_selected = 0;
+    std::size_t eligible_online = 0;
+    std::size_t skipped_offline = 0;
+};
+
+struct BulkActionResult {
+    std::size_t attempted = 0;
+    std::size_t succeeded = 0;
+    std::size_t failed = 0;
+    std::vector<std::string> error_messages;
+};
+
+[[nodiscard]] RoomCounts count_room_statuses(
+    const std::vector<ClientRecord>& clients) noexcept;
+
+[[nodiscard]] bool client_matches_filter(
+    const ClientRecord& client,
+    RoomFilter filter,
+    bool show_offline,
+    std::string_view query) noexcept;
+
+[[nodiscard]] std::vector<const ClientRecord*> filter_clients(
+    const std::vector<ClientRecord>& clients,
+    RoomFilter filter,
+    bool show_offline,
+    std::string_view query);
+
+[[nodiscard]] std::unordered_set<std::uint64_t> select_all_matching(
+    const std::vector<const ClientRecord*>& visible_clients);
+
+void clear_selection(std::unordered_set<std::uint64_t>& selection) noexcept;
+
+[[nodiscard]] bool is_selected(
+    const std::unordered_set<std::uint64_t>& selection,
+    std::uint64_t client_id) noexcept;
+
+void set_selected(
+    std::unordered_set<std::uint64_t>& selection,
+    std::uint64_t client_id,
+    bool selected);
+
+void toggle_selected(
+    std::unordered_set<std::uint64_t>& selection,
+    std::uint64_t client_id);
+
+[[nodiscard]] BulkActionTargetSummary evaluate_bulk_targets(
+    const std::vector<ClientRecord>& clients,
+    const std::unordered_set<std::uint64_t>& selected_ids) noexcept;
+
+[[nodiscard]] BulkActionResult execute_bulk_action(
+    ServerControlPlane& control_plane,
+    const std::vector<ClientRecord>& clients,
+    const std::unordered_set<std::uint64_t>& selected_ids,
+    BulkActionKind action,
+    std::uint16_t snapshot_interval_seconds);
+
+[[nodiscard]] std::string format_bulk_confirmation_title(
+    BulkActionKind action,
+    bool vietnamese);
+
+[[nodiscard]] std::string format_bulk_confirmation_message(
+    BulkActionKind action,
+    std::size_t target_count,
+    std::string_view room_name,
+    bool vietnamese);
+
+[[nodiscard]] std::string format_bulk_action_result_status(
+    BulkActionKind action,
+    const BulkActionResult& result,
+    bool vietnamese);
+
+} // namespace nstu::server
+

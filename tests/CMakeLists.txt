@@ -213,6 +213,12 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_server_state_tests)
     add_test(NAME nstu.server_state COMMAND nstu_server_state_tests)
 
+    add_executable(nstu_classroom_roster_tests classroom_roster_tests.cpp)
+    target_link_libraries(nstu_classroom_roster_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_classroom_roster_tests)
+    nstu_enable_test_assertions(nstu_classroom_roster_tests)
+    add_test(NAME nstu.classroom_roster COMMAND nstu_classroom_roster_tests)
+
     add_executable(nstu_exam_telemetry_journal_tests exam_telemetry_journal_tests.cpp)
     target_link_libraries(nstu_exam_telemetry_journal_tests PRIVATE nstu_server_state)
     nstu_enable_warnings(nstu_exam_telemetry_journal_tests)

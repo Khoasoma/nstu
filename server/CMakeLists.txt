@@ -1,4 +1,5 @@
 add_library(nstu_server_state STATIC
+    src/classroom_roster.cpp
     src/client_registry.cpp
     src/control_plane.cpp
     src/remote_session_process.cpp
