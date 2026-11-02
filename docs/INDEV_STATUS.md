@@ -21,10 +21,18 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 60/60 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 61/61 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
+
+## Integrated Mutual Pairing & Student Confirmation (Stream S3 / Roadmap P0-03 & P1.2)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Student SAS Confirmation Enforcement** | `StudentConfirmationChoice`, `StudentConfirmationDecision`, and pure `evaluate_student_confirmation` decision evaluator enforcing positive student SAS code confirmation before key commitment | **Merged to main** (`eb54145`) |
+| **SAS Formatting Helper** | `format_short_authentication_string` in `nstu/pairing.hpp` formatting 6-digit SAS codes as `XXX YYY` for student visual inspection | **Merged to main** (`eb54145`) |
+| **Fail-Closed Pairing & Sliced Heartbeats** | Fail-closed pairing flow if code observer or confirmation callback is omitted; sliced confirmation loop maintaining keepalive heartbeats to prevent TCP timeout | **Merged to main** (`eb54145`) |
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
 
