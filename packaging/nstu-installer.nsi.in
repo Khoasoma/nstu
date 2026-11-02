@@ -323,6 +323,14 @@ nstu_server_commit:
   CreateDirectory "$SMPROGRAMS\NSTU"
   CreateShortCut "$SMPROGRAMS\NSTU\NSTU Server@NSTU_INSTALLER_ROLE_SUFFIX@.lnk" "$INSTDIR\server\nstu-server.exe" "" "$INSTDIR\server\nstu-server.exe" 0
   SetOutPath "$INSTDIR"
+  ; Configure least-privilege Windows Firewall rules for NSTU Server control plane (TCP 47001)
+  ; and UDP discovery (UDP 47001) scoped strictly to the server executable and private/domain profiles.
+  nsExec::ExecToStack 'netsh.exe advfirewall firewall add rule name="NSTU Server (TCP-In)" dir=in action=allow program="$INSTDIR\server\nstu-server.exe" protocol=TCP localport=47001 profile=private,domain enable=yes'
+  Pop $0
+  Pop $1
+  nsExec::ExecToStack 'netsh.exe advfirewall firewall add rule name="NSTU Server Discovery (UDP-In)" dir=in action=allow program="$INSTDIR\server\nstu-server.exe" protocol=UDP localport=47001 profile=private,domain enable=yes'
+  Pop $0
+  Pop $1
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   RMDir /r "$INSTDIR\.nstu-backup-server"
   RMDir /r "$INSTDIR\.nstu-backup-diagnostics"
@@ -350,6 +358,12 @@ nstu_server_stage_failed:
 nstu_server_rollback_failed:
   MessageBox MB_ICONSTOP|MB_OK "NSTU Server update failed and rollback was attempted. Restart Windows before retrying; keep any .nstu-backup directories for repair."
 nstu_server_abort:
+  nsExec::ExecToStack 'netsh.exe advfirewall firewall delete rule name="NSTU Server (TCP-In)"'
+  Pop $0
+  Pop $1
+  nsExec::ExecToStack 'netsh.exe advfirewall firewall delete rule name="NSTU Server Discovery (UDP-In)"'
+  Pop $0
+  Pop $1
   RMDir /r "$INSTDIR\.nstu-stage-server"
   RMDir /r "$INSTDIR\.nstu-stage-diagnostics"
   Abort
@@ -550,6 +564,12 @@ Section "Uninstall"
 nstu_uninstall_client_processes:
   Goto nstu_uninstall_files
 nstu_uninstall_server:
+  nsExec::ExecToStack 'netsh.exe advfirewall firewall delete rule name="NSTU Server (TCP-In)"'
+  Pop $0
+  Pop $1
+  nsExec::ExecToStack 'netsh.exe advfirewall firewall delete rule name="NSTU Server Discovery (UDP-In)"'
+  Pop $0
+  Pop $1
 nstu_uninstall_files:
   ; Cancel any staged-removal task before deleting this uninstaller. Otherwise a later fresh
   ; install at the same path can be removed by the stale SYSTEM task after restart.

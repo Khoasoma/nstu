@@ -40,6 +40,7 @@ jobs:
             ConvertFrom-Json | Out-Null
           Get-Content exam/examples/ielts-sample.json -Raw |
             ConvertFrom-Json | Out-Null
+          ./packaging/test-installer-firewall-provisioning.ps1
       - name: Trial update state machine
         shell: pwsh
         run: ./packaging/test-update-cycle.ps1
@@ -204,6 +205,7 @@ jobs:
             ConvertFrom-Json | Out-Null
           Get-Content exam/examples/ielts-sample.json -Raw |
             ConvertFrom-Json | Out-Null
+          ./packaging/test-installer-firewall-provisioning.ps1
       - name: Install to verification tree
         run: cmake --install build-webview2 --prefix build-webview2/install --config Release
       - name: Verify WebView2 loader
