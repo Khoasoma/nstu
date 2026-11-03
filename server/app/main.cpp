@@ -13,6 +13,7 @@
 #include "nstu/exam_grader.hpp"
 #include "nstu/sealed_export.hpp"
 #include "nstu/classroom_roster.hpp"
+#include "nstu/file_distribution.hpp"
 #include "nstu/operator_role.hpp"
 #include "nstu/url_validation.hpp"
 
@@ -450,6 +451,7 @@ struct DashboardState {
     bool bulk_confirmation_open = false;
     BulkActionKind pending_bulk_action = BulkActionKind::lock;
     std::array<char, 2048> launch_url_input{"https://"};
+    std::array<char, 1024> file_dist_path_input{""};
     std::uint64_t selected_client_id = 0;
     int snapshot_interval_seconds = 7;
     // When set, every online computer is snapshotted continuously without the
@@ -2858,6 +2860,26 @@ void draw_selected_client(
     if (disable_wake) {
         ImGui::EndDisabled();
     }
+    ImGui::SameLine();
+    const bool disable_send_file = !is_client_online || exam_on_selected;
+    if (disable_send_file) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(tr(state, "Send File", "Phát tệp"))) {
+        state.checked_client_ids = {selected_client->id};
+        state.pending_bulk_action = BulkActionKind::distribute_file;
+        state.bulk_confirmation_open = true;
+    }
+    if (disable_send_file && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (!is_client_online) {
+            ImGui::SetTooltip("%s", tr(state, "Cannot send file: client is offline.", "Không thể phát tệp: máy đang ngoại tuyến."));
+        } else if (exam_on_selected) {
+            ImGui::SetTooltip("%s", tr(state, "File distribution is disabled during active assessments.", "Không thể phát tệp khi đang có bài thi."));
+        }
+    }
+    if (disable_send_file) {
+        ImGui::EndDisabled();
+    }
     if (state.annotation_enabled) {
         ImGui::TextUnformatted(tr(state, "Overlay tools", "Công cụ lớp phủ"));
         ImGui::SameLine();
@@ -4363,6 +4385,11 @@ void draw_workspace_toolbar(
                 state.pending_bulk_action = BulkActionKind::wake_on_lan;
                 state.bulk_confirmation_open = true;
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Send File", "Phát tệp"))) {
+                state.pending_bulk_action = BulkActionKind::distribute_file;
+                state.bulk_confirmation_open = true;
+            }
         }
     }
 
@@ -4543,6 +4570,59 @@ void draw_bulk_action_confirmation_popup(
         }
     }
 
+    bool file_dist_valid = true;
+    std::string file_dist_validation_err;
+    if (state.pending_bulk_action == BulkActionKind::distribute_file) {
+        ImGui::Spacing();
+        ImGui::TextUnformatted(tr(state, "File path to distribute:", "Đường dẫn tệp cần phát:"));
+        ImGui::SetNextItemWidth(scaled(340.0f));
+        ImGui::InputTextWithHint("##file-dist-path-input", "C:\\path\\to\\document.pdf",
+                                 state.file_dist_path_input.data(),
+                                 state.file_dist_path_input.size());
+
+        const std::string_view file_path_str{state.file_dist_path_input.data()};
+        if (file_path_str.empty()) {
+            file_dist_valid = false;
+            file_dist_validation_err = tr(state, "Please enter a file path.", "Vui lòng nhập đường dẫn tệp.");
+        } else {
+            std::error_code ec;
+            std::filesystem::path p(file_path_str);
+            if (!std::filesystem::exists(p, ec)) {
+                file_dist_valid = false;
+                file_dist_validation_err = tr(state, "File does not exist.", "Tệp không tồn tại.");
+            } else if (!std::filesystem::is_regular_file(p, ec)) {
+                file_dist_valid = false;
+                file_dist_validation_err = tr(state, "Path is not a regular file.", "Đường dẫn không phải là tệp tin hợp lệ.");
+            } else {
+                const auto sz = std::filesystem::file_size(p, ec);
+                if (ec) {
+                    file_dist_valid = false;
+                    file_dist_validation_err = tr(state, "Unable to read file size.", "Không thể đọc kích thước tệp.");
+                } else if (sz > nstu::file_dist::kMaxFileSize) {
+                    file_dist_valid = false;
+                    file_dist_validation_err = tr(state, "File exceeds maximum size limit (64 MiB).", "Kích thước tệp vượt quá giới hạn (64 MiB).");
+                } else {
+                    const std::string fname = p.filename().string();
+                    if (!nstu::file_dist::is_safe_filename(fname)) {
+                        file_dist_valid = false;
+                        file_dist_validation_err = tr(state, "Filename contains invalid or unsafe characters.", "Tên tệp chứa ký tự không hợp lệ hoặc không an toàn.");
+                    } else {
+                        ImGui::TextDisabled("%s: %.2f MiB (%llu bytes)",
+                                            tr(state, "Size", "Kích thước"),
+                                            static_cast<double>(sz) / (1024.0 * 1024.0),
+                                            static_cast<unsigned long long>(sz));
+                    }
+                }
+            }
+        }
+        if (!file_dist_valid) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.4f, 1.0f}, "%s: %s",
+                               tr(state, "Invalid File", "Tệp không hợp lệ"),
+                               file_dist_validation_err.c_str());
+        }
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
@@ -4557,6 +4637,10 @@ void draw_bulk_action_confirmation_popup(
     const bool wol_role_authorized = !is_wol ||
         is_action_permitted(state.current_role, OperatorAction::wake_on_lan);
 
+    const bool is_file_dist = (state.pending_bulk_action == BulkActionKind::distribute_file);
+    const bool file_dist_role_authorized = !is_file_dist ||
+        is_action_permitted(state.current_role, OperatorAction::distribute_file);
+
     if (is_power_action && !power_role_authorized) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.4f, 1.0f}, "%s: %s",
@@ -4565,8 +4649,16 @@ void draw_bulk_action_confirmation_popup(
                       "Thao tác nguồn yêu cầu quyền Kỹ thuật viên hoặc Nhà phát triển."));
     }
 
+    if (is_file_dist && !file_dist_role_authorized) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.4f, 1.0f}, "%s: %s",
+            tr(state, "Permission Denied", "Từ chối quyền"),
+            tr(state, "File distribution requires Teacher, Technician, or Developer role.",
+                      "Phát tệp yêu cầu quyền Giáo viên, Kỹ thuật viên, hoặc Nhà phát triển."));
+    }
+
     const bool has_targets = is_wol ? (target_summary.skipped_offline > 0) : (target_summary.eligible_online > 0);
-    const bool can_execute = has_targets && url_valid && power_role_authorized && wol_role_authorized;
+    const bool can_execute = has_targets && url_valid && file_dist_valid && power_role_authorized && wol_role_authorized && file_dist_role_authorized;
     if (!can_execute) {
         ImGui::BeginDisabled();
     }
@@ -4578,7 +4670,9 @@ void draw_bulk_action_confirmation_popup(
             static_cast<std::uint16_t>(state.snapshot_interval_seconds),
             state.pending_bulk_action == BulkActionKind::launch_url
                 ? std::string_view{state.launch_url_input.data()}
-                : std::string_view{},
+                : (state.pending_bulk_action == BulkActionKind::distribute_file
+                    ? std::string_view{state.file_dist_path_input.data()}
+                    : std::string_view{}),
             state.current_role);
         state.control_status =
             nstu::server::format_bulk_action_result_status(

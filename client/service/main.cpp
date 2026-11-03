@@ -7,6 +7,7 @@
 #include "nstu/client_uwf_request.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
+#include "nstu/file_distribution.hpp"
 #include "nstu/exam_app_suppression.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_host.hpp"
@@ -34,6 +35,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -1796,6 +1798,68 @@ void run_exam_arm_worker(
     }
 }
 
+struct ActiveFileReceiveSession {
+    std::uint64_t session_id = 0;
+    std::uint64_t total_size = 0;
+    std::uint64_t bytes_received = 0;
+    nstu::security::Sha256Digest expected_sha256{};
+    std::filesystem::path target_path;
+    std::filesystem::path part_path;
+    std::ofstream out_file;
+    bool active = false;
+};
+
+std::mutex g_file_receive_mutex;
+ActiveFileReceiveSession g_file_receive_session;
+
+std::filesystem::path get_safe_staging_directory() {
+#if defined(_WIN32)
+    wchar_t public_buf[MAX_PATH] = {0};
+    const DWORD len = GetEnvironmentVariableW(L"PUBLIC", public_buf, MAX_PATH);
+    if (len > 0 && len < MAX_PATH) {
+        std::filesystem::path p(public_buf);
+        p /= L"Documents";
+        p /= L"NSTU_Received";
+        std::error_code ec;
+        std::filesystem::create_directories(p, ec);
+        if (!ec) {
+            return p;
+        }
+    }
+    wchar_t local_buf[MAX_PATH] = {0};
+    const DWORD local_len = GetEnvironmentVariableW(L"LOCALAPPDATA", local_buf, MAX_PATH);
+    if (local_len > 0 && local_len < MAX_PATH) {
+        std::filesystem::path p(local_buf);
+        p /= L"NSTU";
+        p /= L"ReceivedFiles";
+        std::error_code ec;
+        std::filesystem::create_directories(p, ec);
+        if (!ec) {
+            return p;
+        }
+    }
+#endif
+    std::error_code ec;
+    auto fallback = std::filesystem::temp_directory_path(ec) / "NSTU_Received";
+    std::filesystem::create_directories(fallback, ec);
+    return fallback;
+}
+
+void send_file_dist_status(std::uint64_t session_id,
+                           std::uint64_t bytes_received,
+                           nstu::file_dist::FileDistStatus status) {
+    const auto encoded = nstu::file_dist::encode_file_dist_status(
+        nstu::file_dist::FileDistStatusMessage{
+            .session_id = session_id,
+            .bytes_received = bytes_received,
+            .status = status,
+        });
+    std::vector<std::byte> payload(encoded.size());
+    std::memcpy(payload.data(), encoded.data(), encoded.size());
+    queue_outbound_message(nstu::protocol::CommandType::file_dist_status,
+                           std::move(payload));
+}
+
 void handle_server_command(
     const nstu::control::AuthenticatedCommand& command) {
     switch (command.envelope.type) {
@@ -2150,6 +2214,269 @@ void handle_server_command(
                  command.payload});
         }
         break;
+    case nstu::protocol::CommandType::file_dist_start: {
+        const auto u8_span = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(command.payload.data()),
+            command.payload.size());
+        const auto msg = nstu::file_dist::decode_file_dist_start(u8_span);
+        if (!msg) {
+            break;
+        }
+        if (g_exam_lockdown_controller.is_armed()) {
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::rejected_exam_active);
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "file_distribution",
+                       "start", "rejected", "exam lockdown active");
+            break;
+        }
+        if (!nstu::file_dist::is_safe_filename(msg->filename)) {
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::rejected_unsafe_path);
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "file_distribution",
+                       "start", "rejected", "unsafe filename rejected");
+            break;
+        }
+        if (msg->file_size > nstu::file_dist::kMaxFileSize) {
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::rejected_quota_exceeded);
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::warning, "file_distribution",
+                       "start", "rejected", "file size quota exceeded");
+            break;
+        }
+
+        const auto staging_dir = get_safe_staging_directory();
+        const auto target_path = nstu::file_dist::compute_staging_path(staging_dir, msg->filename);
+        if (!target_path) {
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::rejected_unsafe_path);
+            break;
+        }
+
+        std::filesystem::path part_path = *target_path;
+        part_path += ".nstu_part";
+
+        std::scoped_lock lock(g_file_receive_mutex);
+        if (g_file_receive_session.active) {
+            if (g_file_receive_session.out_file.is_open()) {
+                g_file_receive_session.out_file.close();
+            }
+            std::error_code ec;
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            g_file_receive_session = {};
+        }
+
+        std::error_code ec;
+        std::filesystem::remove(part_path, ec);
+
+        g_file_receive_session.out_file.open(part_path, std::ios::binary | std::ios::trunc);
+        if (!g_file_receive_session.out_file.is_open()) {
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::write_error);
+            emit_audit(nstu::audit::Category::system,
+                       nstu::audit::Severity::error, "file_distribution",
+                       "start", "failed", "failed to open staging part file");
+            break;
+        }
+
+        g_file_receive_session.session_id = msg->session_id;
+        g_file_receive_session.total_size = msg->file_size;
+        g_file_receive_session.bytes_received = 0;
+        g_file_receive_session.expected_sha256 = msg->sha256;
+        g_file_receive_session.target_path = *target_path;
+        g_file_receive_session.part_path = std::move(part_path);
+        g_file_receive_session.active = true;
+
+        send_file_dist_status(msg->session_id, 0,
+                              nstu::file_dist::FileDistStatus::in_progress);
+        break;
+    }
+    case nstu::protocol::CommandType::file_dist_chunk: {
+        const auto u8_span = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(command.payload.data()),
+            command.payload.size());
+        const auto msg = nstu::file_dist::decode_file_dist_chunk(u8_span);
+        if (!msg) {
+            break;
+        }
+
+        std::scoped_lock lock(g_file_receive_mutex);
+        if (!g_file_receive_session.active ||
+            g_file_receive_session.session_id != msg->session_id) {
+            break;
+        }
+
+        if (g_exam_lockdown_controller.is_armed()) {
+            g_file_receive_session.out_file.close();
+            std::error_code ec;
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            g_file_receive_session = {};
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::rejected_exam_active);
+            break;
+        }
+
+        if (msg->offset != g_file_receive_session.bytes_received ||
+            g_file_receive_session.bytes_received + msg->data.size() > g_file_receive_session.total_size) {
+            g_file_receive_session.out_file.close();
+            std::error_code ec;
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            g_file_receive_session = {};
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::write_error);
+            break;
+        }
+
+        if (!msg->data.empty()) {
+            g_file_receive_session.out_file.write(
+                reinterpret_cast<const char*>(msg->data.data()),
+                static_cast<std::streamsize>(msg->data.size()));
+            if (!g_file_receive_session.out_file.good()) {
+                g_file_receive_session.out_file.close();
+                std::error_code ec;
+                std::filesystem::remove(g_file_receive_session.part_path, ec);
+                g_file_receive_session = {};
+                send_file_dist_status(msg->session_id, 0,
+                                      nstu::file_dist::FileDistStatus::write_error);
+                break;
+            }
+        }
+
+        g_file_receive_session.bytes_received += msg->data.size();
+        send_file_dist_status(g_file_receive_session.session_id,
+                              g_file_receive_session.bytes_received,
+                              nstu::file_dist::FileDistStatus::in_progress);
+        break;
+    }
+    case nstu::protocol::CommandType::file_dist_finish: {
+        const auto u8_span = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(command.payload.data()),
+            command.payload.size());
+        const auto msg = nstu::file_dist::decode_file_dist_finish(u8_span);
+        if (!msg) {
+            break;
+        }
+
+        std::scoped_lock lock(g_file_receive_mutex);
+        if (!g_file_receive_session.active ||
+            g_file_receive_session.session_id != msg->session_id) {
+            break;
+        }
+
+        if (g_exam_lockdown_controller.is_armed()) {
+            g_file_receive_session.out_file.close();
+            std::error_code ec;
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            g_file_receive_session = {};
+            send_file_dist_status(msg->session_id, 0,
+                                  nstu::file_dist::FileDistStatus::rejected_exam_active);
+            break;
+        }
+
+        g_file_receive_session.out_file.flush();
+        g_file_receive_session.out_file.close();
+
+        if (g_file_receive_session.bytes_received != g_file_receive_session.total_size) {
+            std::error_code ec;
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            const auto session_id = g_file_receive_session.session_id;
+            g_file_receive_session = {};
+            send_file_dist_status(session_id, 0,
+                                  nstu::file_dist::FileDistStatus::write_error);
+            break;
+        }
+
+        // Verify SHA-256
+        std::error_code ec;
+        std::ifstream ifs(g_file_receive_session.part_path, std::ios::binary);
+        if (!ifs.is_open()) {
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            const auto session_id = g_file_receive_session.session_id;
+            g_file_receive_session = {};
+            send_file_dist_status(session_id, 0,
+                                  nstu::file_dist::FileDistStatus::write_error);
+            break;
+        }
+
+        std::vector<std::byte> file_buffer(g_file_receive_session.total_size);
+        if (g_file_receive_session.total_size > 0) {
+            ifs.read(reinterpret_cast<char*>(file_buffer.data()),
+                     static_cast<std::streamsize>(file_buffer.size()));
+            if (!ifs.good() && !ifs.eof()) {
+                ifs.close();
+                std::filesystem::remove(g_file_receive_session.part_path, ec);
+                const auto session_id = g_file_receive_session.session_id;
+                g_file_receive_session = {};
+                send_file_dist_status(session_id, 0,
+                                      nstu::file_dist::FileDistStatus::write_error);
+                break;
+            }
+        }
+        ifs.close();
+
+        const auto computed_hash = nstu::security::sha256(file_buffer);
+        if (!computed_hash.has_value() ||
+            !nstu::security::constant_time_equal(*computed_hash, g_file_receive_session.expected_sha256)) {
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            const auto session_id = g_file_receive_session.session_id;
+            g_file_receive_session = {};
+            send_file_dist_status(session_id, 0,
+                                  nstu::file_dist::FileDistStatus::hash_mismatch);
+            emit_audit(nstu::audit::Category::security,
+                       nstu::audit::Severity::error, "file_distribution",
+                       "finish", "failed", "file digest mismatch; part deleted");
+            break;
+        }
+
+        // Commit file: rename .nstu_part to target_path
+        std::filesystem::remove(g_file_receive_session.target_path, ec);
+        std::filesystem::rename(g_file_receive_session.part_path, g_file_receive_session.target_path, ec);
+        if (ec) {
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            const auto session_id = g_file_receive_session.session_id;
+            g_file_receive_session = {};
+            send_file_dist_status(session_id, 0,
+                                  nstu::file_dist::FileDistStatus::write_error);
+            break;
+        }
+
+        const auto final_session_id = g_file_receive_session.session_id;
+        const auto final_size = g_file_receive_session.total_size;
+        g_file_receive_session = {};
+
+        send_file_dist_status(final_session_id, final_size,
+                              nstu::file_dist::FileDistStatus::completed);
+        emit_audit(nstu::audit::Category::system,
+                   nstu::audit::Severity::info, "file_distribution",
+                   "finish", "success", "file staged successfully; no auto-execution");
+        break;
+    }
+    case nstu::protocol::CommandType::file_dist_cancel: {
+        const auto u8_span = std::span<const std::uint8_t>(
+            reinterpret_cast<const std::uint8_t*>(command.payload.data()),
+            command.payload.size());
+        const auto msg = nstu::file_dist::decode_file_dist_cancel(u8_span);
+        if (!msg) {
+            break;
+        }
+
+        std::scoped_lock lock(g_file_receive_mutex);
+        if (g_file_receive_session.active &&
+            g_file_receive_session.session_id == msg->session_id) {
+            if (g_file_receive_session.out_file.is_open()) {
+                g_file_receive_session.out_file.close();
+            }
+            std::error_code ec;
+            std::filesystem::remove(g_file_receive_session.part_path, ec);
+            const auto session_id = g_file_receive_session.session_id;
+            g_file_receive_session = {};
+            send_file_dist_status(session_id, 0,
+                                  nstu::file_dist::FileDistStatus::cancelled);
+        }
+        break;
+    }
     default:
         break;
     }
@@ -2397,6 +2724,17 @@ void remote_control_loop(std::stop_token stop_token) {
                 queue_agent_message(
                     {nstu::client::AgentMessageType::server_online,
                      {std::byte{static_cast<unsigned char>(0)}}});
+            }
+            {
+                std::scoped_lock lock(g_file_receive_mutex);
+                if (g_file_receive_session.active) {
+                    if (g_file_receive_session.out_file.is_open()) {
+                        g_file_receive_session.out_file.close();
+                    }
+                    std::error_code ec;
+                    std::filesystem::remove(g_file_receive_session.part_path, ec);
+                    g_file_receive_session = {};
+                }
             }
             queue_agent_message(
                 {nstu::client::AgentMessageType::stop_stream, {}});
