@@ -2262,6 +2262,35 @@ void draw_selected_client(
         ImGui::Spacing();
     }
     ImGui::TextDisabled("%s", selected_client->address.c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("•");
+    ImGui::SameLine();
+    if (!selected_client->mac_address.empty()) {
+        ImGui::TextDisabled("MAC: %s", selected_client->mac_address.c_str());
+    } else {
+        ImGui::TextDisabled("MAC: %s", tr(state, "Unknown", "Chưa rõ"));
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("•");
+    ImGui::SameLine();
+    switch (selected_client->wol_support) {
+    case nstu::net::WolSupportState::supported:
+        ImGui::TextColored(ImVec4{0.3f, 0.85f, 0.4f, 1.0f}, "[●] WOL: %s",
+                           tr(state, "Supported", "Được hỗ trợ"));
+        break;
+    case nstu::net::WolSupportState::unsupported:
+        ImGui::TextColored(ImVec4{0.9f, 0.4f, 0.4f, 1.0f}, "[▲] WOL: %s",
+                           tr(state, "Unsupported", "Không hỗ trợ"));
+        break;
+    case nstu::net::WolSupportState::missing_mac:
+        ImGui::TextColored(ImVec4{0.7f, 0.7f, 0.7f, 1.0f}, "[○] WOL: %s",
+                           tr(state, "Missing MAC", "Thiếu MAC"));
+        break;
+    case nstu::net::WolSupportState::unknown:
+        ImGui::TextColored(ImVec4{0.7f, 0.7f, 0.7f, 1.0f}, "[○] WOL: %s",
+                           tr(state, "Unknown", "Chưa rõ"));
+        break;
+    }
     bool managed = selected_client->frozen;
     if (ImGui::Checkbox(
             tr(state, "Managed mode", "Chế độ được quản lý"),
@@ -2790,6 +2819,43 @@ void draw_selected_client(
                                           "Không thể thao tác nguồn khi đang có bài thi."));
     }
     if (exam_on_selected) {
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    const bool is_client_online = (selected_client->status != nstu::server::ClientStatus::offline);
+    const bool missing_mac = selected_client->mac_address.empty();
+    const bool unsupported_wol = (selected_client->wol_support == nstu::net::WolSupportState::unsupported);
+    const bool disable_wake = is_client_online || exam_on_selected || missing_mac || unsupported_wol;
+
+    if (disable_wake) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(tr(state, "Wake", "Bật máy"))) {
+        std::string wake_err;
+        const bool sent = control_plane.wake_client(
+            selected_client->id, state.current_role, &wake_err);
+        state.control_status = sent
+            ? tr(state, "Wake-on-LAN magic packet broadcasted.",
+                        "Đã phát gói tin Wake-on-LAN qua mạng.")
+            : wake_err;
+        if (!sent) {
+            record_operation_failure("WakeOnLan", "Wake-on-LAN broadcast failed",
+                                     wake_err);
+        }
+        ImGui::OpenPopup("control-status");
+    }
+    if (disable_wake && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        if (is_client_online) {
+            ImGui::SetTooltip("%s", tr(state, "Client is already online.", "Máy tính đang hoạt động."));
+        } else if (exam_on_selected) {
+            ImGui::SetTooltip("%s", tr(state, "Cannot execute Wake-on-LAN: exam active on client.", "Không thể bật máy: đang thi."));
+        } else if (missing_mac) {
+            ImGui::SetTooltip("%s", tr(state, "Cannot wake client: MAC address is unknown.", "Thiếu địa chỉ MAC của máy."));
+        } else if (unsupported_wol) {
+            ImGui::SetTooltip("%s", tr(state, "Wake-on-LAN is not supported by client hardware.", "Phần cứng không hỗ trợ Wake-on-LAN."));
+        }
+    }
+    if (disable_wake) {
         ImGui::EndDisabled();
     }
     if (state.annotation_enabled) {
@@ -4292,6 +4358,11 @@ void draw_workspace_toolbar(
                 state.pending_bulk_action = BulkActionKind::shutdown;
                 state.bulk_confirmation_open = true;
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Wake", "Bật máy"))) {
+                state.pending_bulk_action = BulkActionKind::wake_on_lan;
+                state.bulk_confirmation_open = true;
+            }
         }
     }
 
@@ -4415,12 +4486,14 @@ void draw_bulk_action_confirmation_popup(
     ImGui::Separator();
 
     const std::string room_name = state.room_name_input.data();
+    const bool is_wol = (state.pending_bulk_action == BulkActionKind::wake_on_lan);
+    const std::size_t effective_target_count = is_wol ? target_summary.skipped_offline : target_summary.eligible_online;
     ImGui::TextWrapped("%s",
         nstu::server::format_bulk_confirmation_message(
-            state.pending_bulk_action, target_summary.eligible_online,
+            state.pending_bulk_action, effective_target_count,
             room_name, is_vietnamese).c_str());
 
-    if (target_summary.skipped_offline > 0) {
+    if (!is_wol && target_summary.skipped_offline > 0) {
         ImGui::Spacing();
         ImGui::TextColored(
             ImVec4{0.9f, 0.7f, 0.1f, 1.0f},
@@ -4428,6 +4501,14 @@ void draw_bulk_action_confirmation_popup(
             tr(state, "Notice", "Lưu ý"),
             target_summary.skipped_offline,
             tr(state, "offline computers will be skipped.", "máy ngoại tuyến sẽ được bỏ qua."));
+    } else if (is_wol && target_summary.eligible_online > 0) {
+        ImGui::Spacing();
+        ImGui::TextColored(
+            ImVec4{0.4f, 0.7f, 1.0f, 1.0f},
+            "%s: %zu %s",
+            tr(state, "Notice", "Lưu ý"),
+            target_summary.eligible_online,
+            tr(state, "online computers are already awake and will be skipped.", "máy đang trực tuyến sẽ được bỏ qua vì đã bật."));
     }
 
     bool url_valid = true;
@@ -4473,6 +4554,9 @@ void draw_bulk_action_confirmation_popup(
             ? is_action_permitted(state.current_role, OperatorAction::reboot_client)
             : is_action_permitted(state.current_role, OperatorAction::shutdown_client));
 
+    const bool wol_role_authorized = !is_wol ||
+        is_action_permitted(state.current_role, OperatorAction::wake_on_lan);
+
     if (is_power_action && !power_role_authorized) {
         ImGui::Spacing();
         ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.4f, 1.0f}, "%s: %s",
@@ -4481,8 +4565,8 @@ void draw_bulk_action_confirmation_popup(
                       "Thao tác nguồn yêu cầu quyền Kỹ thuật viên hoặc Nhà phát triển."));
     }
 
-    const bool has_online_targets = (target_summary.eligible_online > 0);
-    const bool can_execute = has_online_targets && url_valid && power_role_authorized;
+    const bool has_targets = is_wol ? (target_summary.skipped_offline > 0) : (target_summary.eligible_online > 0);
+    const bool can_execute = has_targets && url_valid && power_role_authorized && wol_role_authorized;
     if (!can_execute) {
         ImGui::BeginDisabled();
     }

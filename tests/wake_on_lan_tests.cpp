@@ -400,6 +400,24 @@ void test_classroom_roster_bulk_wake() {
     assert(status_vi.find("2 thành công") != std::string::npos);
 }
 
+void test_detect_local_hardware_wol() {
+    using namespace nstu::net;
+
+    const auto info1 = detect_local_hardware_wol();
+    // Repeating detection must be stable and leak-free
+    const auto info2 = detect_local_hardware_wol();
+
+    assert(info1.wol_support == info2.wol_support);
+    assert(info1.mac == info2.mac);
+
+    if (info1.wol_support == WolSupportState::supported ||
+        info1.wol_support == WolSupportState::unsupported) {
+        assert(!info1.mac.is_zero());
+    } else if (info1.wol_support == WolSupportState::missing_mac) {
+        assert(info1.mac.is_zero());
+    }
+}
+
 } // namespace
 
 int main() {
@@ -428,6 +446,9 @@ int main() {
 
     test_classroom_roster_bulk_wake();
     std::cout << "PASS: test_classroom_roster_bulk_wake\n";
+
+    test_detect_local_hardware_wol();
+    std::cout << "PASS: test_detect_local_hardware_wol\n";
 
     std::cout << "All Wake-on-LAN tests passed successfully!\n";
     return 0;

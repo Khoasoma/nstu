@@ -59,5 +59,12 @@ struct WolBroadcastOptions {
     const WolBroadcastOptions& options = {},
     std::string* error = nullptr);
 
+struct LocalHardwareInfo {
+    MacAddress mac{};
+    WolSupportState wol_support = WolSupportState::unknown;
+};
+
+[[nodiscard]] LocalHardwareInfo detect_local_hardware_wol() noexcept;
+
 } // namespace nstu::net
 

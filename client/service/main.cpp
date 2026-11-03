@@ -23,6 +23,7 @@
 #include "nstu/setup/diagnostics.hpp"
 #include "nstu/setup/uwf.hpp"
 #include "nstu/stream_host_service.hpp"
+#include "nstu/wake_on_lan.hpp"
 #include "nstu/wfp_allowlist.hpp"
 
 #include <windows.h>
@@ -2319,6 +2320,18 @@ void remote_control_loop(std::stop_token stop_token) {
             // The probe runs off this thread so a slow WMI call cannot delay
             // reconnecting to the teacher.
             report_current_fleet_state_async();
+            // Hardware MAC address and Wake-on-LAN support capability
+            const auto hw_wol = nstu::net::detect_local_hardware_wol();
+            const auto wol_payload = nstu::control::encode_wol_report(
+                nstu::control::WolReportMessage{
+                    .mac = hw_wol.mac,
+                    .support = hw_wol.wol_support,
+                });
+            if (!wol_payload.empty()) {
+                queue_outbound_message(
+                    nstu::protocol::CommandType::wol_report,
+                    wol_payload);
+            }
             std::string ignored_error;
             const auto endpoint_observer =
                 [&](const nstu::discovery::ServerEndpoint& endpoint) {

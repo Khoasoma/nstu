@@ -4,6 +4,8 @@
 #if defined(_WIN32)
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <iphlpapi.h>
+#include <windows.h>
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -15,6 +17,7 @@
 #include <cctype>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 namespace nstu::net {
 namespace {
@@ -277,6 +280,63 @@ bool send_wake_on_lan_packet(
     }
 
     return true;
+}
+
+LocalHardwareInfo detect_local_hardware_wol() noexcept {
+    LocalHardwareInfo info{};
+#if defined(_WIN32)
+    std::vector<std::max_align_t> buffer;
+    ULONG buffer_bytes = 16384;
+    PIP_ADAPTER_ADDRESSES adapters = nullptr;
+    ULONG result = ERROR_BUFFER_OVERFLOW;
+
+    for (int attempt = 0; attempt < 3 && result == ERROR_BUFFER_OVERFLOW; ++attempt) {
+        const auto elements =
+            (static_cast<std::size_t>(buffer_bytes) + sizeof(std::max_align_t) - 1) /
+            sizeof(std::max_align_t);
+        buffer.resize(elements);
+        adapters = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+        ULONG supplied_bytes = static_cast<ULONG>(buffer.size() * sizeof(std::max_align_t));
+        result = GetAdaptersAddresses(
+            AF_INET,
+            GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+            nullptr, adapters, &supplied_bytes);
+        buffer_bytes = supplied_bytes;
+    }
+
+    if (result == NO_ERROR && adapters != nullptr) {
+        for (auto* adapter = adapters; adapter != nullptr; adapter = adapter->Next) {
+            if (adapter->OperStatus != IfOperStatusUp ||
+                adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK ||
+                adapter->IfType == IF_TYPE_TUNNEL) {
+                continue;
+            }
+            if (adapter->PhysicalAddressLength == 6) {
+                MacAddress mac{};
+                for (std::size_t i = 0; i < 6; ++i) {
+                    mac.octets[i] = adapter->PhysicalAddress[i];
+                }
+                if (!mac.is_zero()) {
+                    info.mac = mac;
+                    // Ethernet (IF_TYPE_ETHERNET_CSMACD = 6) or Wi-Fi (IF_TYPE_IEEE80211 = 71)
+                    if (adapter->IfType == 6 || adapter->IfType == 71) {
+                        info.wol_support = WolSupportState::supported;
+                    } else {
+                        info.wol_support = WolSupportState::unsupported;
+                    }
+                    return info;
+                }
+            }
+        }
+    }
+
+    if (info.mac.is_zero()) {
+        info.wol_support = WolSupportState::missing_mac;
+    }
+#else
+    info.wol_support = WolSupportState::unknown;
+#endif
+    return info;
 }
 
 } // namespace nstu::net
