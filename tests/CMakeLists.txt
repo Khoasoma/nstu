@@ -231,6 +231,12 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_url_validation_tests)
     add_test(NAME nstu.url_validation COMMAND nstu_url_validation_tests)
 
+    add_executable(nstu_power_action_tests power_action_tests.cpp)
+    target_link_libraries(nstu_power_action_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_power_action_tests)
+    nstu_enable_test_assertions(nstu_power_action_tests)
+    add_test(NAME nstu.power_action COMMAND nstu_power_action_tests)
+
     add_executable(nstu_exam_telemetry_journal_tests exam_telemetry_journal_tests.cpp)
     target_link_libraries(nstu_exam_telemetry_journal_tests PRIVATE nstu_server_state)
     nstu_enable_warnings(nstu_exam_telemetry_journal_tests)

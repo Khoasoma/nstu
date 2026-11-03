@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nstu/client_registry.hpp"
+#include "nstu/operator_role.hpp"
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
@@ -33,6 +34,8 @@ enum class BulkActionKind : int {
     refresh_snapshots = 2,
     acknowledge_help = 3,
     launch_url = 4,
+    reboot = 5,
+    shutdown = 6,
 };
 
 struct RoomCounts {
@@ -99,7 +102,8 @@ void toggle_selected(
     const std::unordered_set<std::uint64_t>& selected_ids,
     BulkActionKind action,
     std::uint16_t snapshot_interval_seconds,
-    std::string_view extra_payload = {});
+    std::string_view extra_payload = {},
+    OperatorRole caller_role = OperatorRole::technician);
 
 [[nodiscard]] std::string format_bulk_confirmation_title(
     BulkActionKind action,

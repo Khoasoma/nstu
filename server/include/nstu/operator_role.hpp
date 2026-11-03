@@ -23,6 +23,7 @@ enum class OperatorAction : int {
     view_diagnostics_raw = 8,
     export_telemetry_report = 9,
     manage_settings = 10,
+    shutdown_client = 11,
 };
 
 [[nodiscard]] bool is_action_permitted(

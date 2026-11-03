@@ -1,4 +1,5 @@
 #include "nstu/classroom_roster.hpp"
+#include "nstu/control_messages.hpp"
 #include "nstu/control_plane.hpp"
 #include <algorithm>
 #include <cctype>
@@ -171,7 +172,8 @@ BulkActionResult execute_bulk_action(
     const std::unordered_set<std::uint64_t>& selected_ids,
     BulkActionKind action,
     std::uint16_t snapshot_interval_seconds,
-    std::string_view extra_payload) {
+    std::string_view extra_payload,
+    OperatorRole caller_role) {
     BulkActionResult result;
     for (const auto& client : clients) {
         if (selected_ids.find(client.id) == selected_ids.end()) {
@@ -199,6 +201,12 @@ BulkActionResult execute_bulk_action(
         case BulkActionKind::launch_url:
             ok = control_plane.launch_url(client.id, std::string(extra_payload), &error);
             break;
+        case BulkActionKind::reboot:
+            ok = control_plane.power_action(client.id, control::PowerActionKind::reboot, false, caller_role, &error);
+            break;
+        case BulkActionKind::shutdown:
+            ok = control_plane.power_action(client.id, control::PowerActionKind::shutdown, false, caller_role, &error);
+            break;
         }
         if (ok) {
             ++result.succeeded;
@@ -225,6 +233,10 @@ std::string format_bulk_confirmation_title(BulkActionKind action, bool vietnames
         return vietnamese ? "Xác nhận giải quyết yêu cầu trợ giúp" : "Confirm Acknowledge Help";
     case BulkActionKind::launch_url:
         return vietnamese ? "Xác nhận mở trang web hàng loạt" : "Confirm Bulk Open Website";
+    case BulkActionKind::reboot:
+        return vietnamese ? "Xác nhận khởi động lại hàng loạt" : "Confirm Bulk Reboot";
+    case BulkActionKind::shutdown:
+        return vietnamese ? "Xác nhận tắt máy hàng loạt" : "Confirm Bulk Shutdown";
     }
     return "Confirm Bulk Action";
 }
@@ -253,6 +265,12 @@ std::string format_bulk_confirmation_message(
         case BulkActionKind::launch_url:
             stream << "Bạn có chắc chắn muốn MỞ TRANG WEB trên " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không?";
             break;
+        case BulkActionKind::reboot:
+            stream << "Bạn có chắc chắn muốn KHỞI ĐỘNG LẠI " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không? Các thay đổi chưa lưu có thể bị mất.";
+            break;
+        case BulkActionKind::shutdown:
+            stream << "Bạn có chắc chắn muốn TẮT " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không? Các thay đổi chưa lưu có thể bị mất.";
+            break;
         }
     } else {
         switch (action) {
@@ -270,6 +288,12 @@ std::string format_bulk_confirmation_message(
             break;
         case BulkActionKind::launch_url:
             stream << "Are you sure you want to OPEN the website on " << target_count << " selected computer(s) in room '" << room_label << "'?";
+            break;
+        case BulkActionKind::reboot:
+            stream << "Are you sure you want to REBOOT " << target_count << " selected computer(s) in room '" << room_label << "'? Any unsaved work may be lost.";
+            break;
+        case BulkActionKind::shutdown:
+            stream << "Are you sure you want to SHUT DOWN " << target_count << " selected computer(s) in room '" << room_label << "'? Any unsaved work may be lost.";
             break;
         }
     }
@@ -289,6 +313,8 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::refresh_snapshots: action_str = "làm mới ảnh chụp"; break;
         case BulkActionKind::acknowledge_help: action_str = "giải quyết trợ giúp"; break;
         case BulkActionKind::launch_url: action_str = "mở trang web"; break;
+        case BulkActionKind::reboot: action_str = "khởi động lại"; break;
+        case BulkActionKind::shutdown: action_str = "tắt máy"; break;
         }
         stream << "Hoàn tất " << action_str << " hàng loạt: "
                << result.succeeded << " thành công, "
@@ -301,6 +327,8 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::refresh_snapshots: action_str = "snapshot refresh"; break;
         case BulkActionKind::acknowledge_help: action_str = "acknowledge help"; break;
         case BulkActionKind::launch_url: action_str = "open website"; break;
+        case BulkActionKind::reboot: action_str = "reboot"; break;
+        case BulkActionKind::shutdown: action_str = "shutdown"; break;
         }
         stream << "Bulk " << action_str << " completed: "
                << result.succeeded << " succeeded, "

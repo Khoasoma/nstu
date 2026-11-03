@@ -43,6 +43,7 @@ void test_teacher_permissions() {
     // Disruptive/maintenance actions must NOT be permitted for Teacher
     assert(!is_action_permitted(role, OperatorAction::configure_uwf));
     assert(!is_action_permitted(role, OperatorAction::reboot_client));
+    assert(!is_action_permitted(role, OperatorAction::shutdown_client));
     assert(!is_action_permitted(role, OperatorAction::view_fleet_health));
     assert(!is_action_permitted(role, OperatorAction::view_diagnostics_raw));
     assert(!is_action_permitted(role, OperatorAction::export_telemetry_report));
@@ -67,6 +68,7 @@ void test_technician_permissions() {
     assert(is_action_permitted(role, OperatorAction::view_fleet_health));
     assert(is_action_permitted(role, OperatorAction::configure_uwf));
     assert(is_action_permitted(role, OperatorAction::reboot_client));
+    assert(is_action_permitted(role, OperatorAction::shutdown_client));
 
     // Raw internal diagnostics & export remain developer-only
     assert(!is_action_permitted(role, OperatorAction::view_diagnostics_raw));
@@ -88,6 +90,7 @@ void test_developer_permissions() {
     assert(is_action_permitted(role, OperatorAction::manage_exam));
     assert(is_action_permitted(role, OperatorAction::configure_uwf));
     assert(is_action_permitted(role, OperatorAction::reboot_client));
+    assert(is_action_permitted(role, OperatorAction::shutdown_client));
     assert(is_action_permitted(role, OperatorAction::view_fleet_health));
     assert(is_action_permitted(role, OperatorAction::view_diagnostics_raw));
     assert(is_action_permitted(role, OperatorAction::export_telemetry_report));

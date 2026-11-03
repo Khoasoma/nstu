@@ -257,4 +257,19 @@ struct LaunchUrlMessage {
 [[nodiscard]] std::optional<LaunchUrlMessage> decode_launch_url(
     std::span<const std::byte> payload);
 
+enum class PowerActionKind : std::uint8_t {
+    reboot = 1,
+    shutdown = 2,
+};
+
+struct PowerActionMessage {
+    PowerActionKind action = PowerActionKind::reboot;
+    bool force = false;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_power_action(
+    const PowerActionMessage& message);
+[[nodiscard]] std::optional<PowerActionMessage> decode_power_action(
+    std::span<const std::byte> payload);
+
 } // namespace nstu::control

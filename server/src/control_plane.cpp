@@ -2737,6 +2737,65 @@ bool ServerControlPlane::launch_url(std::uint64_t client_id, const std::string& 
                         payload, error);
 }
 
+bool ServerControlPlane::power_action(std::uint64_t client_id,
+                                     control::PowerActionKind action,
+                                     bool force,
+                                     OperatorRole caller_role,
+                                     std::string* error) {
+    const char* action_name = (action == control::PowerActionKind::reboot)
+        ? "power_reboot" : "power_shutdown";
+
+    if (exam_active(client_id)) {
+        if (error != nullptr) {
+            *error = "Cannot execute power action: exam active on client.";
+        }
+        record_remote_session_audit(client_id, action_name, "denied",
+                                    "exam active on client");
+        return false;
+    }
+
+    const auto required_action = (action == control::PowerActionKind::reboot)
+        ? OperatorAction::reboot_client
+        : OperatorAction::shutdown_client;
+    if (!is_action_permitted(caller_role, required_action)) {
+        if (error != nullptr) {
+            *error = "Caller role is not authorized for power actions.";
+        }
+        record_remote_session_audit(client_id, action_name, "denied",
+                                    "unauthorized role");
+        return false;
+    }
+
+    if (force && caller_role != OperatorRole::technician &&
+        caller_role != OperatorRole::developer) {
+        if (error != nullptr) {
+            *error = "Forced power action requires Technician or Developer role.";
+        }
+        record_remote_session_audit(client_id, action_name, "denied",
+                                    "forced power action unauthorized");
+        return false;
+    }
+
+    const auto payload = control::encode_power_action(control::PowerActionMessage{
+        .action = action,
+        .force = force,
+    });
+    if (payload.empty()) {
+        if (error != nullptr) {
+            *error = "Failed to encode power action payload.";
+        }
+        return false;
+    }
+
+    const bool sent = send_command(client_id, protocol::CommandType::power_action,
+                                   payload, error);
+    record_remote_session_audit(client_id, action_name,
+                                sent ? "dispatched" : "failed",
+                                sent ? (force ? "force" : "graceful")
+                                     : (error != nullptr ? *error : "unknown error"));
+    return sent;
+}
+
 bool ServerControlPlane::configure_uwf(
     std::uint64_t client_id, bool checkpoint_acknowledged,
     std::string* error) {

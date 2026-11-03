@@ -599,4 +599,36 @@ std::optional<LaunchUrlMessage> decode_launch_url(std::span<const std::byte> pay
     };
 }
 
+std::vector<std::byte> encode_power_action(const PowerActionMessage& message) {
+    if (message.action != PowerActionKind::reboot &&
+        message.action != PowerActionKind::shutdown) {
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(2);
+    bytes.push_back(static_cast<std::byte>(message.action));
+    const std::uint8_t flags = message.force ? 0x01u : 0x00u;
+    bytes.push_back(static_cast<std::byte>(flags));
+    return bytes;
+}
+
+std::optional<PowerActionMessage> decode_power_action(std::span<const std::byte> payload) {
+    if (payload.size() != 2) {
+        return std::nullopt;
+    }
+    const auto action_byte = static_cast<std::uint8_t>(payload[0]);
+    if (action_byte != static_cast<std::uint8_t>(PowerActionKind::reboot) &&
+        action_byte != static_cast<std::uint8_t>(PowerActionKind::shutdown)) {
+        return std::nullopt;
+    }
+    const auto flags_byte = static_cast<std::uint8_t>(payload[1]);
+    if ((flags_byte & ~0x01u) != 0) {
+        return std::nullopt;
+    }
+    return PowerActionMessage{
+        .action = static_cast<PowerActionKind>(action_byte),
+        .force = (flags_byte & 0x01u) != 0,
+    };
+}
+
 } // namespace nstu::control

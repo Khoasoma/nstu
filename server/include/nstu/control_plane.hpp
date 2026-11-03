@@ -6,6 +6,7 @@
 #include "nstu/exam_sync.hpp"
 #include "nstu/iocp_dispatcher.hpp"
 #include "nstu/key_store.hpp"
+#include "nstu/operator_role.hpp"
 #include "nstu/protocol_headers.h"
 
 #include <cstddef>
@@ -114,6 +115,12 @@ public:
                                             std::string* error = nullptr);
     [[nodiscard]] bool launch_url(std::uint64_t client_id, const std::string& url,
                                   std::string* error = nullptr);
+    [[nodiscard]] bool power_action(
+        std::uint64_t client_id,
+        control::PowerActionKind action,
+        bool force = false,
+        OperatorRole caller_role = OperatorRole::technician,
+        std::string* error = nullptr);
     [[nodiscard]] bool configure_uwf(
         std::uint64_t client_id, bool checkpoint_acknowledged,
         std::string* error = nullptr);
