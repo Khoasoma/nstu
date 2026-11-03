@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 67/67 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 70/70 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -165,6 +165,12 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Support Bundle UI & Technician Live Export** | `server/app/main.cpp` implementing technician/developer support bundle modal, explicit consent checkbox gate, scrollable sanitized markdown preview, clipboard/file export, and live inventory diagnostics wiring; `tests/server_state_tests.cpp` verification suite | **Merged to main** (`15c0172`) |
 | **Portable Room Profile Core Engine** | `common/include/nstu/room_profile.hpp` and `common/src/room_profile.cpp` implementing secret-free room profile model, bounded canonical JSON serializer/parser, fail-closed canary rejection (keys, tokens, secrets, tickets, answers), preset URL/app validators, and unit test suite in `tests/room_profile_tests.cpp` | **Merged to main** (`e8ad4c0`) |
 | **Room Profile UI & Live Classroom Integration** | `server/app/main.cpp` implementing technician/developer room profile modal, JSON clipboard/file export, multiline import with fail-closed secret canary rejection, live classroom roster synchronization, and `tests/server_state_tests.cpp` verification suite | **Merged to main** (`81691f4`) |
+
+## Integrated Signed Update Pipeline & LTSC Maintenance (Roadmap P3.2 / FLEET-03 & FLEET-04)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Signed Update Manifest & Asymmetric Verification** | `common/include/nstu/update_manifest.hpp` and `common/src/update_manifest.cpp` implementing update manifest data model, asymmetric ECDSA P-256 digital signature signing & verification via Windows BCrypt (`BCRYPT_ECDSA_P256_ALGORITHM`) with client public trust root verification, canonical signing payload binding `rollout_percentage`, anti-downgrade and equal-version (`already_up_to_date`) engine, fail-closed JSON parser, and deterministic canary rollout bucketing engine in `tests/update_manifest_tests.cpp` | **Merged to main** (`7a8db01`) |
 
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
