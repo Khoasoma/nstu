@@ -2765,6 +2765,33 @@ void draw_selected_client(
         state.pending_bulk_action = BulkActionKind::launch_url;
         state.bulk_confirmation_open = true;
     }
+    ImGui::SameLine();
+    const bool exam_on_selected = control_plane.exam_active(selected_client->id);
+    if (exam_on_selected) {
+        ImGui::BeginDisabled();
+    }
+    if (ImGui::Button(tr(state, "Reboot", "Khởi động lại"))) {
+        state.checked_client_ids = {selected_client->id};
+        state.pending_bulk_action = BulkActionKind::reboot;
+        state.bulk_confirmation_open = true;
+    }
+    if (exam_on_selected && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state, "Power actions are disabled during active assessments.",
+                                          "Không thể thao tác nguồn khi đang có bài thi."));
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Shutdown", "Tắt máy"))) {
+        state.checked_client_ids = {selected_client->id};
+        state.pending_bulk_action = BulkActionKind::shutdown;
+        state.bulk_confirmation_open = true;
+    }
+    if (exam_on_selected && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", tr(state, "Power actions are disabled during active assessments.",
+                                          "Không thể thao tác nguồn khi đang có bài thi."));
+    }
+    if (exam_on_selected) {
+        ImGui::EndDisabled();
+    }
     if (state.annotation_enabled) {
         ImGui::TextUnformatted(tr(state, "Overlay tools", "Công cụ lớp phủ"));
         ImGui::SameLine();
@@ -4255,6 +4282,16 @@ void draw_workspace_toolbar(
                 state.pending_bulk_action = BulkActionKind::launch_url;
                 state.bulk_confirmation_open = true;
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Reboot", "Khởi động lại"))) {
+                state.pending_bulk_action = BulkActionKind::reboot;
+                state.bulk_confirmation_open = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Shutdown", "Tắt máy"))) {
+                state.pending_bulk_action = BulkActionKind::shutdown;
+                state.bulk_confirmation_open = true;
+            }
         }
     }
 
@@ -4429,8 +4466,23 @@ void draw_bulk_action_confirmation_popup(
     ImGui::Separator();
     ImGui::Spacing();
 
+    const bool is_power_action = (state.pending_bulk_action == BulkActionKind::reboot ||
+                                  state.pending_bulk_action == BulkActionKind::shutdown);
+    const bool power_role_authorized = !is_power_action ||
+        (state.pending_bulk_action == BulkActionKind::reboot
+            ? is_action_permitted(state.current_role, OperatorAction::reboot_client)
+            : is_action_permitted(state.current_role, OperatorAction::shutdown_client));
+
+    if (is_power_action && !power_role_authorized) {
+        ImGui::Spacing();
+        ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.4f, 1.0f}, "%s: %s",
+            tr(state, "Permission Denied", "Từ chối quyền"),
+            tr(state, "Power actions require Technician or Developer role.",
+                      "Thao tác nguồn yêu cầu quyền Kỹ thuật viên hoặc Nhà phát triển."));
+    }
+
     const bool has_online_targets = (target_summary.eligible_online > 0);
-    const bool can_execute = has_online_targets && url_valid;
+    const bool can_execute = has_online_targets && url_valid && power_role_authorized;
     if (!can_execute) {
         ImGui::BeginDisabled();
     }
@@ -4442,7 +4494,8 @@ void draw_bulk_action_confirmation_popup(
             static_cast<std::uint16_t>(state.snapshot_interval_seconds),
             state.pending_bulk_action == BulkActionKind::launch_url
                 ? std::string_view{state.launch_url_input.data()}
-                : std::string_view{});
+                : std::string_view{},
+            state.current_role);
         state.control_status =
             nstu::server::format_bulk_action_result_status(
                 state.pending_bulk_action, result, is_vietnamese);

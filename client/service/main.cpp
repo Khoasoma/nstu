@@ -1184,6 +1184,53 @@ bool schedule_uwf_restart() noexcept {
     return scheduled;
 }
 
+bool execute_power_action(const nstu::control::PowerActionMessage& message) noexcept {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        return false;
+    }
+    TOKEN_PRIVILEGES requested{};
+    requested.PrivilegeCount = 1;
+    if (!LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege",
+                               &requested.Privileges[0].Luid)) {
+        CloseHandle(token);
+        return false;
+    }
+    requested.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    TOKEN_PRIVILEGES previous{};
+    DWORD previous_bytes = sizeof(previous);
+    SetLastError(ERROR_SUCCESS);
+    const bool enabled =
+        AdjustTokenPrivileges(token, FALSE, &requested, sizeof(previous),
+                              &previous, &previous_bytes) != FALSE &&
+        GetLastError() == ERROR_SUCCESS;
+    bool scheduled = false;
+    if (enabled) {
+        const bool is_reboot = (message.action == nstu::control::PowerActionKind::reboot);
+        const BOOL bForceApps = message.force ? TRUE : FALSE;
+        const BOOL bRebootAfterShutdown = is_reboot ? TRUE : FALSE;
+        const DWORD timeout_seconds = message.force ? 0 : 5;
+        wchar_t graceful_msg[] = L"NSTU remote power action requested. Please save open work.";
+        wchar_t* lpMessage = message.force ? nullptr : graceful_msg;
+        scheduled = InitiateSystemShutdownExW(
+            nullptr,
+            lpMessage,
+            timeout_seconds,
+            bForceApps,
+            bRebootAfterShutdown,
+            SHTDN_REASON_MAJOR_OPERATINGSYSTEM |
+                SHTDN_REASON_MINOR_RECONFIG |
+                SHTDN_REASON_FLAG_PLANNED) != FALSE;
+        if (previous.PrivilegeCount != 0) {
+            (void)AdjustTokenPrivileges(token, FALSE, &previous, 0, nullptr,
+                                        nullptr);
+        }
+    }
+    CloseHandle(token);
+    return scheduled;
+}
+
 void configure_uwf_async(bool checkpoint_acknowledged,
                          bool clear_installer_request = false) {
     bool expected = false;
@@ -1882,6 +1929,19 @@ void handle_server_command(
                                  command.payload});
         }
         break;
+    case nstu::protocol::CommandType::power_action: {
+        if (g_exam_lockdown_controller.is_armed()) {
+            OutputDebugStringA("NSTU power action rejected: exam lockdown is armed\n");
+            break;
+        }
+        const auto power_msg = nstu::control::decode_power_action(command.payload);
+        if (!power_msg.has_value()) {
+            OutputDebugStringA("NSTU invalid power action command payload\n");
+            break;
+        }
+        execute_power_action(*power_msg);
+        break;
+    }
     case nstu::protocol::CommandType::exam_telemetry_enable: {
         std::string telemetry_error;
         const bool enabled = g_exam_telemetry_router.handle_server_enable(
