@@ -50,6 +50,10 @@
 #include <thread>
 #include <vector>
 
+#ifndef NSTU_PROJECT_VERSION
+#define NSTU_PROJECT_VERSION "0.1.0"
+#endif
+
 namespace {
 
 constexpr const wchar_t* kServiceName = nstu::client::kManagedServiceName;
@@ -900,6 +904,16 @@ void agent_pipe_loop() {
             continue;
         }
         g_agent_connected = true;
+        const auto meta_connect = nstu::control::encode_fleet_metadata(
+            nstu::control::FleetMetadataMessage{
+                .client_version = NSTU_PROJECT_VERSION,
+                .agent_connected = true,
+            });
+        if (!meta_connect.empty()) {
+            queue_outbound_message(
+                nstu::protocol::CommandType::fleet_metadata,
+                meta_connect);
+        }
         {
             std::scoped_lock launch_lock(g_agent_launch_mutex);
             // A completed pipe connection proves that the previous launch
@@ -1052,6 +1066,16 @@ void agent_pipe_loop() {
             Sleep(25);
         }
         g_agent_connected = false;
+        const auto meta_disconnect = nstu::control::encode_fleet_metadata(
+            nstu::control::FleetMetadataMessage{
+                .client_version = NSTU_PROJECT_VERSION,
+                .agent_connected = false,
+            });
+        if (!meta_disconnect.empty()) {
+            queue_outbound_message(
+                nstu::protocol::CommandType::fleet_metadata,
+                meta_disconnect);
+        }
         cancel_pairing_menu();
         pipe.close();
         if (!g_stop_requested.load()) {
@@ -2665,6 +2689,17 @@ void remote_control_loop(std::stop_token stop_token) {
                 queue_outbound_message(
                     nstu::protocol::CommandType::wol_report,
                     wol_payload);
+            }
+            // Low-frequency fleet metadata (version & agent connectivity)
+            const auto metadata_payload = nstu::control::encode_fleet_metadata(
+                nstu::control::FleetMetadataMessage{
+                    .client_version = NSTU_PROJECT_VERSION,
+                    .agent_connected = g_agent_connected.load(),
+                });
+            if (!metadata_payload.empty()) {
+                queue_outbound_message(
+                    nstu::protocol::CommandType::fleet_metadata,
+                    metadata_payload);
             }
             std::string ignored_error;
             const auto endpoint_observer =

@@ -1765,6 +1765,7 @@ int main(int argc, char** argv) {
 
     std::stop_source stop_source;
     std::atomic_bool lock_received = false;
+    std::atomic_bool metadata_sent = false;
     std::atomic_bool snapshot_sent = false;
     std::atomic_bool session_succeeded = false;
     std::atomic_bool discovered_loopback = false;
@@ -1791,6 +1792,15 @@ int main(int argc, char** argv) {
                 }
             },
             [&]() -> std::optional<nstu::client::ClientOutboundCommand> {
+                if (!metadata_sent.exchange(true)) {
+                    return nstu::client::ClientOutboundCommand{
+                        nstu::protocol::CommandType::fleet_metadata,
+                        nstu::control::encode_fleet_metadata(
+                            nstu::control::FleetMetadataMessage{
+                                .client_version = "0.1.0",
+                                .agent_connected = true,
+                            })};
+                }
                 if (snapshot_sent.exchange(true)) {
                     return std::nullopt;
                 }
@@ -1817,6 +1827,11 @@ int main(int argc, char** argv) {
         return clients.size() == 1 && clients[0].hostname == "SERVICE-PC";
     }));
     const auto registry_id = registry.snapshot()[0].id;
+    assert(wait_until([&] {
+        const auto clients = registry.snapshot();
+        return !clients.empty() && clients[0].client_version == "0.1.0" &&
+               clients[0].agent_connected;
+    }));
     assert(wait_until([&] {
         const auto clients = registry.snapshot();
         return !clients.empty() && clients[0].snapshot_generation == 1 &&
