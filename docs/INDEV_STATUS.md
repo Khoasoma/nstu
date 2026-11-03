@@ -122,6 +122,8 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Operator Role Matrix** | Added `OperatorAction::distribute_file = 13` permitting Teacher, Technician, and Developer roles while denying unauthenticated callers | **Merged to main** (`0ac4ffa`) |
 | **Server Control Plane Execution** | `ServerControlPlane::distribute_file` enforcing role permissions, offline semantics, active exam containment (`exam_active(client_id)` denial with security audit logging), 64 MiB file size limits, and 64 KiB chunked streaming with SHA-256 calculation | **Merged to main** (`0ac4ffa`) |
 | **Classroom Roster Bulk Actions** | `BulkActionKind::distribute_file = 8` in `execute_bulk_action` dispatching to online clients, skipping offline machines, with bilingual EN/VI confirmation modal titles, confirmation dialogs, and result status formatters | **Merged to main** (`0ac4ffa`) |
+| **Client Receiver Engine & Safe Staging** | `client/service/main.cpp` handling `file_dist_start`, `file_dist_chunk`, `file_dist_finish`, `file_dist_cancel`, staging to `%PUBLIC%\Documents\NSTU_Received` via atomic `.nstu_part` streaming, full SHA-256 verification before rename commit, cleanup on hash mismatch, cancellation, and disconnect, exam lockdown rejection, and strict zero auto-execution | **Merged to main** (`4ac60be`) |
+| **Teacher Console UI & Modal Validation** | `server/app/main.cpp` single-client and toolbar bulk "Send File" triggers, real-time modal path existence, regular file, 64 MiB limit, and safe filename validation, and `OperatorAction::distribute_file` permission enforcement | **Merged to main** (`4ac60be`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
