@@ -1,0 +1,744 @@
+#include "nstu/update_staging.hpp"
+
+#include <windows.h>
+#include <bcrypt.h>
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <limits>
+#include <sstream>
+
+namespace nstu::update {
+
+std::optional<UpdateState> parse_update_state(std::string_view str) noexcept {
+    if (str == "idle") return UpdateState::idle;
+    if (str == "checking") return UpdateState::checking;
+    if (str == "deferred") return UpdateState::deferred;
+    if (str == "downloading") return UpdateState::downloading;
+    if (str == "verifying") return UpdateState::verifying;
+    if (str == "staged") return UpdateState::staged;
+    if (str == "apply_pending_reboot") return UpdateState::apply_pending_reboot;
+    if (str == "validating") return UpdateState::validating;
+    if (str == "committed") return UpdateState::committed;
+    if (str == "rolling_back") return UpdateState::rolling_back;
+    if (str == "failed") return UpdateState::failed;
+    return std::nullopt;
+}
+
+namespace {
+
+std::uint64_t current_time_seconds() noexcept {
+    const auto now = std::chrono::system_clock::now();
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
+}
+
+std::string escape_json_string(std::string_view s) {
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (const char c : s) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20) {
+                char buf[8];
+                sprintf_s(buf, "\\u%04x", static_cast<unsigned int>(static_cast<unsigned char>(c)));
+                out += buf;
+            } else {
+                out += c;
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+struct MiniJsonReader {
+    std::string_view input;
+    std::size_t pos{0};
+
+    void skip_whitespace() noexcept {
+        while (pos < input.size()) {
+            const char c = input[pos];
+            if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+                ++pos;
+            } else {
+                break;
+            }
+        }
+    }
+
+    bool match_char(char expected) noexcept {
+        skip_whitespace();
+        if (pos < input.size() && input[pos] == expected) {
+            ++pos;
+            return true;
+        }
+        return false;
+    }
+
+    bool parse_string(std::string& out) {
+        skip_whitespace();
+        if (pos >= input.size() || input[pos] != '"') return false;
+        ++pos;
+        out.clear();
+        bool escaped = false;
+        while (pos < input.size()) {
+            const char c = input[pos++];
+            if (escaped) {
+                switch (c) {
+                case '"': out.push_back('"'); break;
+                case '\\': out.push_back('\\'); break;
+                case '/': out.push_back('/'); break;
+                case 'b': out.push_back('\b'); break;
+                case 'f': out.push_back('\f'); break;
+                case 'n': out.push_back('\n'); break;
+                case 'r': out.push_back('\r'); break;
+                case 't': out.push_back('\t'); break;
+                default: out.push_back(c); break;
+                }
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                return true;
+            } else {
+                out.push_back(c);
+            }
+        }
+        return false;
+    }
+
+    bool parse_uint64(std::uint64_t& out) noexcept {
+        skip_whitespace();
+        if (pos >= input.size() || !std::isdigit(static_cast<unsigned char>(input[pos]))) return false;
+        std::uint64_t val = 0;
+        while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
+            const unsigned int digit = static_cast<unsigned int>(input[pos++] - '0');
+            if (val > (std::numeric_limits<std::uint64_t>::max() - digit) / 10) {
+                return false;
+            }
+            val = val * 10 + digit;
+        }
+        out = val;
+        return true;
+    }
+
+    bool parse_bool(bool& out) noexcept {
+        skip_whitespace();
+        if (pos + 4 <= input.size() && input.substr(pos, 4) == "true") {
+            pos += 4;
+            out = true;
+            return true;
+        }
+        if (pos + 5 <= input.size() && input.substr(pos, 5) == "false") {
+            pos += 5;
+            out = false;
+            return true;
+        }
+        return false;
+    }
+
+    bool skip_value() noexcept {
+        skip_whitespace();
+        if (pos >= input.size()) return false;
+        const char c = input[pos];
+        if (c == '"') {
+            std::string discard;
+            return parse_string(discard);
+        }
+        while (pos < input.size() && input[pos] != ',' && input[pos] != '}' && input[pos] != ']' &&
+               input[pos] != ' ' && input[pos] != '\t' && input[pos] != '\r' && input[pos] != '\n') {
+            ++pos;
+        }
+        return true;
+    }
+};
+
+} // namespace
+
+std::string export_staging_record_json(const StagingRecord& record) {
+    std::ostringstream ss;
+    ss << "{\n";
+    ss << "  \"schema_version\": \"" << escape_json_string(record.schema_version) << "\",\n";
+    ss << "  \"active_version\": \"" << record.active_version.to_string() << "\",\n";
+    ss << "  \"target_version\": \"" << record.target_version.to_string() << "\",\n";
+    ss << "  \"target_sha256_hex\": \"" << escape_json_string(record.target_sha256_hex) << "\",\n";
+    ss << "  \"expected_bytes\": " << record.expected_bytes << ",\n";
+    ss << "  \"staged_bytes\": " << record.staged_bytes << ",\n";
+    ss << "  \"current_state\": \"" << to_string(record.current_state) << "\",\n";
+    ss << "  \"last_error\": \"" << escape_json_string(record.last_error) << "\",\n";
+    ss << "  \"state_timestamp_utc\": " << record.state_timestamp_utc << ",\n";
+    ss << "  \"requires_reboot\": " << (record.requires_reboot ? "true" : "false") << ",\n";
+    ss << "  \"backup_path\": \"" << escape_json_string(record.backup_path) << "\",\n";
+    ss << "  \"staged_package_path\": \"" << escape_json_string(record.staged_package_path) << "\"\n";
+    ss << "}\n";
+    return ss.str();
+}
+
+std::optional<StagingRecord> import_staging_record_json(std::string_view json_str) {
+    if (json_str.empty() || json_str.size() > 64 * 1024) return std::nullopt;
+
+    MiniJsonReader reader{json_str, 0};
+    if (!reader.match_char('{')) return std::nullopt;
+
+    StagingRecord rec;
+
+    while (true) {
+        reader.skip_whitespace();
+        if (reader.match_char('}')) break;
+
+        std::string key;
+        if (!reader.parse_string(key) || !reader.match_char(':')) return std::nullopt;
+
+        if (key == "schema_version") {
+            if (!reader.parse_string(rec.schema_version)) return std::nullopt;
+        } else if (key == "active_version") {
+            std::string v;
+            if (!reader.parse_string(v)) return std::nullopt;
+            const auto parsed = SemanticVersion::parse(v);
+            if (!parsed) return std::nullopt;
+            rec.active_version = *parsed;
+        } else if (key == "target_version") {
+            std::string v;
+            if (!reader.parse_string(v)) return std::nullopt;
+            const auto parsed = SemanticVersion::parse(v);
+            if (!parsed) return std::nullopt;
+            rec.target_version = *parsed;
+        } else if (key == "target_sha256_hex") {
+            if (!reader.parse_string(rec.target_sha256_hex)) return std::nullopt;
+        } else if (key == "expected_bytes") {
+            if (!reader.parse_uint64(rec.expected_bytes)) return std::nullopt;
+        } else if (key == "staged_bytes") {
+            if (!reader.parse_uint64(rec.staged_bytes)) return std::nullopt;
+        } else if (key == "current_state") {
+            std::string st;
+            if (!reader.parse_string(st)) return std::nullopt;
+            const auto parsed = parse_update_state(st);
+            if (!parsed) return std::nullopt;
+            rec.current_state = *parsed;
+        } else if (key == "last_error") {
+            if (!reader.parse_string(rec.last_error)) return std::nullopt;
+        } else if (key == "state_timestamp_utc") {
+            if (!reader.parse_uint64(rec.state_timestamp_utc)) return std::nullopt;
+        } else if (key == "requires_reboot") {
+            if (!reader.parse_bool(rec.requires_reboot)) return std::nullopt;
+        } else if (key == "backup_path") {
+            if (!reader.parse_string(rec.backup_path)) return std::nullopt;
+        } else if (key == "staged_package_path") {
+            if (!reader.parse_string(rec.staged_package_path)) return std::nullopt;
+        } else {
+            if (!reader.skip_value()) return std::nullopt;
+        }
+
+        reader.skip_whitespace();
+        if (reader.match_char(',')) {
+            reader.skip_whitespace();
+            if (reader.pos < reader.input.size() && reader.input[reader.pos] == '}') {
+                return std::nullopt; // Trailing comma
+            }
+        }
+    }
+
+    reader.skip_whitespace();
+    if (reader.pos != json_str.size()) return std::nullopt;
+
+    return rec;
+}
+
+UpdateStagingController::UpdateStagingController(UpdateStagingConfig config)
+    : config_(std::move(config)) {}
+
+UpdateStagingController::~UpdateStagingController() {
+    cleanup_hash_context();
+}
+
+UpdateStagingController::UpdateStagingController(UpdateStagingController&& other) noexcept
+    : config_(std::move(other.config_)),
+      record_(std::move(other.record_)),
+      hash_handle_(other.hash_handle_),
+      alg_handle_(other.alg_handle_),
+      hash_object_(std::move(other.hash_object_)),
+      is_streaming_(other.is_streaming_) {
+    other.hash_handle_ = nullptr;
+    other.alg_handle_ = nullptr;
+    other.is_streaming_ = false;
+}
+
+UpdateStagingController& UpdateStagingController::operator=(UpdateStagingController&& other) noexcept {
+    if (this != &other) {
+        cleanup_hash_context();
+        config_ = std::move(other.config_);
+        record_ = std::move(other.record_);
+        hash_handle_ = other.hash_handle_;
+        alg_handle_ = other.alg_handle_;
+        hash_object_ = std::move(other.hash_object_);
+        is_streaming_ = other.is_streaming_;
+        other.hash_handle_ = nullptr;
+        other.alg_handle_ = nullptr;
+        other.is_streaming_ = false;
+    }
+    return *this;
+}
+
+void UpdateStagingController::cleanup_hash_context() noexcept {
+    if (hash_handle_ != nullptr) {
+        BCryptDestroyHash(static_cast<BCRYPT_HASH_HANDLE>(hash_handle_));
+        hash_handle_ = nullptr;
+    }
+    if (alg_handle_ != nullptr) {
+        BCryptCloseAlgorithmProvider(static_cast<BCRYPT_ALG_HANDLE>(alg_handle_), 0);
+        alg_handle_ = nullptr;
+    }
+    hash_object_.clear();
+    is_streaming_ = false;
+}
+
+std::string UpdateStagingController::get_part_file_path() const {
+    std::filesystem::path p(config_.staging_directory);
+    return (p / "update_package.part").string();
+}
+
+std::string UpdateStagingController::get_final_package_path() const {
+    std::filesystem::path p(config_.staging_directory);
+    return (p / "update_package.pkg").string();
+}
+
+std::string UpdateStagingController::get_record_file_path() const {
+    std::filesystem::path p(config_.staging_directory);
+    return (p / "staging_record.json").string();
+}
+
+bool UpdateStagingController::save_record_to_disk() {
+    try {
+        if (!config_.staging_directory.empty()) {
+            std::filesystem::create_directories(config_.staging_directory);
+            const std::string record_file = get_record_file_path();
+            const std::string json = export_staging_record_json(record_);
+            std::ofstream ofs(record_file, std::ios::trunc | std::ios::binary);
+            if (ofs.is_open()) {
+                ofs.write(json.data(), static_cast<std::streamsize>(json.size()));
+                return ofs.good();
+            }
+        }
+    } catch (...) {}
+    return false;
+}
+
+UpdateStagingResult UpdateStagingController::init() {
+    UpdateStagingResult res;
+    try {
+        if (!config_.staging_directory.empty()) {
+            std::filesystem::create_directories(config_.staging_directory);
+        }
+
+        const std::string record_file = get_record_file_path();
+        if (std::filesystem::exists(record_file)) {
+            std::ifstream ifs(record_file, std::ios::binary);
+            if (ifs.is_open()) {
+                std::string content((std::istreambuf_iterator<char>(ifs)),
+                                    std::istreambuf_iterator<char>());
+                const auto loaded = import_staging_record_json(content);
+                if (loaded) {
+                    record_ = *loaded;
+                    // If an interrupted download was in progress, reset to failed/idle
+                    if (record_.current_state == UpdateState::downloading) {
+                        record_.current_state = UpdateState::failed;
+                        record_.last_error = "Download interrupted by system restart";
+                        std::filesystem::remove(get_part_file_path());
+                        save_record_to_disk();
+                    }
+                    res.error = UpdateStagingError::ok;
+                    return res;
+                }
+            }
+        }
+    } catch (const std::exception& e) {
+        res.error = UpdateStagingError::io_error;
+        res.message = e.what();
+        return res;
+    }
+
+    record_ = StagingRecord{};
+    record_.current_state = UpdateState::idle;
+    res.error = UpdateStagingError::ok;
+    return res;
+}
+
+void UpdateStagingController::set_deferred(std::string_view reason) {
+    record_.current_state = UpdateState::deferred;
+    record_.last_error = std::string(reason);
+    record_.state_timestamp_utc = current_time_seconds();
+    save_record_to_disk();
+}
+
+UpdateStagingResult UpdateStagingController::begin_staging(const UpdateManifest& manifest,
+                                                          const SemanticVersion& current_version,
+                                                          bool is_exam_active) {
+    UpdateStagingResult res;
+
+    if (is_exam_active) {
+        res.error = UpdateStagingError::exam_active_conflict;
+        res.message = "Cannot begin update staging while an assessment is active";
+        return res;
+    }
+
+    cleanup_hash_context();
+
+    try {
+        if (!config_.staging_directory.empty()) {
+            std::filesystem::create_directories(config_.staging_directory);
+        }
+
+        // Remove stale partial files
+        const std::string part_file = get_part_file_path();
+        if (std::filesystem::exists(part_file)) {
+            std::filesystem::remove(part_file);
+        }
+        const std::string final_pkg = get_final_package_path();
+        if (std::filesystem::exists(final_pkg)) {
+            std::filesystem::remove(final_pkg);
+        }
+
+        // Initialize BCrypt SHA-256 incremental hash
+        BCRYPT_ALG_HANDLE alg = nullptr;
+        if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0) {
+            res.error = UpdateStagingError::io_error;
+            res.message = "Failed to open BCrypt SHA-256 algorithm provider";
+            return res;
+        }
+        alg_handle_ = alg;
+
+        DWORD obj_len = 0;
+        DWORD copied = 0;
+        if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&obj_len),
+                              sizeof(obj_len), &copied, 0) != 0) {
+            cleanup_hash_context();
+            res.error = UpdateStagingError::io_error;
+            res.message = "Failed to get BCrypt object length";
+            return res;
+        }
+
+        hash_object_.resize(obj_len);
+        BCRYPT_HASH_HANDLE hash = nullptr;
+        if (BCryptCreateHash(alg, &hash, hash_object_.data(), obj_len, nullptr, 0, 0) != 0) {
+            cleanup_hash_context();
+            res.error = UpdateStagingError::io_error;
+            res.message = "Failed to create BCrypt hash handle";
+            return res;
+        }
+        hash_handle_ = hash;
+
+        // Reset state record
+        record_.active_version = current_version;
+        record_.target_version = manifest.version;
+        record_.target_sha256_hex = manifest.sha256_hex;
+        record_.expected_bytes = manifest.byte_length;
+        record_.staged_bytes = 0;
+        record_.requires_reboot = manifest.requires_reboot;
+        record_.staged_package_path = final_pkg;
+        record_.current_state = UpdateState::downloading;
+        record_.last_error.clear();
+        record_.state_timestamp_utc = current_time_seconds();
+
+        is_streaming_ = true;
+        save_record_to_disk();
+
+        res.error = UpdateStagingError::ok;
+        return res;
+    } catch (const std::exception& e) {
+        cleanup_hash_context();
+        res.error = UpdateStagingError::io_error;
+        res.message = e.what();
+        return res;
+    }
+}
+
+UpdateStagingResult UpdateStagingController::append_chunk(std::span<const std::byte> chunk) {
+    UpdateStagingResult res;
+
+    if (record_.current_state != UpdateState::downloading || !is_streaming_ || hash_handle_ == nullptr) {
+        res.error = UpdateStagingError::invalid_state;
+        res.message = "Controller is not actively streaming an update package";
+        return res;
+    }
+
+    if (chunk.size() > record_.expected_bytes - record_.staged_bytes) {
+        abort_staging("Byte overflow: chunk exceeds expected package length");
+        res.error = UpdateStagingError::byte_overflow;
+        res.message = "Appended chunk exceeds declared package byte length";
+        return res;
+    }
+
+    try {
+        const std::string part_file = get_part_file_path();
+        std::ofstream ofs(part_file, std::ios::binary | std::ios::app);
+        if (!ofs.is_open()) {
+            abort_staging("Failed to open staging .part file for writing");
+            res.error = UpdateStagingError::io_error;
+            res.message = "Cannot write to staging .part file";
+            return res;
+        }
+
+        ofs.write(reinterpret_cast<const char*>(chunk.data()),
+                  static_cast<std::streamsize>(chunk.size()));
+        if (!ofs.good()) {
+            abort_staging("I/O write failure on staging .part file");
+            res.error = UpdateStagingError::io_error;
+            res.message = "I/O failure while writing chunk";
+            return res;
+        }
+
+        auto* hash = static_cast<BCRYPT_HASH_HANDLE>(hash_handle_);
+        if (BCryptHashData(hash,
+                           const_cast<PUCHAR>(reinterpret_cast<const UCHAR*>(chunk.data())),
+                           static_cast<ULONG>(chunk.size()), 0) != 0) {
+            abort_staging("BCryptHashData failed on chunk");
+            res.error = UpdateStagingError::io_error;
+            res.message = "Cryptographic hash computation failed";
+            return res;
+        }
+
+        record_.staged_bytes += chunk.size();
+        res.error = UpdateStagingError::ok;
+        return res;
+    } catch (const std::exception& e) {
+        abort_staging(e.what());
+        res.error = UpdateStagingError::io_error;
+        res.message = e.what();
+        return res;
+    }
+}
+
+UpdateStagingResult UpdateStagingController::finalize_staging() {
+    UpdateStagingResult res;
+
+    if (record_.current_state != UpdateState::downloading || !is_streaming_ || hash_handle_ == nullptr) {
+        res.error = UpdateStagingError::invalid_state;
+        res.message = "Controller is not in downloading state";
+        return res;
+    }
+
+    if (record_.staged_bytes != record_.expected_bytes) {
+        abort_staging("Truncated payload: staged bytes do not match expected manifest byte length");
+        res.error = UpdateStagingError::truncated_payload;
+        res.message = "Staged byte length is less than declared manifest length";
+        return res;
+    }
+
+    auto* hash = static_cast<BCRYPT_HASH_HANDLE>(hash_handle_);
+    std::array<std::byte, 32> digest{};
+    if (BCryptFinishHash(hash, reinterpret_cast<PUCHAR>(digest.data()),
+                         static_cast<ULONG>(digest.size()), 0) != 0) {
+        abort_staging("BCryptFinishHash failed");
+        res.error = UpdateStagingError::io_error;
+        res.message = "Failed to finalize SHA-256 digest";
+        return res;
+    }
+
+    cleanup_hash_context();
+
+    std::ostringstream ss;
+    ss << std::hex << std::setfill('0');
+    for (const auto b : digest) {
+        ss << std::setw(2) << static_cast<unsigned int>(std::to_integer<unsigned char>(b));
+    }
+    const std::string computed_hex = ss.str();
+
+    auto to_lower = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    };
+
+    if (to_lower(computed_hex) != to_lower(record_.target_sha256_hex)) {
+        abort_staging("SHA-256 digest mismatch between downloaded payload and signed manifest");
+        res.error = UpdateStagingError::digest_mismatch;
+        res.message = "Payload digest does not match manifest specification";
+        return res;
+    }
+
+    try {
+        const std::string part_file = get_part_file_path();
+        const std::string final_pkg = get_final_package_path();
+
+        if (std::filesystem::exists(final_pkg)) {
+            std::filesystem::remove(final_pkg);
+        }
+        std::filesystem::rename(part_file, final_pkg);
+
+        record_.staged_package_path = final_pkg;
+        record_.current_state = record_.requires_reboot ? UpdateState::apply_pending_reboot
+                                                        : UpdateState::staged;
+        record_.last_error.clear();
+        record_.state_timestamp_utc = current_time_seconds();
+        save_record_to_disk();
+
+        res.error = UpdateStagingError::ok;
+        return res;
+    } catch (const std::exception& e) {
+        abort_staging(e.what());
+        res.error = UpdateStagingError::io_error;
+        res.message = e.what();
+        return res;
+    }
+}
+
+UpdateStagingResult UpdateStagingController::abort_staging(std::string_view reason) {
+    cleanup_hash_context();
+
+    try {
+        const std::string part_file = get_part_file_path();
+        if (std::filesystem::exists(part_file)) {
+            std::filesystem::remove(part_file);
+        }
+    } catch (...) {}
+
+    record_.current_state = UpdateState::failed;
+    record_.last_error = std::string(reason);
+    record_.state_timestamp_utc = current_time_seconds();
+    save_record_to_disk();
+
+    UpdateStagingResult res;
+    res.error = UpdateStagingError::ok;
+    return res;
+}
+
+UpdateStagingResult UpdateStagingController::apply_staged_update(std::string_view primary_binary_name) {
+    UpdateStagingResult res;
+
+    if (record_.current_state != UpdateState::staged &&
+        record_.current_state != UpdateState::apply_pending_reboot) {
+        res.error = UpdateStagingError::invalid_state;
+        res.message = "Cannot apply update: package is not in staged state";
+        return res;
+    }
+
+    try {
+        if (!std::filesystem::exists(record_.staged_package_path)) {
+            res.error = UpdateStagingError::io_error;
+            res.message = "Staged package does not exist on disk";
+            return res;
+        }
+
+        // Backup existing active installation
+        if (!config_.backup_directory.empty() && std::filesystem::exists(config_.backup_directory)) {
+            std::filesystem::remove_all(config_.backup_directory);
+        }
+
+        if (std::filesystem::exists(config_.active_directory)) {
+            std::filesystem::create_directories(std::filesystem::path(config_.backup_directory).parent_path());
+            std::filesystem::rename(config_.active_directory, config_.backup_directory);
+            record_.backup_path = config_.backup_directory;
+        }
+
+        // Promote staged package to active directory
+        std::filesystem::create_directories(config_.active_directory);
+        const std::filesystem::path target_binary = std::filesystem::path(config_.active_directory) / primary_binary_name;
+        std::filesystem::copy_file(record_.staged_package_path, target_binary,
+                                   std::filesystem::copy_options::overwrite_existing);
+
+        record_.current_state = UpdateState::validating;
+        record_.state_timestamp_utc = current_time_seconds();
+        save_record_to_disk();
+
+        res.error = UpdateStagingError::ok;
+        return res;
+    } catch (const std::exception& e) {
+        if (!record_.backup_path.empty() && std::filesystem::exists(record_.backup_path) &&
+            !std::filesystem::exists(config_.active_directory)) {
+            try {
+                std::filesystem::rename(record_.backup_path, config_.active_directory);
+                record_.backup_path.clear();
+            } catch (...) {}
+        }
+        res.error = UpdateStagingError::backup_failed;
+        res.message = e.what();
+        return res;
+    }
+}
+
+UpdateStagingResult UpdateStagingController::commit_update() {
+    UpdateStagingResult res;
+
+    if (record_.current_state != UpdateState::validating) {
+        res.error = UpdateStagingError::invalid_state;
+        res.message = "Cannot commit update: controller is not in validating state";
+        return res;
+    }
+
+    try {
+        if (!record_.backup_path.empty() && std::filesystem::exists(record_.backup_path)) {
+            std::filesystem::remove_all(record_.backup_path);
+        }
+        record_.backup_path.clear();
+
+        if (!record_.staged_package_path.empty() && std::filesystem::exists(record_.staged_package_path)) {
+            std::filesystem::remove(record_.staged_package_path);
+        }
+
+        record_.active_version = record_.target_version;
+        record_.current_state = UpdateState::committed;
+        record_.state_timestamp_utc = current_time_seconds();
+        save_record_to_disk();
+
+        res.error = UpdateStagingError::ok;
+        return res;
+    } catch (const std::exception& e) {
+        res.error = UpdateStagingError::io_error;
+        res.message = e.what();
+        return res;
+    }
+}
+
+UpdateStagingResult UpdateStagingController::rollback_update() {
+    UpdateStagingResult res;
+
+    if (record_.current_state != UpdateState::validating) {
+        res.error = UpdateStagingError::invalid_state;
+        res.message = "Cannot rollback update: controller is not in validating state";
+        return res;
+    }
+
+    try {
+        if (record_.backup_path.empty() || !std::filesystem::exists(record_.backup_path)) {
+            record_.current_state = UpdateState::failed;
+            record_.last_error = "Rollback failed: backup directory does not exist";
+            save_record_to_disk();
+            res.error = UpdateStagingError::rollback_failed;
+            res.message = "Backup directory not found";
+            return res;
+        }
+
+        if (std::filesystem::exists(config_.active_directory)) {
+            std::filesystem::remove_all(config_.active_directory);
+        }
+
+        std::filesystem::rename(record_.backup_path, config_.active_directory);
+        record_.backup_path.clear();
+        record_.current_state = UpdateState::rolling_back;
+        record_.last_error = "Update rolled back following validation failure";
+        record_.state_timestamp_utc = current_time_seconds();
+        save_record_to_disk();
+
+        res.error = UpdateStagingError::ok;
+        return res;
+    } catch (const std::exception& e) {
+        record_.current_state = UpdateState::failed;
+        record_.last_error = e.what();
+        save_record_to_disk();
+        res.error = UpdateStagingError::rollback_failed;
+        res.message = e.what();
+        return res;
+    }
+}
+
+} // namespace nstu::update
+

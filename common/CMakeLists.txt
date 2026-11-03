@@ -29,6 +29,7 @@ add_library(nstu_common STATIC
     src/secret_store.cpp
     src/support_bundle.cpp
     src/update_manifest.cpp
+    src/update_staging.cpp
     src/telemetry.cpp
     src/uwf_overlay_report.cpp
     src/video_transport.cpp

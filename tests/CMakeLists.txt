@@ -122,6 +122,12 @@ nstu_enable_warnings(nstu_update_manifest_tests)
 nstu_enable_test_assertions(nstu_update_manifest_tests)
 add_test(NAME nstu.update_manifest COMMAND nstu_update_manifest_tests)
 
+add_executable(nstu_update_staging_tests update_staging_tests.cpp)
+target_link_libraries(nstu_update_staging_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_update_staging_tests)
+nstu_enable_test_assertions(nstu_update_staging_tests)
+add_test(NAME nstu.update_staging COMMAND nstu_update_staging_tests)
+
 add_executable(nstu_rate_limiter_tests rate_limiter_tests.cpp)
 target_link_libraries(nstu_rate_limiter_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_rate_limiter_tests)
