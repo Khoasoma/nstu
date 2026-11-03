@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 66/66 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 67/67 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -109,6 +109,16 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Classroom Roster Bulk Actions** | `BulkActionKind::wake_on_lan = 7` in `execute_bulk_action` inverting online filters so offline clients are targeted and online clients are skipped; bilingual EN/VI confirmation modal titles, confirmation dialogs, and result status formatters | **Merged to main** (`bbd2df3`) |
 | **Hardware Detection & Client Service Dispatch** | `detect_local_hardware_wol()` querying Win32 `GetAdaptersAddresses` for operational physical network adapters, filtering loopback/tunnels, and validating non-zero 6-byte MACs; automated dispatch of `CommandType::wol_report = 62` upon connection in `nstu-service` | **Merged to main** (`b2986ed`) |
 | **Teacher Console UI & Diagnostics Badges** | Dear ImGui single-client MAC and color-coded status badges (`● Supported`, `▲ Unsupported`, `○ Missing MAC`, `○ Unknown`), single-client "Wake" button with bilingual disabled tooltips (online, exam, missing MAC, unsupported), workspace toolbar "Wake" bulk button, and confirmation modal with inverted offline semantics and role gating | **Merged to main** (`b2986ed`) |
+
+## Integrated File Distribution & Traversal Defenses (Roadmap P2.3 / Core)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Wire Protocol Commands & Codecs** | Protocol commands `file_dist_start = 63`, `file_dist_chunk = 64`, `file_dist_finish = 65`, `file_dist_status = 66`, and `file_dist_cancel = 67` with length-prefixed binary codecs, 64 MiB file size and 64 KiB chunk bounds | **Merged to main** (`b730b6e`) |
+| **Path Traversal & Device Name Defense** | `is_safe_filename` rejecting `/`, `\`, `:`, control characters, `..`, leading/trailing spaces/dots, NTFS ADS (`:$DATA`), and all 22 Windows DOS reserved device names (`CON`, `PRN`, `AUX`, `NUL`, `COM1-9`, `LPT1-9`) with arbitrary extensions | **Merged to main** (`b730b6e`) |
+| **Filename Sanitization & Staging Containment** | `sanitize_filename` normalizing unsafe characters and reserved stems to safe fallbacks; `compute_staging_path` verifying strict lexical containment inside base staging directory | **Merged to main** (`b730b6e`) |
+| **End-to-End Cryptographic Integrity** | 32-byte `Sha256Digest` verification using `nstu::security::sha256` and `constant_time_equal`, rejecting corrupted or mismatched chunks | **Merged to main** (`b730b6e`) |
+| **Passive Data Invariant** | Non-negotiable invariant strictly preserving received files as passive data with zero auto-execution | **Merged to main** (`b730b6e`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
