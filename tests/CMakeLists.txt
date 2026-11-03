@@ -104,6 +104,12 @@ nstu_enable_warnings(nstu_telemetry_tests)
 nstu_enable_test_assertions(nstu_telemetry_tests)
 add_test(NAME nstu.telemetry COMMAND nstu_telemetry_tests)
 
+add_executable(nstu_support_bundle_tests support_bundle_tests.cpp)
+target_link_libraries(nstu_support_bundle_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_support_bundle_tests)
+nstu_enable_test_assertions(nstu_support_bundle_tests)
+add_test(NAME nstu.support_bundle COMMAND nstu_support_bundle_tests)
+
 add_executable(nstu_rate_limiter_tests rate_limiter_tests.cpp)
 target_link_libraries(nstu_rate_limiter_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_rate_limiter_tests)
