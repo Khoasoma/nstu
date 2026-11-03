@@ -14,6 +14,7 @@
 #include "nstu/sealed_export.hpp"
 #include "nstu/classroom_roster.hpp"
 #include "nstu/operator_role.hpp"
+#include "nstu/url_validation.hpp"
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -448,6 +449,7 @@ struct DashboardState {
     std::unordered_set<std::uint64_t> checked_client_ids;
     bool bulk_confirmation_open = false;
     BulkActionKind pending_bulk_action = BulkActionKind::lock;
+    std::array<char, 2048> launch_url_input{"https://"};
     std::uint64_t selected_client_id = 0;
     int snapshot_interval_seconds = 7;
     // When set, every online computer is snapshotted continuously without the
@@ -2757,6 +2759,12 @@ void draw_selected_client(
         ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(3);
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Launch Web", "Mở trang web"))) {
+        state.checked_client_ids = {selected_client->id};
+        state.pending_bulk_action = BulkActionKind::launch_url;
+        state.bulk_confirmation_open = true;
+    }
     if (state.annotation_enabled) {
         ImGui::TextUnformatted(tr(state, "Overlay tools", "Công cụ lớp phủ"));
         ImGui::SameLine();
@@ -4242,6 +4250,11 @@ void draw_workspace_toolbar(
                 state.pending_bulk_action = BulkActionKind::acknowledge_help;
                 state.bulk_confirmation_open = true;
             }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(tr(state, "Launch Web", "Mở trang web"))) {
+                state.pending_bulk_action = BulkActionKind::launch_url;
+                state.bulk_confirmation_open = true;
+            }
         }
     }
 
@@ -4380,12 +4393,45 @@ void draw_bulk_action_confirmation_popup(
             tr(state, "offline computers will be skipped.", "máy ngoại tuyến sẽ được bỏ qua."));
     }
 
+    bool url_valid = true;
+    std::string url_validation_err;
+    if (state.pending_bulk_action == BulkActionKind::launch_url) {
+        ImGui::Spacing();
+        ImGui::TextUnformatted(tr(state, "Website / URL to open:", "Trang web / URL cần mở:"));
+        ImGui::SetNextItemWidth(scaled(340.0f));
+        ImGui::InputTextWithHint("##launch-url-input", "https://example.com",
+                                 state.launch_url_input.data(),
+                                 state.launch_url_input.size());
+
+        ImGui::TextDisabled("%s", tr(state, "Presets:", "Mẫu nhanh:"));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("LMS")) {
+            strcpy_s(state.launch_url_input.data(), state.launch_url_input.size(),
+                     "https://lms.nstu.edu.vn");
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Docs")) {
+            strcpy_s(state.launch_url_input.data(), state.launch_url_input.size(),
+                     "https://docs.nstu.edu.vn");
+        }
+
+        const std::string_view current_url{state.launch_url_input.data()};
+        url_valid = nstu::url::is_valid_launch_url(current_url, &url_validation_err);
+        if (!url_valid) {
+            ImGui::Spacing();
+            ImGui::TextColored(ImVec4{1.0f, 0.4f, 0.4f, 1.0f}, "%s: %s",
+                               tr(state, "Invalid URL", "URL không hợp lệ"),
+                               url_validation_err.c_str());
+        }
+    }
+
     ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
     const bool has_online_targets = (target_summary.eligible_online > 0);
-    if (!has_online_targets) {
+    const bool can_execute = has_online_targets && url_valid;
+    if (!can_execute) {
         ImGui::BeginDisabled();
     }
     if (ImGui::Button(tr(state, "Confirm & Execute", "Xác nhận thực hiện"),
@@ -4393,14 +4439,17 @@ void draw_bulk_action_confirmation_popup(
         const auto result = nstu::server::execute_bulk_action(
             control_plane, clients, state.checked_client_ids,
             state.pending_bulk_action,
-            static_cast<std::uint16_t>(state.snapshot_interval_seconds));
+            static_cast<std::uint16_t>(state.snapshot_interval_seconds),
+            state.pending_bulk_action == BulkActionKind::launch_url
+                ? std::string_view{state.launch_url_input.data()}
+                : std::string_view{});
         state.control_status =
             nstu::server::format_bulk_action_result_status(
                 state.pending_bulk_action, result, is_vietnamese);
         state.bulk_confirmation_open = false;
         ImGui::CloseCurrentPopup();
     }
-    if (!has_online_targets) {
+    if (!can_execute) {
         ImGui::EndDisabled();
     }
 

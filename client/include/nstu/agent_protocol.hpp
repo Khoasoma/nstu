@@ -83,6 +83,9 @@ enum class AgentMessageType : std::uint16_t {
     help_request = 38,
     // service -> agent: teacher acknowledged/resolved the help request.
     help_ack = 39,
+    // Launch validated website URL in interactive session.
+    // service -> agent: launch validated URL.
+    launch_url = 40,
 };
 
 struct AgentMessage {

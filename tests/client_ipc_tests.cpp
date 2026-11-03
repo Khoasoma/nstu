@@ -225,9 +225,9 @@ int main() {
         assert(!valid_wire.empty());
         assert(nstu::client::decode_agent_message(valid_wire).has_value());
 
-        // Type 38 (just above bound) must be rejected
+        // Type 41 (just above bound 40) must be rejected
         auto wire38 = valid_wire;
-        wire38[6] = std::byte{38};
+        wire38[6] = std::byte{41};
         wire38[7] = std::byte{0};
         assert(!nstu::client::decode_agent_message(wire38).has_value());
 
@@ -400,6 +400,42 @@ int main() {
         assert(decoded_ack.has_value());
         assert(decoded_ack->resolved == true);
         assert(decoded_ack->timestamp_unix_ms == ack.timestamp_unix_ms);
+    }
+
+    {
+        // Launch URL IPC encode/decode and queue test
+        using nstu::client::AgentMessage;
+        using nstu::client::AgentMessageType;
+        nstu::client::AgentServiceQueue queue(10);
+
+        nstu::control::LaunchUrlMessage launch{
+            .url = "https://lms.nstu.edu.vn/courses/cs101?view=syllabus",
+        };
+        const auto payload = nstu::control::encode_launch_url(launch);
+        assert(!payload.empty());
+
+        // Test encode_agent_message and decode_agent_message round-trip
+        const AgentMessage original_msg{
+            .type = AgentMessageType::launch_url,
+            .payload = payload,
+        };
+        const auto wire = nstu::client::encode_agent_message(original_msg);
+        assert(!wire.empty());
+
+        const auto decoded_wire = nstu::client::decode_agent_message(wire);
+        assert(decoded_wire.has_value());
+        assert(decoded_wire->type == AgentMessageType::launch_url);
+        assert(decoded_wire->payload == payload);
+
+        // Test queue delivery
+        queue.push(*decoded_wire);
+        auto pending = queue.take_pending();
+        assert(pending.size() == 1);
+        assert(pending[0].type == AgentMessageType::launch_url);
+
+        const auto decoded_launch = nstu::control::decode_launch_url(pending[0].payload);
+        assert(decoded_launch.has_value());
+        assert(decoded_launch->url == launch.url);
     }
 
     return 0;

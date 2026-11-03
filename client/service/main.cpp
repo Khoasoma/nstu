@@ -1873,6 +1873,15 @@ void handle_server_command(
                                  command.payload});
         }
         break;
+    case nstu::protocol::CommandType::launch_url:
+        if (g_exam_lockdown_controller.is_armed()) {
+            break;
+        }
+        if (nstu::control::decode_launch_url(command.payload).has_value()) {
+            queue_agent_message({nstu::client::AgentMessageType::launch_url,
+                                 command.payload});
+        }
+        break;
     case nstu::protocol::CommandType::exam_telemetry_enable: {
         std::string telemetry_error;
         const bool enabled = g_exam_telemetry_router.handle_server_enable(

@@ -6,6 +6,7 @@
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_host.hpp"
 #include "nstu/screen_snapshot.hpp"
+#include "nstu/url_validation.hpp"
 
 #include <windows.h>
 #include <shellapi.h>
@@ -737,6 +738,20 @@ void pipe_control_loop(HWND overlay) {
                            nstu::client::AgentMessageType::help_ack) {
                     SendMessageW(overlay, kAgentCommandMessage,
                                  static_cast<WPARAM>(message->type), 0);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::launch_url) {
+                    const auto launch = nstu::control::decode_launch_url(message->payload);
+                    if (launch.has_value()) {
+                        const std::span<const std::byte> url_bytes{
+                            reinterpret_cast<const std::byte*>(launch->url.data()),
+                            launch->url.size()};
+                        const std::wstring wide_url = utf8_to_wide(url_bytes);
+                        if (!wide_url.empty()) {
+                            SendMessageW(overlay, kAgentCommandMessage,
+                                         static_cast<WPARAM>(message->type),
+                                         reinterpret_cast<LPARAM>(wide_url.c_str()));
+                        }
+                    }
                 } else if (message->type ==
                            nstu::client::AgentMessageType::remote_start) {
                     // Arm remote control unconditionally. BlockInput(TRUE)
@@ -1962,6 +1977,27 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                 if (const HWND help_button = GetDlgItem(g_chat_window, kChatHelp)) {
                     SetWindowTextW(help_button, L"Raise Hand");
                     InvalidateRect(help_button, nullptr, TRUE);
+                }
+            }
+        } else if (type == nstu::client::AgentMessageType::launch_url && lparam != 0) {
+            if (exam_host_engaged()) {
+                g_exam_host.enforce_foreground();
+                return 0;
+            }
+            const auto* wide_url = reinterpret_cast<const wchar_t*>(lparam);
+            if (wide_url != nullptr && *wide_url != L'\0') {
+                const int utf8_length = WideCharToMultiByte(
+                    CP_UTF8, 0, wide_url, -1, nullptr, 0, nullptr, nullptr);
+                if (utf8_length > 1) {
+                    std::string utf8_url(static_cast<std::size_t>(utf8_length - 1), '\0');
+                    if (WideCharToMultiByte(CP_UTF8, 0, wide_url, -1, utf8_url.data(),
+                                            utf8_length, nullptr, nullptr) != 0) {
+                        if (nstu::url::is_valid_launch_url(utf8_url)) {
+                            ShellExecuteW(nullptr, L"open", wide_url, nullptr, nullptr, SW_SHOWNORMAL);
+                            const std::wstring chat_line = L"Opened website: " + std::wstring(wide_url);
+                            append_chat_line(chat_line.c_str());
+                        }
+                    }
                 }
             }
         } else if (type == nstu::client::AgentMessageType::chat && lparam != 0) {
