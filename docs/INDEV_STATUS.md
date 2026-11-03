@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 65/65 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 66/66 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -96,6 +96,17 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Classroom Roster Bulk Actions** | `BulkActionKind::reboot = 5` and `BulkActionKind::shutdown = 6` in `execute_bulk_action`, skipping offline clients, with bilingual EN/VI confirmation warnings ("Any unsaved work may be lost." / "Các thay đổi chưa lưu có thể bị mất.") and execution status formatting | **Merged to main** (`9750b37`) |
 | **Service Win32 Execution & Privilege Management** | `nstu-service` handling `power_action = 61`, dropping during armed exam lockdown, acquiring `SeShutdownPrivilege`, and calling `InitiateSystemShutdownExW` with graceful 5s / forced immediate parameters | **Merged to main** (`032daf5`) |
 | **Teacher Console UI & Role-Gated Modal** | Dear ImGui "Reboot" and "Shutdown" bulk toolbar buttons, single-client actions with active-exam tooltips, and modal confirmation enforcing P2.1 role gating with warning banner for Teacher role | **Merged to main** (`032daf5`) |
+
+## Integrated Wake-on-LAN & Honest Support Detection (Roadmap P2.3 / Core)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Network MAC & Magic Packet Abstraction** | `MacAddress` struct with case-insensitive colon/hyphen parsing and formatting; AMD 102-byte Magic Packet builder/verifier; UDP broadcast sender using `SO_BROADCAST`, `WinsockRuntime`, and RAII `SocketCloser` in `common/src/wake_on_lan.cpp` | **Merged to main** (`bbd2df3`) |
+| **Honest Support Detection & Codec** | `WolSupportState` (`unknown`, `supported`, `unsupported`, `missing_mac`) with bilingual EN/VI labels; protocol command `wol_report = 62` with 8-byte binary codec (`encode_wol_report` / `decode_wol_report`) validating MAC, enum bounds, and reserved padding | **Merged to main** (`bbd2df3`) |
+| **Operator Role Authorization** | Added `OperatorAction::wake_on_lan = 12` permitting Teacher (pre-class lab startup), Technician (maintenance), and Developer roles while disallowing unauthenticated callers | **Merged to main** (`bbd2df3`) |
+| **Registry State Retention** | `ClientRecord` MAC and `WolSupportState` storage with thread-safe `set_wol_report`; `ClientRegistry::upsert` invariant preserving existing hardware state across status refreshes and reconnects | **Merged to main** (`bbd2df3`) |
+| **Server Control Plane Execution** | `ServerControlPlane::wake_client` enforcing exam active containment, role permissions, online rejection ("Client is already online."), honest missing MAC check ("Cannot wake client: MAC address is unknown."), honest unsupported check ("Wake-on-LAN is not supported by client hardware."), and UDP magic packet broadcast with remote audit logging | **Merged to main** (`bbd2df3`) |
+| **Classroom Roster Bulk Actions** | `BulkActionKind::wake_on_lan = 7` in `execute_bulk_action` inverting online filters so offline clients are targeted and online clients are skipped; bilingual EN/VI confirmation modal titles, confirmation dialogs, and result status formatters | **Merged to main** (`bbd2df3`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
