@@ -369,5 +369,52 @@ std::string format_bulk_action_result_status(
     return stream.str();
 }
 
+bool is_client_stale(
+    const ClientRecord& client,
+    std::chrono::steady_clock::time_point now,
+    std::chrono::seconds threshold) noexcept {
+    if (client.status == ClientStatus::offline) {
+        return false;
+    }
+    if (client.last_seen == std::chrono::steady_clock::time_point{}) {
+        return true;
+    }
+    if (now < client.last_seen) {
+        return false;
+    }
+    return std::chrono::duration_cast<std::chrono::seconds>(now - client.last_seen) >= threshold;
+}
+
+std::chrono::seconds client_age_seconds(
+    const ClientRecord& client,
+    std::chrono::steady_clock::time_point now) noexcept {
+    if (client.last_seen == std::chrono::steady_clock::time_point{}) {
+        return std::chrono::seconds{-1};
+    }
+    if (now < client.last_seen) {
+        return std::chrono::seconds{0};
+    }
+    return std::chrono::duration_cast<std::chrono::seconds>(now - client.last_seen);
+}
+
+std::string format_relative_age(
+    std::chrono::seconds age,
+    bool is_vietnamese) {
+    if (age < std::chrono::seconds{0}) {
+        return is_vietnamese ? "Chưa nhận" : "Never";
+    }
+    const auto count = age.count();
+    if (count < 5) {
+        return is_vietnamese ? "Vừa xong" : "Just now";
+    }
+    if (count < 60) {
+        return std::to_string(count) + (is_vietnamese ? " giây" : "s ago");
+    }
+    if (count < 3600) {
+        return std::to_string(count / 60) + (is_vietnamese ? " phút" : "m ago");
+    }
+    return std::to_string(count / 3600) + (is_vietnamese ? " giờ" : "h ago");
+}
+
 } // namespace nstu::server
 

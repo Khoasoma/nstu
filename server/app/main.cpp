@@ -4830,15 +4830,19 @@ void draw_technician_fleet_health(
         ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp;
 
     std::uint64_t target_uwf_arm_client_id = 0;
+    const auto now = std::chrono::steady_clock::now();
+    const bool is_vietnamese = (state.language == Language::vietnamese);
 
-    if (ImGui::BeginTable("fleet-health-table", 7, table_flags, {0, ImGui::GetContentRegionAvail().y - scaled(10.0f)})) {
+    if (ImGui::BeginTable("fleet-health-table", 9, table_flags, {0, ImGui::GetContentRegionAvail().y - scaled(10.0f)})) {
         ImGui::TableSetupColumn(tr(state, "Computer", "Máy tính"), ImGuiTableColumnFlags_WidthStretch, 1.2f);
         ImGui::TableSetupColumn(tr(state, "Address", "Địa chỉ"), ImGuiTableColumnFlags_WidthFixed, scaled(110.0f));
-        ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"), ImGuiTableColumnFlags_WidthFixed, scaled(95.0f));
-        ImGui::TableSetupColumn(tr(state, "Latency", "Độ trễ"), ImGuiTableColumnFlags_WidthFixed, scaled(75.0f));
-        ImGui::TableSetupColumn(tr(state, "Loss", "Mất gói"), ImGuiTableColumnFlags_WidthFixed, scaled(65.0f));
-        ImGui::TableSetupColumn(tr(state, "Reboot-to-Restore", "Khôi phục reboot"), ImGuiTableColumnFlags_WidthStretch, 1.6f);
-        ImGui::TableSetupColumn(tr(state, "Action", "Thao tác"), ImGuiTableColumnFlags_WidthFixed, scaled(100.0f));
+        ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"), ImGuiTableColumnFlags_WidthFixed, scaled(85.0f));
+        ImGui::TableSetupColumn(tr(state, "Last Seen", "Lần cuối"), ImGuiTableColumnFlags_WidthFixed, scaled(110.0f));
+        ImGui::TableSetupColumn(tr(state, "Latency", "Độ trễ"), ImGuiTableColumnFlags_WidthFixed, scaled(65.0f));
+        ImGui::TableSetupColumn(tr(state, "Loss", "Mất gói"), ImGuiTableColumnFlags_WidthFixed, scaled(60.0f));
+        ImGui::TableSetupColumn(tr(state, "Activity", "Hoạt động"), ImGuiTableColumnFlags_WidthFixed, scaled(125.0f));
+        ImGui::TableSetupColumn(tr(state, "Reboot-to-Restore", "Khôi phục reboot"), ImGuiTableColumnFlags_WidthStretch, 1.5f);
+        ImGui::TableSetupColumn(tr(state, "Action", "Thao tác"), ImGuiTableColumnFlags_WidthFixed, scaled(90.0f));
         ImGui::TableHeadersRow();
 
         for (const auto& client : clients) {
@@ -4852,6 +4856,35 @@ void draw_technician_fleet_health(
             // Address
             ImGui::TableSetColumnIndex(1);
             ImGui::TextDisabled("%s", client.address.c_str());
+            if (ImGui::IsItemHovered()) {
+                const char* delivery_str = (client.delivery == nstu::net::VideoDeliveryMode::multicast)
+                    ? "Multicast" : "Unicast";
+                const char* mac_str = client.mac_address.empty()
+                    ? tr(state, "Unknown", "Chưa rõ")
+                    : client.mac_address.c_str();
+                const char* wol_str = "";
+                switch (client.wol_support) {
+                case nstu::net::WolSupportState::supported:
+                    wol_str = tr(state, "Supported", "Được hỗ trợ");
+                    break;
+                case nstu::net::WolSupportState::unsupported:
+                    wol_str = tr(state, "Unsupported", "Không hỗ trợ");
+                    break;
+                case nstu::net::WolSupportState::missing_mac:
+                    wol_str = tr(state, "Missing MAC", "Thiếu MAC");
+                    break;
+                case nstu::net::WolSupportState::unknown:
+                default:
+                    wol_str = tr(state, "Unknown", "Chưa rõ");
+                    break;
+                }
+                ImGui::SetTooltip(
+                    "%s: %s\nMAC: %s\nWoL: %s",
+                    tr(state, "Delivery", "Phương thức truyền"),
+                    delivery_str,
+                    mac_str,
+                    wol_str);
+            }
 
             // Status
             ImGui::TableSetColumnIndex(2);
@@ -4860,8 +4893,29 @@ void draw_technician_fleet_health(
                 is_online ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f} : ImVec4{0.70f, 0.70f, 0.70f, 1.0f},
                 "%s", nstu::server::to_string(client.status));
 
-            // Latency
+            // Last Seen / Freshness
             ImGui::TableSetColumnIndex(3);
+            const auto age = nstu::server::client_age_seconds(client, now);
+            const std::string age_str = nstu::server::format_relative_age(age, is_vietnamese);
+            const bool is_stale = nstu::server::is_client_stale(client, now);
+            if (!is_online) {
+                ImGui::TextDisabled("%s", age_str.c_str());
+            } else if (is_stale) {
+                ImGui::TextColored(ImVec4{0.96f, 0.76f, 0.34f, 1.0f}, "%s", age_str.c_str());
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4{0.96f, 0.50f, 0.20f, 1.0f}, "[%s]",
+                                   tr(state, "Stale", "Cũ"));
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", tr(state,
+                        "Telemetry data may be stale (>30s since last heartbeat).",
+                        "Dữ liệu có thể đã cũ (>30 giây không nhận tín hiệu)."));
+                }
+            } else {
+                ImGui::TextUnformatted(age_str.c_str());
+            }
+
+            // Latency
+            ImGui::TableSetColumnIndex(4);
             if (is_online) {
                 ImGui::Text("%u ms", client.latency_ms);
             } else {
@@ -4869,15 +4923,43 @@ void draw_technician_fleet_health(
             }
 
             // Packet loss
-            ImGui::TableSetColumnIndex(4);
+            ImGui::TableSetColumnIndex(5);
             if (is_online) {
                 ImGui::Text("%.1f%%", client.packet_loss_per_mille / 10.0f);
             } else {
                 ImGui::TextDisabled("-");
             }
 
+            // Activity
+            ImGui::TableSetColumnIndex(6);
+            if (!is_online) {
+                ImGui::TextDisabled("-");
+            } else if (client.streaming) {
+                if (client.frames_per_second > 0) {
+                    ImGui::TextColored(ImVec4{0.40f, 0.85f, 0.53f, 1.0f}, "%s (~%u fps)",
+                        tr(state, "Streaming", "Phát luồng"), client.frames_per_second);
+                } else {
+                    ImGui::TextColored(ImVec4{0.40f, 0.85f, 0.53f, 1.0f}, "%s (~15fps)",
+                        tr(state, "Streaming", "Phát luồng"));
+                }
+            } else if (client.snapshotting) {
+                if (client.snapshot_interval_seconds > 0) {
+                    char cap_buf[48]{};
+                    sprintf_s(cap_buf, tr(state, "Capturing (%u s)", "Chụp hình (%u s)"),
+                              client.snapshot_interval_seconds);
+                    ImGui::TextUnformatted(cap_buf);
+                } else {
+                    ImGui::TextUnformatted(tr(state, "Capturing", "Chụp hình"));
+                }
+            } else if (client.viewing_broadcast) {
+                ImGui::TextColored(ImVec4{0.35f, 0.75f, 1.0f, 1.0f}, "%s",
+                    tr(state, "Viewing Screen", "Xem màn hình"));
+            } else {
+                ImGui::TextDisabled("%s", tr(state, "Idle", "Chờ"));
+            }
+
             // Reboot-to-restore (UWF) phase
-            ImGui::TableSetColumnIndex(5);
+            ImGui::TableSetColumnIndex(7);
             const bool proven = client.uwf.proves_current_protection();
             const ImVec4 badge_color = proven
                 ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
@@ -4892,7 +4974,7 @@ void draw_technician_fleet_health(
             }
 
             // Maintenance Action
-            ImGui::TableSetColumnIndex(6);
+            ImGui::TableSetColumnIndex(8);
             const bool uwf_unsupported =
                 client.uwf.reported && client.uwf.phase == nstu::control::UwfFleetPhase::unsupported;
             const bool can_enable = can_configure_uwf && !proven && !uwf_unsupported && is_online;

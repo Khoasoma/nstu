@@ -4,6 +4,7 @@
 #include "nstu/operator_role.hpp"
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -121,6 +122,19 @@ void toggle_selected(
     BulkActionKind action,
     const BulkActionResult& result,
     bool vietnamese);
+
+[[nodiscard]] bool is_client_stale(
+    const ClientRecord& client,
+    std::chrono::steady_clock::time_point now,
+    std::chrono::seconds threshold = std::chrono::seconds{30}) noexcept;
+
+[[nodiscard]] std::chrono::seconds client_age_seconds(
+    const ClientRecord& client,
+    std::chrono::steady_clock::time_point now) noexcept;
+
+[[nodiscard]] std::string format_relative_age(
+    std::chrono::seconds age,
+    bool is_vietnamese = false);
 
 } // namespace nstu::server
 

@@ -458,6 +458,128 @@ void test_bulk_action_distribute_file_formatters_and_execution() {
     }
 }
 
+void test_stale_data_detection() {
+    using namespace std::chrono_literals;
+    const auto now = std::chrono::steady_clock::now();
+
+    // 1. Fresh online client (< 5s)
+    {
+        nstu::server::ClientRecord client;
+        client.id = 1;
+        client.hostname = "PC-FRESH";
+        client.status = nstu::server::ClientStatus::online;
+        client.last_seen = now - 2s;
+
+        assert(!nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now).count() == 2);
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "Just now");
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), true) == "Vừa xong");
+    }
+
+    // 2. Online client reporting 10s ago
+    {
+        nstu::server::ClientRecord client;
+        client.id = 2;
+        client.hostname = "PC-10S";
+        client.status = nstu::server::ClientStatus::online;
+        client.last_seen = now - 10s;
+
+        assert(!nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now).count() == 10);
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "10s ago");
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), true) == "10 giây");
+    }
+
+    // 3. Stale online client (exact 30s threshold)
+    {
+        nstu::server::ClientRecord client;
+        client.id = 3;
+        client.hostname = "PC-STALE-30";
+        client.status = nstu::server::ClientStatus::online;
+        client.last_seen = now - 30s;
+
+        assert(nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now).count() == 30);
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "30s ago");
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), true) == "30 giây");
+    }
+
+    // 4. Stale online client (45s)
+    {
+        nstu::server::ClientRecord client;
+        client.id = 4;
+        client.hostname = "PC-STALE-45";
+        client.status = nstu::server::ClientStatus::locked;
+        client.last_seen = now - 45s;
+
+        assert(nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now).count() == 45);
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "45s ago");
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), true) == "45 giây");
+    }
+
+    // 5. Minute and hour formatting
+    {
+        assert(nstu::server::format_relative_age(120s, false) == "2m ago");
+        assert(nstu::server::format_relative_age(120s, true) == "2 phút");
+        assert(nstu::server::format_relative_age(7200s, false) == "2h ago");
+        assert(nstu::server::format_relative_age(7200s, true) == "2 giờ");
+    }
+
+    // 6. Offline client (not flagged as stale, but has age)
+    {
+        nstu::server::ClientRecord client;
+        client.id = 5;
+        client.hostname = "PC-OFFLINE";
+        client.status = nstu::server::ClientStatus::offline;
+        client.last_seen = now - 120s;
+
+        assert(!nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now).count() == 120);
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "2m ago");
+    }
+
+    // 7. Uninitialized last_seen
+    {
+        nstu::server::ClientRecord client;
+        client.id = 6;
+        client.hostname = "PC-NEVER";
+        client.status = nstu::server::ClientStatus::online;
+        client.last_seen = std::chrono::steady_clock::time_point{};
+
+        assert(nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now) == std::chrono::seconds{-1});
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "Never");
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), true) == "Chưa nhận");
+    }
+
+    // 8. Negative delta / monotonic skew (now < last_seen)
+    {
+        nstu::server::ClientRecord client;
+        client.id = 7;
+        client.hostname = "PC-FUTURE";
+        client.status = nstu::server::ClientStatus::online;
+        client.last_seen = now + 10s;
+
+        assert(!nstu::server::is_client_stale(client, now));
+        assert(nstu::server::client_age_seconds(client, now) == std::chrono::seconds{0});
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), false) == "Just now");
+        assert(nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now), true) == "Vừa xong");
+    }
+
+    // 9. Custom threshold
+    {
+        nstu::server::ClientRecord client;
+        client.id = 8;
+        client.hostname = "PC-CUSTOM";
+        client.status = nstu::server::ClientStatus::online;
+        client.last_seen = now - 15s;
+
+        assert(!nstu::server::is_client_stale(client, now, 30s));
+        assert(nstu::server::is_client_stale(client, now, 10s));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -470,6 +592,7 @@ int main() {
     test_scalability_and_responsiveness_benchmarks();
     test_help_request_roster_and_codecs();
     test_bulk_action_distribute_file_formatters_and_execution();
+    test_stale_data_detection();
     std::cout << "All classroom roster tests passed successfully.\n";
     return 0;
 }
