@@ -24,6 +24,7 @@ add_library(nstu_common STATIC
     src/pairing.cpp
     src/protocol.cpp
     src/rate_limiter.cpp
+    src/room_profile.cpp
     src/screen_snapshot.cpp
     src/secret_store.cpp
     src/support_bundle.cpp
