@@ -97,7 +97,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Service Win32 Execution & Privilege Management** | `nstu-service` handling `power_action = 61`, dropping during armed exam lockdown, acquiring `SeShutdownPrivilege`, and calling `InitiateSystemShutdownExW` with graceful 5s / forced immediate parameters | **Merged to main** (`032daf5`) |
 | **Teacher Console UI & Role-Gated Modal** | Dear ImGui "Reboot" and "Shutdown" bulk toolbar buttons, single-client actions with active-exam tooltips, and modal confirmation enforcing P2.1 role gating with warning banner for Teacher role | **Merged to main** (`032daf5`) |
 
-## Integrated Wake-on-LAN & Honest Support Detection (Roadmap P2.3 / Core)
+## Integrated Wake-on-LAN & Honest Support Detection (Roadmap P2.3 / Core & UI)
 
 | Work Area | Scope & Implementation | Status |
 |---|---|---|
@@ -107,6 +107,8 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Registry State Retention** | `ClientRecord` MAC and `WolSupportState` storage with thread-safe `set_wol_report`; `ClientRegistry::upsert` invariant preserving existing hardware state across status refreshes and reconnects | **Merged to main** (`bbd2df3`) |
 | **Server Control Plane Execution** | `ServerControlPlane::wake_client` enforcing exam active containment, role permissions, online rejection ("Client is already online."), honest missing MAC check ("Cannot wake client: MAC address is unknown."), honest unsupported check ("Wake-on-LAN is not supported by client hardware."), and UDP magic packet broadcast with remote audit logging | **Merged to main** (`bbd2df3`) |
 | **Classroom Roster Bulk Actions** | `BulkActionKind::wake_on_lan = 7` in `execute_bulk_action` inverting online filters so offline clients are targeted and online clients are skipped; bilingual EN/VI confirmation modal titles, confirmation dialogs, and result status formatters | **Merged to main** (`bbd2df3`) |
+| **Hardware Detection & Client Service Dispatch** | `detect_local_hardware_wol()` querying Win32 `GetAdaptersAddresses` for operational physical network adapters, filtering loopback/tunnels, and validating non-zero 6-byte MACs; automated dispatch of `CommandType::wol_report = 62` upon connection in `nstu-service` | **Merged to main** (`b2986ed`) |
+| **Teacher Console UI & Diagnostics Badges** | Dear ImGui single-client MAC and color-coded status badges (`● Supported`, `▲ Unsupported`, `○ Missing MAC`, `○ Unknown`), single-client "Wake" button with bilingual disabled tooltips (online, exam, missing MAC, unsupported), workspace toolbar "Wake" bulk button, and confirmation modal with inverted offline semantics and role gating | **Merged to main** (`b2986ed`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
