@@ -12,6 +12,7 @@ add_library(nstu_common STATIC
     src/answer_journal.cpp
     src/audit.cpp
     src/enrollment.cpp
+    src/file_distribution.cpp
     src/frame_reassembler.cpp
     src/iocp_dispatcher.cpp
     src/key_store.cpp

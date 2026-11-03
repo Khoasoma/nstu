@@ -243,6 +243,12 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_wake_on_lan_tests)
     add_test(NAME nstu.wake_on_lan COMMAND nstu_wake_on_lan_tests)
 
+    add_executable(nstu_file_distribution_tests file_distribution_tests.cpp)
+    target_link_libraries(nstu_file_distribution_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_file_distribution_tests)
+    nstu_enable_test_assertions(nstu_file_distribution_tests)
+    add_test(NAME nstu.file_distribution COMMAND nstu_file_distribution_tests)
+
     add_executable(nstu_exam_telemetry_journal_tests exam_telemetry_journal_tests.cpp)
     target_link_libraries(nstu_exam_telemetry_journal_tests PRIVATE nstu_server_state)
     nstu_enable_warnings(nstu_exam_telemetry_journal_tests)

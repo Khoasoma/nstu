@@ -128,6 +128,17 @@ enum class CommandType : std::uint16_t {
     // Wake-on-LAN hardware & MAC report.
     // client -> server: carries network adapter MAC address and WOL hardware capability.
     wol_report = 62,
+    // Teacher-to-client File Distribution.
+    // server -> client: transfer metadata (session_id, file_size, sha256, filename).
+    file_dist_start = 63,
+    // server -> client: binary payload chunk (session_id, offset, data).
+    file_dist_chunk = 64,
+    // server -> client: transfer completed signal (session_id).
+    file_dist_finish = 65,
+    // client -> server: progress report / status receipt (session_id, bytes_received, status).
+    file_dist_status = 66,
+    // bidirectional: transfer cancellation (session_id, reason_code).
+    file_dist_cancel = 67,
 };
 
 enum class ConnectionRole : std::uint8_t {
