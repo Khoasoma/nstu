@@ -125,6 +125,9 @@ enum class CommandType : std::uint16_t {
     // Power actions (reboot, shutdown).
     // server -> client: carries action kind and flags (graceful vs force).
     power_action = 61,
+    // Wake-on-LAN hardware & MAC report.
+    // client -> server: carries network adapter MAC address and WOL hardware capability.
+    wol_report = 62,
 };
 
 enum class ConnectionRole : std::uint8_t {

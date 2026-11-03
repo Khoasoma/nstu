@@ -179,8 +179,14 @@ BulkActionResult execute_bulk_action(
         if (selected_ids.find(client.id) == selected_ids.end()) {
             continue;
         }
-        if (client.status == ClientStatus::offline) {
-            continue;
+        if (action == BulkActionKind::wake_on_lan) {
+            if (client.status != ClientStatus::offline) {
+                continue;
+            }
+        } else {
+            if (client.status == ClientStatus::offline) {
+                continue;
+            }
         }
         ++result.attempted;
         std::string error;
@@ -206,6 +212,9 @@ BulkActionResult execute_bulk_action(
             break;
         case BulkActionKind::shutdown:
             ok = control_plane.power_action(client.id, control::PowerActionKind::shutdown, false, caller_role, &error);
+            break;
+        case BulkActionKind::wake_on_lan:
+            ok = control_plane.wake_client(client.id, caller_role, &error);
             break;
         }
         if (ok) {
@@ -237,6 +246,8 @@ std::string format_bulk_confirmation_title(BulkActionKind action, bool vietnames
         return vietnamese ? "Xác nhận khởi động lại hàng loạt" : "Confirm Bulk Reboot";
     case BulkActionKind::shutdown:
         return vietnamese ? "Xác nhận tắt máy hàng loạt" : "Confirm Bulk Shutdown";
+    case BulkActionKind::wake_on_lan:
+        return vietnamese ? "Xác nhận bật máy qua mạng (Wake-on-LAN)" : "Confirm Bulk Wake-on-LAN";
     }
     return "Confirm Bulk Action";
 }
@@ -271,6 +282,9 @@ std::string format_bulk_confirmation_message(
         case BulkActionKind::shutdown:
             stream << "Bạn có chắc chắn muốn TẮT " << target_count << " máy tính đang chọn trong phòng '" << room_label << "' không? Các thay đổi chưa lưu có thể bị mất.";
             break;
+        case BulkActionKind::wake_on_lan:
+            stream << "Bạn có chắc chắn muốn BẬT " << target_count << " máy tính ngoại tuyến đang chọn trong phòng '" << room_label << "' qua mạng (Wake-on-LAN) không?";
+            break;
         }
     } else {
         switch (action) {
@@ -295,6 +309,9 @@ std::string format_bulk_confirmation_message(
         case BulkActionKind::shutdown:
             stream << "Are you sure you want to SHUT DOWN " << target_count << " selected computer(s) in room '" << room_label << "'? Any unsaved work may be lost.";
             break;
+        case BulkActionKind::wake_on_lan:
+            stream << "Are you sure you want to WAKE " << target_count << " selected offline computer(s) in room '" << room_label << "' via Wake-on-LAN?";
+            break;
         }
     }
     return stream.str();
@@ -315,6 +332,7 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::launch_url: action_str = "mở trang web"; break;
         case BulkActionKind::reboot: action_str = "khởi động lại"; break;
         case BulkActionKind::shutdown: action_str = "tắt máy"; break;
+        case BulkActionKind::wake_on_lan: action_str = "bật máy qua mạng (Wake-on-LAN)"; break;
         }
         stream << "Hoàn tất " << action_str << " hàng loạt: "
                << result.succeeded << " thành công, "
@@ -329,6 +347,7 @@ std::string format_bulk_action_result_status(
         case BulkActionKind::launch_url: action_str = "open website"; break;
         case BulkActionKind::reboot: action_str = "reboot"; break;
         case BulkActionKind::shutdown: action_str = "shutdown"; break;
+        case BulkActionKind::wake_on_lan: action_str = "Wake-on-LAN"; break;
         }
         stream << "Bulk " << action_str << " completed: "
                << result.succeeded << " succeeded, "

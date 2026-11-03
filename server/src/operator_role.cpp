@@ -12,6 +12,7 @@ bool is_action_permitted(OperatorRole role, OperatorAction action) noexcept {
         case OperatorAction::chat:
         case OperatorAction::manage_exam:
         case OperatorAction::manage_settings:
+        case OperatorAction::wake_on_lan:
             return true;
         case OperatorAction::configure_uwf:
         case OperatorAction::reboot_client:
@@ -35,6 +36,7 @@ bool is_action_permitted(OperatorRole role, OperatorAction action) noexcept {
         case OperatorAction::shutdown_client:
         case OperatorAction::view_fleet_health:
         case OperatorAction::manage_settings:
+        case OperatorAction::wake_on_lan:
             return true;
         case OperatorAction::view_diagnostics_raw:
         case OperatorAction::export_telemetry_report:

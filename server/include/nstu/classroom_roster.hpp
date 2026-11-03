@@ -36,6 +36,7 @@ enum class BulkActionKind : int {
     launch_url = 4,
     reboot = 5,
     shutdown = 6,
+    wake_on_lan = 7,
 };
 
 struct RoomCounts {

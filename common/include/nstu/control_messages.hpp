@@ -3,6 +3,7 @@
 #include "nstu/auth.hpp"
 #include "nstu/network.hpp"
 #include "nstu/url_validation.hpp"
+#include "nstu/wake_on_lan.hpp"
 
 #include <array>
 #include <cstddef>
@@ -270,6 +271,16 @@ struct PowerActionMessage {
 [[nodiscard]] std::vector<std::byte> encode_power_action(
     const PowerActionMessage& message);
 [[nodiscard]] std::optional<PowerActionMessage> decode_power_action(
+    std::span<const std::byte> payload);
+
+struct WolReportMessage {
+    net::MacAddress mac{};
+    net::WolSupportState support = net::WolSupportState::unknown;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_wol_report(
+    const WolReportMessage& message);
+[[nodiscard]] std::optional<WolReportMessage> decode_wol_report(
     std::span<const std::byte> payload);
 
 } // namespace nstu::control

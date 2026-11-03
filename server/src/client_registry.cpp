@@ -60,6 +60,12 @@ void ClientRegistry::upsert(ClientRecord record) {
         record.help_requested = existing->second.help_requested;
         record.help_message = existing->second.help_message;
         record.help_requested_at_unix_ms = existing->second.help_requested_at_unix_ms;
+        if (record.mac_address.empty()) {
+            record.mac_address = existing->second.mac_address;
+        }
+        if (record.wol_support == net::WolSupportState::unknown) {
+            record.wol_support = existing->second.wol_support;
+        }
     }
     if (existing != clients_.end() &&
         (!record.snapshot_jpeg || record.snapshot_jpeg->empty())) {
@@ -105,6 +111,22 @@ bool ClientRegistry::set_help_request(
     found->second.help_requested = active;
     found->second.help_message = active ? std::move(message) : std::string{};
     found->second.help_requested_at_unix_ms = active ? timestamp_unix_ms : 0;
+    found->second.last_seen = std::chrono::steady_clock::now();
+    return true;
+}
+
+bool ClientRegistry::set_wol_report(
+    std::uint64_t id, const net::MacAddress& mac,
+    net::WolSupportState support) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end()) {
+        return false;
+    }
+    if (!mac.is_zero()) {
+        found->second.mac_address = net::format_mac_address(mac);
+    }
+    found->second.wol_support = support;
     found->second.last_seen = std::chrono::steady_clock::now();
     return true;
 }

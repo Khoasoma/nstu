@@ -102,6 +102,8 @@ struct ClientRecord {
     bool help_requested = false;
     std::string help_message{};
     std::uint64_t help_requested_at_unix_ms = 0;
+    std::string mac_address{};
+    net::WolSupportState wol_support = net::WolSupportState::unknown;
 };
 
 class ClientRegistry {
@@ -113,6 +115,9 @@ public:
     bool set_help_request(
         std::uint64_t id, bool active, std::string message,
         std::uint64_t timestamp_unix_ms);
+    [[nodiscard]] bool set_wol_report(
+        std::uint64_t id, const net::MacAddress& mac,
+        net::WolSupportState support);
     // Single-client reboot-to-restore report.  Describes an attempt, never a
     // proof: this call has no path to the verified phase.
     [[nodiscard]] bool set_uwf_report(

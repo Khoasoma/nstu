@@ -29,6 +29,7 @@ add_library(nstu_common STATIC
     src/uwf_overlay_report.cpp
     src/video_transport.cpp
     src/url_validation.cpp
+    src/wake_on_lan.cpp
     src/wfp_allowlist.cpp
 )
 

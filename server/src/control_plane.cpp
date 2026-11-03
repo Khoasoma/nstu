@@ -13,6 +13,7 @@
 #include "nstu/keyring.hpp"
 #include "nstu/pairing.hpp"
 #include "nstu/url_validation.hpp"
+#include "nstu/wake_on_lan.hpp"
 
 #include <windows.h>
 
@@ -151,6 +152,7 @@ struct RegistryMutationRendezvous {
         case protocol::CommandType::uwf_fleet_status:
         case protocol::CommandType::freeze_report:
         case protocol::CommandType::help_request:
+        case protocol::CommandType::wol_report:
         case protocol::CommandType::status_report:
         case protocol::CommandType::hello:
         case protocol::CommandType::snapshot_frame:
@@ -2271,6 +2273,20 @@ private:
             }
             return true;
         }
+        if (command->envelope.type ==
+            protocol::CommandType::wol_report) {
+            const auto wol =
+                control::decode_wol_report(command->payload);
+            if (!wol || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_wol_report(
+                            id, wol->mac, wol->support);
+                    })) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
         if (command->envelope.type == protocol::CommandType::status_report ||
             command->envelope.type == protocol::CommandType::hello) {
             const auto report = control::decode_status_report(command->payload);
@@ -2794,6 +2810,86 @@ bool ServerControlPlane::power_action(std::uint64_t client_id,
                                 sent ? (force ? "force" : "graceful")
                                      : (error != nullptr ? *error : "unknown error"));
     return sent;
+}
+
+bool ServerControlPlane::wake_client(std::uint64_t client_id,
+                                     OperatorRole caller_role,
+                                     std::string* error) {
+    if (exam_active(client_id)) {
+        if (error != nullptr) {
+            *error = "Cannot execute Wake-on-LAN: exam active on client.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "denied",
+                                    "exam active on client");
+        return false;
+    }
+
+    if (!is_action_permitted(caller_role, OperatorAction::wake_on_lan)) {
+        if (error != nullptr) {
+            *error = "Caller role is not authorized for Wake-on-LAN.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "denied",
+                                    "unauthorized role");
+        return false;
+    }
+
+    const auto clients = impl_->registry_.snapshot();
+    const auto it = std::find_if(clients.begin(), clients.end(),
+                                 [client_id](const ClientRecord& r) {
+                                     return r.id == client_id;
+                                 });
+    if (it == clients.end()) {
+        if (error != nullptr) {
+            *error = "Client not found in registry.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "failed",
+                                    "client not found");
+        return false;
+    }
+
+    if (it->status == ClientStatus::online || it->status == ClientStatus::locked) {
+        if (error != nullptr) {
+            *error = "Client is already online.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "ignored",
+                                    "client is already online");
+        return false;
+    }
+
+    if (it->wol_support == net::WolSupportState::unsupported) {
+        if (error != nullptr) {
+            *error = "Wake-on-LAN is not supported by client hardware.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "denied",
+                                    "hardware unsupported");
+        return false;
+    }
+
+    if (it->mac_address.empty()) {
+        if (error != nullptr) {
+            *error = "Cannot wake client: MAC address is unknown.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "failed",
+                                    "missing MAC address");
+        return false;
+    }
+
+    const auto mac = net::parse_mac_address(it->mac_address);
+    if (!mac) {
+        if (error != nullptr) {
+            *error = "Invalid client MAC address recorded in registry.";
+        }
+        record_remote_session_audit(client_id, "wake_on_lan", "failed",
+                                    "invalid MAC address");
+        return false;
+    }
+
+    const bool dispatched = net::send_wake_on_lan_packet(*mac, {}, error);
+    record_remote_session_audit(client_id, "wake_on_lan",
+                                dispatched ? "dispatched" : "failed",
+                                dispatched ? it->mac_address
+                                           : (error != nullptr ? *error : "broadcast failed"));
+    return dispatched;
 }
 
 bool ServerControlPlane::configure_uwf(

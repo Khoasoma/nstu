@@ -121,6 +121,10 @@ public:
         bool force = false,
         OperatorRole caller_role = OperatorRole::technician,
         std::string* error = nullptr);
+    [[nodiscard]] bool wake_client(
+        std::uint64_t client_id,
+        OperatorRole caller_role = OperatorRole::technician,
+        std::string* error = nullptr);
     [[nodiscard]] bool configure_uwf(
         std::uint64_t client_id, bool checkpoint_acknowledged,
         std::string* error = nullptr);

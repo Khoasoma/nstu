@@ -24,6 +24,7 @@ enum class OperatorAction : int {
     export_telemetry_report = 9,
     manage_settings = 10,
     shutdown_client = 11,
+    wake_on_lan = 12,
 };
 
 [[nodiscard]] bool is_action_permitted(

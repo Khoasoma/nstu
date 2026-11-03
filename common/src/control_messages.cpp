@@ -631,4 +631,39 @@ std::optional<PowerActionMessage> decode_power_action(std::span<const std::byte>
     };
 }
 
+std::vector<std::byte> encode_wol_report(const WolReportMessage& message) {
+    if (static_cast<std::uint8_t>(message.support) >
+        static_cast<std::uint8_t>(net::WolSupportState::missing_mac)) {
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(8);
+    for (std::size_t i = 0; i < 6; ++i) {
+        bytes.push_back(static_cast<std::byte>(message.mac.octets[i]));
+    }
+    bytes.push_back(static_cast<std::byte>(message.support));
+    bytes.push_back(std::byte{0}); // reserved
+    return bytes;
+}
+
+std::optional<WolReportMessage> decode_wol_report(std::span<const std::byte> payload) {
+    if (payload.size() != 8) {
+        return std::nullopt;
+    }
+    WolReportMessage message{};
+    for (std::size_t i = 0; i < 6; ++i) {
+        message.mac.octets[i] = static_cast<std::uint8_t>(payload[i]);
+    }
+    const auto state_byte = static_cast<std::uint8_t>(payload[6]);
+    if (state_byte > static_cast<std::uint8_t>(net::WolSupportState::missing_mac)) {
+        return std::nullopt;
+    }
+    const auto reserved_byte = static_cast<std::uint8_t>(payload[7]);
+    if (reserved_byte != 0) {
+        return std::nullopt;
+    }
+    message.support = static_cast<net::WolSupportState>(state_byte);
+    return message;
+}
+
 } // namespace nstu::control
