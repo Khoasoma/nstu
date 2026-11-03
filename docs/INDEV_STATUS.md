@@ -162,6 +162,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Server State Registry Test Suite** | `tests/server_state_tests.cpp` test coverage for `set_fleet_metadata` defaults, successful updates, non-clobbering `upsert` persistence, empty version preservation on disconnect, and unknown client rejection | **Merged to main** (`1336324`) |
 | **Client Service Metadata & Agent State Sync** | `client/service/main.cpp` dispatching `CommandType::fleet_metadata` on authenticated connection setup and on student agent named-pipe connect/disconnect edges; `tests/client_control_tests.cpp` end-to-end integration test | **Merged to main** (`360ce50`) |
 | **Support Bundle Sanitization & Canary Engine** | `common/include/nstu/support_bundle.hpp` and `common/src/support_bundle.cpp` implementing diagnostic data model, negative boundary redaction (user paths, hex keys, secrets, SAS codes, exam answers), fail-closed canary verification, role/consent export evaluation, and unit test suite in `tests/support_bundle_tests.cpp` | **Merged to main** (`331c0fa`) |
+| **Support Bundle UI & Technician Live Export** | `server/app/main.cpp` implementing technician/developer support bundle modal, explicit consent checkbox gate, scrollable sanitized markdown preview, clipboard/file export, and live inventory diagnostics wiring; `tests/server_state_tests.cpp` verification suite | **Merged to main** (`15c0172`) |
 
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
