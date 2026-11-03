@@ -15,6 +15,7 @@
 #include "nstu/classroom_roster.hpp"
 #include "nstu/file_distribution.hpp"
 #include "nstu/operator_role.hpp"
+#include "nstu/room_profile.hpp"
 #include "nstu/support_bundle.hpp"
 #include "nstu/url_validation.hpp"
 
@@ -500,6 +501,11 @@ struct DashboardState {
     bool support_bundle_modal_open = false;
     bool support_bundle_consented = false;
     std::string support_bundle_preview;
+    bool room_profile_modal_open = false;
+    std::string room_profile_export_text;
+    std::array<char, 65536> room_profile_import_buffer{};
+    std::string room_profile_status_message;
+    bool room_profile_status_is_error = false;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
     std::array<char, nstu::exam::kMaximumExamControlPathBytes + 1>
@@ -3510,6 +3516,135 @@ void draw_support_bundle_modal(DashboardState& state) {
     ImGui::EndPopup();
 }
 
+void draw_room_profile_modal(DashboardState& state, nstu::server::ServerControlPlane& control_plane) {
+    if (state.room_profile_modal_open) {
+        state.room_profile_modal_open = false;
+        ImGui::OpenPopup("room-profile-modal");
+    }
+    const ImVec2 viewport_size = ImGui::GetMainViewport()->WorkSize;
+    ImGui::SetNextWindowSize(
+        {std::min(scaled(760.0f), viewport_size.x - scaled(32.0f)),
+         std::min(scaled(580.0f), viewport_size.y - scaled(32.0f))},
+        ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("room-profile-modal", nullptr,
+                                ImGuiWindowFlags_NoResize)) {
+        return;
+    }
+
+    ImGui::TextUnformatted(tr(state, "Portable Secret-Free Room Profile",
+                              "Hồ sơ phòng học di động không chứa bí mật"));
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "Room profiles contain classroom layout, seats, and preset websites/applications. "
+        "Zero credentials, pairing keys, enrollment secrets, student data, or exam answers are included.",
+        "Hồ sơ phòng học chứa bố cục lớp học, sơ đồ chỗ ngồi và các trang web/ứng dụng đặt trước. "
+        "Tuyệt đối không chứa mật khẩu, khóa ghép nối, bí mật ghi danh, thông tin học sinh hay bài thi."));
+    ImGui::Spacing();
+
+    if (ImGui::BeginTabBar("room-profile-tabs")) {
+        if (ImGui::BeginTabItem(tr(state, "Export Current Profile", "Xuất hồ sơ hiện tại"))) {
+            ImGui::Spacing();
+            ImGui::TextUnformatted(tr(state, "Generated JSON Profile:", "Hồ sơ JSON được tạo:"));
+            if (ImGui::BeginChild("room-profile-export-preview", {0.0f, scaled(-90.0f)}, true,
+                                  ImGuiWindowFlags_HorizontalScrollbar)) {
+                ImGui::TextUnformatted(state.room_profile_export_text.c_str());
+            }
+            ImGui::EndChild();
+            ImGui::Spacing();
+
+            if (ImGui::Button(tr(state, "Copy Profile JSON", "Sao chép JSON"), {scaled(150.0f), 0.0f})) {
+                ImGui::SetClipboardText(state.room_profile_export_text.c_str());
+                state.room_profile_status_message = tr(state, "Profile JSON copied to clipboard.",
+                                                      "Đã sao chép JSON hồ sơ vào bộ nhớ tạm.");
+                state.room_profile_status_is_error = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(tr(state, "Save to Documents", "Lưu vào Documents"), {scaled(170.0f), 0.0f})) {
+                char profile_buf[MAX_PATH]{};
+                const DWORD env_len = GetEnvironmentVariableA("USERPROFILE", profile_buf, MAX_PATH);
+                std::string docs_path = (env_len > 0 && env_len < MAX_PATH)
+                    ? (std::string(profile_buf) + "\\Documents")
+                    : "C:\\";
+                char filename[128]{};
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                sprintf_s(filename, "\\nstu_room_profile_%04u%02u%02u_%02u%02u%02u.json",
+                          st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                const std::string full_path = docs_path + filename;
+                std::ofstream out(full_path);
+                if (out.is_open()) {
+                    out << state.room_profile_export_text;
+                    out.close();
+                    state.room_profile_status_message = tr(state, "Room profile saved to Documents.",
+                                                          "Đã lưu hồ sơ phòng học vào Documents.");
+                    state.room_profile_status_is_error = false;
+                } else {
+                    state.room_profile_status_message = tr(state, "Failed to save file.", "Không thể lưu tệp.");
+                    state.room_profile_status_is_error = true;
+                }
+            }
+            ImGui::EndTabItem();
+        }
+
+        if (ImGui::BeginTabItem(tr(state, "Import & Apply Profile", "Nhập & Áp dụng hồ sơ"))) {
+            ImGui::Spacing();
+            ImGui::TextUnformatted(tr(state, "Paste Room Profile JSON:", "Dán JSON hồ sơ phòng học:"));
+            ImGui::InputTextMultiline("##import-profile-json", state.room_profile_import_buffer.data(),
+                                      state.room_profile_import_buffer.size(),
+                                      {0.0f, scaled(-90.0f)},
+                                      ImGuiInputTextFlags_AllowTabInput);
+            ImGui::Spacing();
+            if (ImGui::Button(tr(state, "Validate & Apply Profile", "Xác thực & Áp dụng"), {scaled(200.0f), 0.0f})) {
+                const auto result = nstu::fleet::import_room_profile_json(state.room_profile_import_buffer.data());
+                if (result.error == nstu::fleet::RoomProfileError::forbidden_secret_detected) {
+                    state.room_profile_status_message = tr(
+                        state,
+                        "REJECTED: Forbidden secret or credential detected in profile payload!",
+                        "TỪ CHỐI: Phát hiện bí mật hoặc khóa nhạy cảm trong hồ sơ!");
+                    state.room_profile_status_is_error = true;
+                } else if (!result.ok()) {
+                    state.room_profile_status_message = tr(state, "Validation Error: ", "Lỗi xác thực: ") +
+                                                        result.error_message;
+                    state.room_profile_status_is_error = true;
+                } else {
+                    strncpy_s(state.room_name_input.data(), state.room_name_input.size(),
+                              result.profile.room_name.c_str(), _TRUNCATE);
+                    control_plane.set_server_name(result.profile.room_name);
+                    if (!state.room_name_path.empty()) {
+                        std::ofstream out(state.room_name_path, std::ios::binary | std::ios::trunc);
+                        if (out.is_open()) {
+                            out << result.profile.room_name;
+                        }
+                    }
+                    state.room_profile_status_message = tr(state, "Profile applied successfully for room '",
+                                                          "Đã áp dụng thành công hồ sơ cho phòng '") +
+                                                        result.profile.room_name + "'.";
+                    state.room_profile_status_is_error = false;
+                }
+            }
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
+
+    if (!state.room_profile_status_message.empty()) {
+        ImGui::Spacing();
+        const ImVec4 status_col = state.room_profile_status_is_error
+            ? ImVec4{0.9f, 0.3f, 0.3f, 1.0f}
+            : ImVec4{0.3f, 0.85f, 0.4f, 1.0f};
+        ImGui::TextColored(status_col, "%s", state.room_profile_status_message.c_str());
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button(tr(state, "Close", "Đóng"), {scaled(80.0f), 0.0f})) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 // The computer name is the only label a teacher reliably recognises in a
 // selection menu. The beacon sanitizes it again before it reaches the wire.
 std::string local_server_name() {
@@ -4975,6 +5110,46 @@ void draw_technician_fleet_health(
             state.support_bundle_consented = false;
             state.support_bundle_modal_open = true;
         }
+        ImGui::SameLine();
+        if (ImGui::Button(tr(state, "Room Profile...", "Hồ sơ phòng..."),
+                          {scaled(140.0f), scaled(26.0f)})) {
+            nstu::fleet::RoomProfile profile;
+            profile.room_name = (state.room_name_input.data()[0] != '\0')
+                ? state.room_name_input.data()
+                : (control_plane.server_name().empty() ? "Default Classroom" : control_plane.server_name());
+            profile.grid_columns = 6;
+            profile.grid_rows = 5;
+            for (std::size_t i = 0; i < clients.size() && i < 256; ++i) {
+                nstu::fleet::SeatAssignment seat;
+                seat.hostname = clients[i].hostname.empty() ? ("client-" + std::to_string(clients[i].id)) : clients[i].hostname;
+                std::string valid_host;
+                for (char c : seat.hostname) {
+                    if (std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-') {
+                        valid_host.push_back(c);
+                    }
+                }
+                seat.hostname = valid_host.empty() ? "host" : valid_host;
+                seat.seat_label = "Seat " + std::to_string(i + 1);
+                seat.row = static_cast<std::uint32_t>(i / 6);
+                seat.col = static_cast<std::uint32_t>(i % 6);
+                if (seat.row < profile.grid_rows && seat.col < profile.grid_columns) {
+                    profile.seats.push_back(std::move(seat));
+                }
+            }
+            if (state.launch_url_input[0] != '\0' && nstu::fleet::is_valid_website_preset(state.launch_url_input.data())) {
+                profile.allowed_websites.push_back(state.launch_url_input.data());
+            }
+            state.room_profile_export_text = nstu::fleet::export_room_profile_json(profile);
+            state.room_profile_import_buffer.fill('\0');
+            state.room_profile_status_message.clear();
+            state.room_profile_status_is_error = false;
+            state.room_profile_modal_open = true;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", tr(state,
+                "Export current classroom layout and presets, or import a secret-free room configuration.",
+                "Xuất bố cục lớp học và cấu hình đặt trước, hoặc nhập hồ sơ phòng học không chứa bí mật."));
+        }
     }
     ImGui::Separator();
     ImGui::Spacing();
@@ -5192,6 +5367,7 @@ void draw_dashboard_shell(
     draw_menu_strip(state, !clients.empty(), control_plane);
     draw_telemetry_report_popup(state, clients.size());
     draw_support_bundle_modal(state);
+    draw_room_profile_modal(state, control_plane);
     draw_bulk_action_confirmation_popup(clients, state, control_plane);
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);

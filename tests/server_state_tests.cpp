@@ -3,6 +3,7 @@
 #include "nstu/snapshot_generation_gate.hpp"
 #include "nstu/stream_rearm_watchdog.hpp"
 #include "nstu/support_bundle.hpp"
+#include "nstu/room_profile.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -405,6 +406,71 @@ int main() {
         assert(md.find("Active Clients | 2") != std::string::npos);
         assert(md.find("Agent Connected Clients | 1") != std::string::npos);
         assert(nstu::support::verify_bundle_canaries(md));
+    }
+
+    // -------------------------------------------------------------------------
+    // Room Profile Server State Integration Tests (FLEET-ROOM-PROFILE-UI-1)
+    // -------------------------------------------------------------------------
+    {
+        using nstu::server::OperatorRole;
+        using nstu::server::OperatorAction;
+        using nstu::server::is_action_permitted;
+
+        // 1. Role permission gating
+        assert(is_action_permitted(OperatorRole::technician, OperatorAction::view_fleet_health));
+        assert(is_action_permitted(OperatorRole::developer, OperatorAction::view_fleet_health));
+        assert(!is_action_permitted(OperatorRole::teacher, OperatorAction::view_fleet_health));
+
+        // 2. Room profile construction from server client records
+        nstu::fleet::RoomProfile profile;
+        profile.room_name = "Lab 501";
+        profile.grid_columns = 6;
+        profile.grid_rows = 5;
+
+        nstu::server::ClientRecord c1;
+        c1.id = 1;
+        c1.hostname = "ws-01";
+        c1.status = nstu::server::ClientStatus::online;
+
+        nstu::server::ClientRecord c2;
+        c2.id = 2;
+        c2.hostname = "ws-02";
+        c2.status = nstu::server::ClientStatus::online;
+
+        std::vector<nstu::server::ClientRecord> records = {c1, c2};
+        for (std::size_t i = 0; i < records.size(); ++i) {
+            nstu::fleet::SeatAssignment seat;
+            seat.hostname = records[i].hostname;
+            seat.seat_label = "Seat " + std::to_string(i + 1);
+            seat.row = static_cast<std::uint32_t>(i / 6);
+            seat.col = static_cast<std::uint32_t>(i % 6);
+            profile.seats.push_back(seat);
+        }
+        profile.allowed_websites.push_back("https://portal.school.edu");
+
+        const std::string exported_json = nstu::fleet::export_room_profile_json(profile);
+        assert(!exported_json.empty());
+        assert(exported_json.find("\"room_name\": \"Lab 501\"") != std::string::npos);
+        assert(exported_json.find("\"hostname\": \"ws-01\"") != std::string::npos);
+        assert(exported_json.find("\"https://portal.school.edu\"") != std::string::npos);
+        assert(!nstu::fleet::contains_forbidden_profile_secrets(exported_json));
+
+        // 3. Fail-closed canary rejection on malicious import payload
+        const std::string hostile_json = R"({
+            "room_name": "Lab 501",
+            "pairing_key": "injected_pairing_secret_key"
+        })";
+        assert(nstu::fleet::contains_forbidden_profile_secrets(hostile_json));
+        const auto rejected = nstu::fleet::import_room_profile_json(hostile_json);
+        assert(!rejected.ok());
+        assert(rejected.error == nstu::fleet::RoomProfileError::forbidden_secret_detected);
+
+        // 4. Successful import and application to room name
+        const auto imported = nstu::fleet::import_room_profile_json(exported_json);
+        assert(imported.ok());
+        assert(imported.profile.room_name == "Lab 501");
+        assert(imported.profile.seats.size() == 2);
+        assert(imported.profile.allowed_websites.size() == 1);
     }
     return 0;
 }
