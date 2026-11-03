@@ -74,7 +74,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Student Hand-Raise Interaction** | High-DPI dark/amber styled "Raise Hand" / "Lower Hand" button in chat UI, notes input capture, visual notifications, and reconnect re-transmission on `server_online` | **Merged to main** (`2e5155d`) |
 | **Teacher Console Visualization & Actions** | Toolbar "Help" filter chip with live `counts.help`, grid card amber badge `[?]`, table row badge with single-click "Ack Help" action, bulk acknowledgment, and `#help-banner` in detail view | **Merged to main** (`2e5155d`) |
 
-## Integrated Daily Teaching Workflows: Website & Quick Launch Core (Roadmap P2.3 / Core)
+## Integrated Daily Teaching Workflows: Website & Quick Launch (Roadmap P2.3 / Core & UI)
 
 | Work Area | Scope & Implementation | Status |
 |---|---|---|
@@ -82,6 +82,9 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Wire Command & Codecs** | Protocol command `launch_url = 60` with length-prefixed binary codecs (`encode_launch_url` / `decode_launch_url`) in `control_messages` preventing buffer overruns or malformed payloads | **Merged to main** (`c14bfcb`) |
 | **Server Control Plane Dispatch** | `ServerControlPlane::launch_url` validating client authentication and URL safety before routing command | **Merged to main** (`c14bfcb`) |
 | **Classroom Roster Bulk Launch** | `BulkActionKind::launch_url = 4` with backward-compatible `extra_payload` parameter in `execute_bulk_action`, plus bilingual EN/VI confirmation and result status formatters | **Merged to main** (`c14bfcb`) |
+| **Service Named-Pipe Relay & Defense-in-Depth** | Inbound `launch_url = 60` handling in `nstu-service`, dropping command if `g_exam_lockdown_controller.is_armed()`, and forwarding validated payload via `AgentMessageType::launch_url = 40` across named pipe | **Merged to main** (`3328d95`) |
+| **Student Agent Execution & Kiosk Containment** | `nstu-agent` URL launching via `ShellExecuteW` on validated URLs in interactive desktop session, strictly dropping launch and enforcing foreground containment when `exam_host_engaged() == true`, and recording in chat history | **Merged to main** (`3328d95`) |
+| **Teacher Console UI & Validation UX** | Dear ImGui "Launch Web" bulk toolbar button, single-client action in selected client view, and modal confirmation popup featuring real-time URL validation, LMS/Docs presets, and execution guards | **Merged to main** (`3328d95`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
