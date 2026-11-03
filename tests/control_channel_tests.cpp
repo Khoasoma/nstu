@@ -1110,6 +1110,106 @@ int main() {
     assert(decoded_stroke->x1 == stroke.x1);
     assert(decoded_stroke->rgba == stroke.rgba);
 
+    // Test BroadcastModeMessage round-trip and validation
+    {
+        // 1. Focus mode, no lock
+        const nstu::control::BroadcastModeMessage msg_focus_nolock{
+            .mode = nstu::control::DemonstrationMode::focus,
+            .lock_input = false,
+        };
+        const auto wire_focus_nolock = nstu::control::encode_broadcast_mode(msg_focus_nolock);
+        assert(wire_focus_nolock.size() == 4);
+        assert(std::to_integer<unsigned>(wire_focus_nolock[0]) == 1); // version LE low
+        assert(std::to_integer<unsigned>(wire_focus_nolock[1]) == 0); // version LE high
+        assert(std::to_integer<unsigned>(wire_focus_nolock[2]) == 0); // mode focus
+        assert(std::to_integer<unsigned>(wire_focus_nolock[3]) == 0); // lock_input false
+        const auto decoded_focus_nolock = nstu::control::decode_broadcast_mode(wire_focus_nolock);
+        assert(decoded_focus_nolock.has_value());
+        assert(decoded_focus_nolock->mode == nstu::control::DemonstrationMode::focus);
+        assert(!decoded_focus_nolock->lock_input);
+
+        // 2. Focus mode, with lock
+        const nstu::control::BroadcastModeMessage msg_focus_lock{
+            .mode = nstu::control::DemonstrationMode::focus,
+            .lock_input = true,
+        };
+        const auto wire_focus_lock = nstu::control::encode_broadcast_mode(msg_focus_lock);
+        assert(wire_focus_lock.size() == 4);
+        assert(std::to_integer<unsigned>(wire_focus_lock[2]) == 0);
+        assert(std::to_integer<unsigned>(wire_focus_lock[3]) == 1);
+        const auto decoded_focus_lock = nstu::control::decode_broadcast_mode(wire_focus_lock);
+        assert(decoded_focus_lock.has_value());
+        assert(decoded_focus_lock->mode == nstu::control::DemonstrationMode::focus);
+        assert(decoded_focus_lock->lock_input);
+
+        // 3. Follow-along mode, no lock
+        const nstu::control::BroadcastModeMessage msg_follow_nolock{
+            .mode = nstu::control::DemonstrationMode::follow_along,
+            .lock_input = false,
+        };
+        const auto wire_follow_nolock = nstu::control::encode_broadcast_mode(msg_follow_nolock);
+        assert(wire_follow_nolock.size() == 4);
+        assert(std::to_integer<unsigned>(wire_follow_nolock[2]) == 1);
+        assert(std::to_integer<unsigned>(wire_follow_nolock[3]) == 0);
+        const auto decoded_follow_nolock = nstu::control::decode_broadcast_mode(wire_follow_nolock);
+        assert(decoded_follow_nolock.has_value());
+        assert(decoded_follow_nolock->mode == nstu::control::DemonstrationMode::follow_along);
+        assert(!decoded_follow_nolock->lock_input);
+
+        // 4. Follow-along mode, with lock
+        const nstu::control::BroadcastModeMessage msg_follow_lock{
+            .mode = nstu::control::DemonstrationMode::follow_along,
+            .lock_input = true,
+        };
+        const auto wire_follow_lock = nstu::control::encode_broadcast_mode(msg_follow_lock);
+        assert(wire_follow_lock.size() == 4);
+        assert(std::to_integer<unsigned>(wire_follow_lock[2]) == 1);
+        assert(std::to_integer<unsigned>(wire_follow_lock[3]) == 1);
+        const auto decoded_follow_lock = nstu::control::decode_broadcast_mode(wire_follow_lock);
+        assert(decoded_follow_lock.has_value());
+        assert(decoded_follow_lock->mode == nstu::control::DemonstrationMode::follow_along);
+        assert(decoded_follow_lock->lock_input);
+
+        // 5. Fail-closed rejection: invalid buffer lengths
+        assert(!nstu::control::decode_broadcast_mode({}).has_value());
+        const std::array<std::byte, 1> one_byte{std::byte{1}};
+        assert(!nstu::control::decode_broadcast_mode(one_byte).has_value());
+        const std::array<std::byte, 2> two_bytes{std::byte{1}, std::byte{0}};
+        assert(!nstu::control::decode_broadcast_mode(two_bytes).has_value());
+        const std::array<std::byte, 3> three_bytes{std::byte{1}, std::byte{0}, std::byte{0}};
+        assert(!nstu::control::decode_broadcast_mode(three_bytes).has_value());
+        const std::array<std::byte, 5> five_bytes{std::byte{1}, std::byte{0}, std::byte{0}, std::byte{0}, std::byte{0}};
+        assert(!nstu::control::decode_broadcast_mode(five_bytes).has_value());
+
+        // 6. Fail-closed rejection: invalid version
+        auto bad_version = wire_focus_nolock;
+        bad_version[0] = std::byte{0}; // version 0
+        assert(!nstu::control::decode_broadcast_mode(bad_version).has_value());
+        bad_version[0] = std::byte{2}; // version 2
+        assert(!nstu::control::decode_broadcast_mode(bad_version).has_value());
+
+        // 7. Fail-closed rejection: invalid mode
+        auto bad_mode = wire_focus_nolock;
+        bad_mode[2] = std::byte{2};
+        assert(!nstu::control::decode_broadcast_mode(bad_mode).has_value());
+        bad_mode[2] = std::byte{0xff};
+        assert(!nstu::control::decode_broadcast_mode(bad_mode).has_value());
+
+        // 8. Fail-closed rejection: invalid lock_input boolean byte
+        auto bad_lock = wire_focus_nolock;
+        bad_lock[3] = std::byte{2};
+        assert(!nstu::control::decode_broadcast_mode(bad_lock).has_value());
+        bad_lock[3] = std::byte{0x80};
+        assert(!nstu::control::decode_broadcast_mode(bad_lock).has_value());
+
+        // 9. Encoder rejects invalid mode enum
+        const nstu::control::BroadcastModeMessage msg_invalid_mode{
+            .mode = static_cast<nstu::control::DemonstrationMode>(2),
+            .lock_input = false,
+        };
+        assert(nstu::control::encode_broadcast_mode(msg_invalid_mode).empty());
+    }
+
     test_send_deadlines();
     return 0;
 }

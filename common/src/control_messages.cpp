@@ -13,6 +13,7 @@ inline constexpr std::uint16_t kStreamingFlag = 2;
 inline constexpr std::uint16_t kSnapshottingFlag = 4;
 inline constexpr std::uint16_t kViewingBroadcastFlag = 8;
 inline constexpr std::uint16_t kSnapshotFrameVersion = 1;
+inline constexpr std::uint16_t kBroadcastModeVersion = 1;
 inline constexpr std::size_t kMaximumHostnameBytes = 255;
 
 template <typename T>
@@ -664,6 +665,42 @@ std::optional<WolReportMessage> decode_wol_report(std::span<const std::byte> pay
     }
     message.support = static_cast<net::WolSupportState>(state_byte);
     return message;
+}
+
+std::vector<std::byte> encode_broadcast_mode(const BroadcastModeMessage& message) {
+    if (static_cast<std::uint8_t>(message.mode) >
+        static_cast<std::uint8_t>(DemonstrationMode::follow_along)) {
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(4);
+    append_le(bytes, kBroadcastModeVersion);
+    bytes.push_back(static_cast<std::byte>(message.mode));
+    bytes.push_back(static_cast<std::byte>(message.lock_input ? 0x01u : 0x00u));
+    return bytes;
+}
+
+std::optional<BroadcastModeMessage> decode_broadcast_mode(std::span<const std::byte> payload) {
+    if (payload.size() != 4) {
+        return std::nullopt;
+    }
+    std::size_t offset = 0;
+    std::uint16_t version = 0;
+    if (!read_le(payload, offset, version) || version != kBroadcastModeVersion) {
+        return std::nullopt;
+    }
+    const auto mode_byte = static_cast<std::uint8_t>(payload[offset++]);
+    if (mode_byte > static_cast<std::uint8_t>(DemonstrationMode::follow_along)) {
+        return std::nullopt;
+    }
+    const auto lock_byte = static_cast<std::uint8_t>(payload[offset++]);
+    if (lock_byte > 1) {
+        return std::nullopt;
+    }
+    return BroadcastModeMessage{
+        .mode = static_cast<DemonstrationMode>(mode_byte),
+        .lock_input = (lock_byte != 0),
+    };
 }
 
 } // namespace nstu::control

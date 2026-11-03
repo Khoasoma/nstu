@@ -283,4 +283,19 @@ struct WolReportMessage {
 [[nodiscard]] std::optional<WolReportMessage> decode_wol_report(
     std::span<const std::byte> payload);
 
+enum class DemonstrationMode : std::uint8_t {
+    focus = 0,
+    follow_along = 1,
+};
+
+struct BroadcastModeMessage {
+    DemonstrationMode mode = DemonstrationMode::focus;
+    bool lock_input = false;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_broadcast_mode(
+    const BroadcastModeMessage& message);
+[[nodiscard]] std::optional<BroadcastModeMessage> decode_broadcast_mode(
+    std::span<const std::byte> payload);
+
 } // namespace nstu::control

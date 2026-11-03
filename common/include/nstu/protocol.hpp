@@ -139,6 +139,9 @@ enum class CommandType : std::uint16_t {
     file_dist_status = 66,
     // bidirectional: transfer cancellation (session_id, reason_code).
     file_dist_cancel = 67,
+    // Demonstration modes (Focus vs Follow-Along) and student input lock.
+    // server -> client: carries active demonstration mode and input lock state.
+    host_broadcast_mode = 68,
 };
 
 enum class ConnectionRole : std::uint8_t {
