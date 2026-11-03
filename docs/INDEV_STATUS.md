@@ -132,6 +132,8 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Wire Protocol Commands & Domain Types** | `CommandType::host_broadcast_mode = 68` protocol command; `DemonstrationMode` enum class (`focus = 0`, `follow_along = 1`), and `BroadcastModeMessage` struct (`mode`, `lock_input`) | **Merged to main** (`0f7210c`) |
 | **Fail-Closed Binary Codecs** | `encode_broadcast_mode` and `decode_broadcast_mode` enforcing strict 4-byte buffer size, LE version 1 negotiation, enum bounds checks, boolean bounds checks, and instant rejection of trailing bytes | **Merged to main** (`0f7210c`) |
 | **Isolation & Assertion Baseline** | Zero assertion removals across all 67 test suites; snapshot frame codecs and low-bandwidth snapshot wall monitoring completely unaffected | **Merged to main** (`0f7210c`) |
+| **Server Control Plane Demonstration Modes** | `ServerControlPlane::set_broadcast_mode` and `broadcast_mode` managing active demonstration modes (`focus` vs `follow_along`), enum bounds checking, and broadcasting `host_broadcast_mode` | **Merged to main** (`bf5a254`) |
+| **Input Lock & Resource Cleanup Guarantee** | `stop_host_broadcast` unconditionally clearing `lock_input = false` on control plane and dispatching `host_broadcast_stop`; `stop()` resetting demonstration state | **Merged to main** (`bf5a254`) |
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
 
