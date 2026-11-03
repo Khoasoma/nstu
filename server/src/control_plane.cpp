@@ -155,6 +155,7 @@ struct RegistryMutationRendezvous {
         case protocol::CommandType::freeze_report:
         case protocol::CommandType::help_request:
         case protocol::CommandType::wol_report:
+        case protocol::CommandType::fleet_metadata:
         case protocol::CommandType::status_report:
         case protocol::CommandType::hello:
         case protocol::CommandType::snapshot_frame:
@@ -2287,6 +2288,21 @@ private:
                     [&](std::uint64_t id) {
                         return registry_.set_wol_report(
                             id, wol->mac, wol->support);
+                    })) {
+                dispatcher_.disconnect(state.connection_id);
+                return false;
+            }
+            return true;
+        }
+        if (command->envelope.type ==
+            protocol::CommandType::fleet_metadata) {
+            const auto metadata =
+                control::decode_fleet_metadata(command->payload);
+            if (!metadata || !mutate_current_registry(state,
+                    [&](std::uint64_t id) {
+                        return registry_.set_fleet_metadata(
+                            id, metadata->client_version,
+                            metadata->agent_connected);
                     })) {
                 dispatcher_.disconnect(state.connection_id);
                 return false;

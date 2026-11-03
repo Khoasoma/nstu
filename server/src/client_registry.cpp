@@ -66,6 +66,10 @@ void ClientRegistry::upsert(ClientRecord record) {
         if (record.wol_support == net::WolSupportState::unknown) {
             record.wol_support = existing->second.wol_support;
         }
+        if (record.client_version.empty()) {
+            record.client_version = existing->second.client_version;
+        }
+        record.agent_connected = existing->second.agent_connected;
     }
     if (existing != clients_.end() &&
         (!record.snapshot_jpeg || record.snapshot_jpeg->empty())) {
@@ -127,6 +131,21 @@ bool ClientRegistry::set_wol_report(
         found->second.mac_address = net::format_mac_address(mac);
     }
     found->second.wol_support = support;
+    found->second.last_seen = std::chrono::steady_clock::now();
+    return true;
+}
+
+bool ClientRegistry::set_fleet_metadata(
+    std::uint64_t id, std::string version, bool agent_connected) {
+    std::scoped_lock lock(mutex_);
+    const auto found = clients_.find(id);
+    if (found == clients_.end()) {
+        return false;
+    }
+    if (!version.empty()) {
+        found->second.client_version = std::move(version);
+    }
+    found->second.agent_connected = agent_connected;
     found->second.last_seen = std::chrono::steady_clock::now();
     return true;
 }

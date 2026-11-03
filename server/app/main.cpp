@@ -4772,6 +4772,7 @@ void draw_technician_fleet_health(
 
     // 1. Metric summaries
     std::size_t online_count = 0;
+    std::size_t agent_active_count = 0;
     std::size_t uwf_proven_count = 0;
     std::size_t uwf_awaiting_count = 0;
     std::size_t uwf_unsupported_count = 0;
@@ -4781,6 +4782,9 @@ void draw_technician_fleet_health(
     for (const auto& client : clients) {
         if (client.status != nstu::server::ClientStatus::offline) {
             online_count++;
+            if (client.agent_connected) {
+                agent_active_count++;
+            }
             total_latency += client.latency_ms;
             latency_samples++;
         }
@@ -4799,6 +4803,11 @@ void draw_technician_fleet_health(
     char total_buf[32]{};
     sprintf_s(total_buf, "%zu (%zu online)", clients.size(), online_count);
     draw_telemetry_card(tr(state, "Fleet Inventory", "Tổng số máy"), total_buf, card_width);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s: %zu\n%s: %zu",
+            tr(state, "Online", "Đang trực tuyến"), online_count,
+            tr(state, "Agent Active", "Agent hoạt động"), agent_active_count);
+    }
 
     ImGui::SameLine();
     char uwf_buf[32]{};
@@ -4852,6 +4861,17 @@ void draw_technician_fleet_health(
             // Computer name
             ImGui::TableSetColumnIndex(0);
             ImGui::TextUnformatted(client.hostname.c_str());
+            if (ImGui::IsItemHovered()) {
+                const char* ver_str = client.client_version.empty()
+                    ? tr(state, "Unknown", "Chưa rõ")
+                    : client.client_version.c_str();
+                const char* agent_str = client.agent_connected
+                    ? tr(state, "Connected", "Đã kết nối")
+                    : tr(state, "Disconnected", "Mất kết nối");
+                ImGui::SetTooltip("%s: %s\nAgent: %s",
+                    tr(state, "Version", "Phiên bản"),
+                    ver_str, agent_str);
+            }
 
             // Address
             ImGui::TableSetColumnIndex(1);
@@ -4892,6 +4912,16 @@ void draw_technician_fleet_health(
             ImGui::TextColored(
                 is_online ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f} : ImVec4{0.70f, 0.70f, 0.70f, 1.0f},
                 "%s", nstu::server::to_string(client.status));
+            if (is_online && !client.agent_connected) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4{0.96f, 0.50f, 0.20f, 1.0f}, "[%s]",
+                                   tr(state, "No Agent", "Thiếu Agent"));
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", tr(state,
+                        "Student agent process is not connected to client service.\nRemote input lock, kiosk, and broadcast display unavailable.",
+                        "Tiến trình agent chưa kết nối với service.\nKhóa nhập liệu, kiosk và màn hình phát sóng sẽ không khả dụng."));
+                }
+            }
 
             // Last Seen / Freshness
             ImGui::TableSetColumnIndex(3);

@@ -56,6 +56,41 @@ int main() {
     assert(registry.set_frozen(1, false));
     assert(!registry.snapshot()[0].frozen);
     assert(!registry.set_frozen(99, true));
+
+    // Fleet metadata tests (FLEET-METADATA-SERVER-UI-1)
+    {
+        // 1. Initial state defaults
+        assert(registry.snapshot()[0].client_version.empty());
+        assert(!registry.snapshot()[0].agent_connected);
+
+        // 2. Set fleet metadata
+        assert(registry.set_fleet_metadata(1, "0.1.0", true));
+        auto client = registry.snapshot()[0];
+        assert(client.client_version == "0.1.0");
+        assert(client.agent_connected);
+
+        // 3. Status upsert preserves fleet metadata
+        registry.upsert({
+            .id = 1,
+            .hostname = "LAB-PC-01",
+            .address = "192.168.1.101",
+            .status = nstu::server::ClientStatus::online,
+            .snapshot_jpeg = {},
+            .last_seen = now,
+        });
+        client = registry.snapshot()[0];
+        assert(client.client_version == "0.1.0");
+        assert(client.agent_connected);
+
+        // 4. Update agent connectivity on disconnect event (empty version preserves existing)
+        assert(registry.set_fleet_metadata(1, "", false));
+        client = registry.snapshot()[0];
+        assert(client.client_version == "0.1.0");
+        assert(!client.agent_connected);
+
+        // 5. Rejection on unknown client ID
+        assert(!registry.set_fleet_metadata(99, "0.2.0", true));
+    }
     const nstu::control::UwfConfigureReport uwf_report{
         .outcome = nstu::control::UwfConfigureOutcome::armed,
         .reboot_required = true,
