@@ -119,6 +119,9 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Filename Sanitization & Staging Containment** | `sanitize_filename` normalizing unsafe characters and reserved stems to safe fallbacks; `compute_staging_path` verifying strict lexical containment inside base staging directory | **Merged to main** (`b730b6e`) |
 | **End-to-End Cryptographic Integrity** | 32-byte `Sha256Digest` verification using `nstu::security::sha256` and `constant_time_equal`, rejecting corrupted or mismatched chunks | **Merged to main** (`b730b6e`) |
 | **Passive Data Invariant** | Non-negotiable invariant strictly preserving received files as passive data with zero auto-execution | **Merged to main** (`b730b6e`) |
+| **Operator Role Matrix** | Added `OperatorAction::distribute_file = 13` permitting Teacher, Technician, and Developer roles while denying unauthenticated callers | **Merged to main** (`0ac4ffa`) |
+| **Server Control Plane Execution** | `ServerControlPlane::distribute_file` enforcing role permissions, offline semantics, active exam containment (`exam_active(client_id)` denial with security audit logging), 64 MiB file size limits, and 64 KiB chunked streaming with SHA-256 calculation | **Merged to main** (`0ac4ffa`) |
+| **Classroom Roster Bulk Actions** | `BulkActionKind::distribute_file = 8` in `execute_bulk_action` dispatching to online clients, skipping offline machines, with bilingual EN/VI confirmation modal titles, confirmation dialogs, and result status formatters | **Merged to main** (`0ac4ffa`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
