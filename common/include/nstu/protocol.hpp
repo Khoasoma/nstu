@@ -142,6 +142,9 @@ enum class CommandType : std::uint16_t {
     // Demonstration modes (Focus vs Follow-Along) and student input lock.
     // server -> client: carries active demonstration mode and input lock state.
     host_broadcast_mode = 68,
+    // Low-frequency fleet metadata (client build version and agent service connectivity).
+    // client -> server: carries client version string and student agent connection state.
+    fleet_metadata = 69,
 };
 
 enum class ConnectionRole : std::uint8_t {

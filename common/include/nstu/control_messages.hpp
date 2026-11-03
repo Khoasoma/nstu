@@ -298,4 +298,16 @@ struct BroadcastModeMessage {
 [[nodiscard]] std::optional<BroadcastModeMessage> decode_broadcast_mode(
     std::span<const std::byte> payload);
 
+inline constexpr std::size_t kMaximumClientVersionBytes = 32;
+
+struct FleetMetadataMessage {
+    std::string client_version;
+    bool agent_connected = false;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_fleet_metadata(
+    const FleetMetadataMessage& message);
+[[nodiscard]] std::optional<FleetMetadataMessage> decode_fleet_metadata(
+    std::span<const std::byte> payload);
+
 } // namespace nstu::control

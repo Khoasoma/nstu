@@ -1210,6 +1210,106 @@ int main() {
         assert(nstu::control::encode_broadcast_mode(msg_invalid_mode).empty());
     }
 
+    // Low-frequency fleet metadata codecs test (FLEET-METADATA-CORE-1)
+    {
+        // 1. Valid roundtrip with agent_connected = true
+        const nstu::control::FleetMetadataMessage msg1{
+            .client_version = "0.1.0",
+            .agent_connected = true,
+        };
+        const auto wire1 = nstu::control::encode_fleet_metadata(msg1);
+        assert(!wire1.empty());
+        assert(wire1.size() == 2 + 1 + 2 + 5);
+        assert(std::to_integer<unsigned>(wire1[0]) == 1);
+        assert(std::to_integer<unsigned>(wire1[1]) == 0);
+        assert(std::to_integer<unsigned>(wire1[2]) == 1);
+        assert(std::to_integer<unsigned>(wire1[3]) == 5);
+        assert(std::to_integer<unsigned>(wire1[4]) == 0);
+        const auto decoded1 = nstu::control::decode_fleet_metadata(wire1);
+        assert(decoded1.has_value());
+        assert(decoded1->client_version == "0.1.0");
+        assert(decoded1->agent_connected);
+
+        // 2. Valid roundtrip with agent_connected = false
+        const nstu::control::FleetMetadataMessage msg2{
+            .client_version = "v1.2.34-rc.5+build.99",
+            .agent_connected = false,
+        };
+        const auto wire2 = nstu::control::encode_fleet_metadata(msg2);
+        const auto decoded2 = nstu::control::decode_fleet_metadata(wire2);
+        assert(decoded2.has_value());
+        assert(decoded2->client_version == "v1.2.34-rc.5+build.99");
+        assert(!decoded2->agent_connected);
+
+        // 3. Exact boundary length (32 bytes)
+        const std::string max_version(32, 'a');
+        const nstu::control::FleetMetadataMessage msg_max{
+            .client_version = max_version,
+            .agent_connected = true,
+        };
+        const auto wire_max = nstu::control::encode_fleet_metadata(msg_max);
+        assert(!wire_max.empty());
+        const auto decoded_max = nstu::control::decode_fleet_metadata(wire_max);
+        assert(decoded_max.has_value());
+        assert(decoded_max->client_version == max_version);
+        assert(decoded_max->agent_connected);
+
+        // 4. Encoder rejects oversized version (>32 bytes)
+        const std::string too_long(33, 'x');
+        const nstu::control::FleetMetadataMessage msg_too_long{
+            .client_version = too_long,
+            .agent_connected = false,
+        };
+        assert(nstu::control::encode_fleet_metadata(msg_too_long).empty());
+
+        // 5. Encoder rejects empty version
+        const nstu::control::FleetMetadataMessage msg_empty{
+            .client_version = "",
+            .agent_connected = false,
+        };
+        assert(nstu::control::encode_fleet_metadata(msg_empty).empty());
+
+        // 6. Decoder rejects empty payload
+        assert(!nstu::control::decode_fleet_metadata({}).has_value());
+
+        // 7. Decoder rejects truncated payloads
+        const std::array<std::byte, 1> one_byte{std::byte{1}};
+        assert(!nstu::control::decode_fleet_metadata(one_byte).has_value());
+        const std::array<std::byte, 4> four_bytes{std::byte{1}, std::byte{0}, std::byte{0}, std::byte{1}};
+        assert(!nstu::control::decode_fleet_metadata(four_bytes).has_value());
+
+        // 8. Decoder rejects invalid codec version
+        auto bad_ver = wire1;
+        bad_ver[0] = std::byte{0};
+        assert(!nstu::control::decode_fleet_metadata(bad_ver).has_value());
+        bad_ver[0] = std::byte{2};
+        assert(!nstu::control::decode_fleet_metadata(bad_ver).has_value());
+
+        // 9. Decoder rejects invalid boolean flag (> 1)
+        auto bad_flag = wire1;
+        bad_flag[2] = std::byte{2};
+        assert(!nstu::control::decode_fleet_metadata(bad_flag).has_value());
+        bad_flag[2] = std::byte{0xff};
+        assert(!nstu::control::decode_fleet_metadata(bad_flag).has_value());
+
+        // 10. Decoder rejects version_bytes == 0
+        auto zero_len = wire1;
+        zero_len[3] = std::byte{0};
+        zero_len[4] = std::byte{0};
+        assert(!nstu::control::decode_fleet_metadata(zero_len).has_value());
+
+        // 11. Decoder rejects version_bytes > 32
+        auto big_len = wire1;
+        big_len[3] = std::byte{33};
+        big_len[4] = std::byte{0};
+        assert(!nstu::control::decode_fleet_metadata(big_len).has_value());
+
+        // 12. Decoder rejects trailing bytes / length mismatch
+        auto trailing = wire1;
+        trailing.push_back(std::byte{0});
+        assert(!nstu::control::decode_fleet_metadata(trailing).has_value());
+    }
+
     test_send_deadlines();
     return 0;
 }

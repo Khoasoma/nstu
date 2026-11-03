@@ -14,6 +14,7 @@ inline constexpr std::uint16_t kSnapshottingFlag = 4;
 inline constexpr std::uint16_t kViewingBroadcastFlag = 8;
 inline constexpr std::uint16_t kSnapshotFrameVersion = 1;
 inline constexpr std::uint16_t kBroadcastModeVersion = 1;
+inline constexpr std::uint16_t kFleetMetadataVersion = 1;
 inline constexpr std::size_t kMaximumHostnameBytes = 255;
 
 template <typename T>
@@ -701,6 +702,49 @@ std::optional<BroadcastModeMessage> decode_broadcast_mode(std::span<const std::b
         .mode = static_cast<DemonstrationMode>(mode_byte),
         .lock_input = (lock_byte != 0),
     };
+}
+
+std::vector<std::byte> encode_fleet_metadata(const FleetMetadataMessage& message) {
+    if (message.client_version.empty() ||
+        message.client_version.size() > kMaximumClientVersionBytes) {
+        return {};
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(2 + 1 + 2 + message.client_version.size());
+    append_le(bytes, kFleetMetadataVersion);
+    bytes.push_back(static_cast<std::byte>(message.agent_connected ? 0x01u : 0x00u));
+    append_le(bytes, static_cast<std::uint16_t>(message.client_version.size()));
+    for (char ch : message.client_version) {
+        bytes.push_back(static_cast<std::byte>(ch));
+    }
+    return bytes;
+}
+
+std::optional<FleetMetadataMessage> decode_fleet_metadata(std::span<const std::byte> payload) {
+    std::size_t offset = 0;
+    std::uint16_t version = 0;
+    if (!read_le(payload, offset, version) || version != kFleetMetadataVersion) {
+        return std::nullopt;
+    }
+    if (offset >= payload.size()) {
+        return std::nullopt;
+    }
+    const auto agent_byte = static_cast<std::uint8_t>(payload[offset++]);
+    if (agent_byte > 1) {
+        return std::nullopt;
+    }
+    std::uint16_t version_bytes = 0;
+    if (!read_le(payload, offset, version_bytes) ||
+        version_bytes == 0 ||
+        version_bytes > kMaximumClientVersionBytes ||
+        payload.size() - offset != version_bytes) {
+        return std::nullopt;
+    }
+    FleetMetadataMessage message;
+    message.agent_connected = (agent_byte != 0);
+    message.client_version.assign(
+        reinterpret_cast<const char*>(payload.data() + offset), version_bytes);
+    return message;
 }
 
 } // namespace nstu::control
