@@ -66,6 +66,7 @@ constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kAgentCommandMessage = WM_APP + 2;
 constexpr UINT kAnnotationUpdatedMessage = WM_APP + 3;
 constexpr UINT kBroadcastUpdatedMessage = WM_APP + 4;
+constexpr UINT kBroadcastModeChangedMessage = WM_APP + 9;
 // The WebView2 host drains exam_bridge() after this notification. Keeping the
 // bridge notification in the agent avoids doing browser work on the pipe
 // thread.
@@ -110,6 +111,10 @@ std::atomic<std::uint8_t> g_stream_fps = 0;
 std::atomic_bool g_snapshotting = false;
 std::atomic<std::uint16_t> g_snapshot_interval_seconds = 0;
 std::atomic_bool g_viewing_broadcast = false;
+std::atomic<nstu::control::DemonstrationMode> g_broadcast_mode =
+    nstu::control::DemonstrationMode::focus;
+std::atomic_bool g_broadcast_lock_input = false;
+std::atomic_bool g_demo_input_locked = false;
 std::atomic_bool g_remote_control_active = false;
 std::atomic_bool g_managed = false;
 // Whether the service currently reports a live authenticated session to the
@@ -130,6 +135,22 @@ bool g_chat_was_visible_for_exam = false;
 bool g_lock_was_visible_for_exam = false;
 bool g_annotation_was_visible_for_exam = false;
 bool g_broadcast_was_visible_for_exam = false;
+
+void apply_broadcast_input_lock(bool lock) noexcept {
+    if (lock) {
+        if (!g_demo_input_locked.exchange(true)) {
+            if (!g_remote_control_active.load()) {
+                (void)BlockInput(TRUE);
+            }
+        }
+    } else {
+        if (g_demo_input_locked.exchange(false)) {
+            if (!g_remote_control_active.load()) {
+                (void)BlockInput(FALSE);
+            }
+        }
+    }
+}
 
 // Pairing is the one thing this agent puts on screen before the machine
 // belongs to anybody, so it has its own window rather than a tray balloon
@@ -338,9 +359,19 @@ void restore_exam_suppressed_windows() noexcept {
                                                       : SW_HIDE);
     }
     if (g_broadcast_window != nullptr) {
-        ShowWindow(g_broadcast_window,
-                   g_broadcast_was_visible_for_exam ? SW_SHOWNOACTIVATE
-                                                     : SW_HIDE);
+        if (g_broadcast_was_visible_for_exam) {
+            if (g_broadcast_mode.load() ==
+                nstu::control::DemonstrationMode::focus) {
+                ShowWindow(g_broadcast_window, SW_SHOWNOACTIVATE);
+                if (g_broadcast_lock_input.load()) {
+                    apply_broadcast_input_lock(true);
+                }
+            } else {
+                ShowWindow(g_broadcast_window, SW_SHOW);
+            }
+        } else {
+            ShowWindow(g_broadcast_window, SW_HIDE);
+        }
     }
     g_exam_controls_suppressed = false;
 }
@@ -366,6 +397,7 @@ void restore_control_window_order() {
             ShowWindow(g_annotation_window, SW_HIDE);
         if (g_broadcast_window != nullptr)
             ShowWindow(g_broadcast_window, SW_HIDE);
+        apply_broadcast_input_lock(false);
         g_exam_host.enforce_foreground();
         return;
     }
@@ -373,7 +405,8 @@ void restore_control_window_order() {
     constexpr UINT flags =
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
     if (g_broadcast_window != nullptr &&
-        IsWindowVisible(g_broadcast_window)) {
+        IsWindowVisible(g_broadcast_window) &&
+        g_broadcast_mode.load() == nstu::control::DemonstrationMode::focus) {
         SetWindowPos(g_broadcast_window, HWND_TOPMOST, 0, 0, 0, 0, flags);
     }
     if (g_annotation_window != nullptr &&
@@ -592,7 +625,9 @@ bool send_agent_status(nstu::client::NamedPipe& pipe) {
 
 void stop_remote_control() noexcept {
     if (g_remote_control_active.exchange(false)) {
-        (void)BlockInput(FALSE);
+        if (!g_demo_input_locked.load()) {
+            (void)BlockInput(FALSE);
+        }
     }
 }
 
@@ -876,8 +911,20 @@ void pipe_control_loop(HWND overlay) {
                         }
                     }
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::host_broadcast_mode) {
+                    if (const auto mode_msg = nstu::control::decode_broadcast_mode(
+                            message->payload)) {
+                        g_broadcast_mode.store(mode_msg->mode);
+                        g_broadcast_lock_input.store(mode_msg->lock_input);
+                        PostMessageW(g_broadcast_window,
+                                     kBroadcastModeChangedMessage,
+                                     static_cast<WPARAM>(mode_msg->mode),
+                                     mode_msg->lock_input ? 1 : 0);
+                    }
+                } else if (message->type ==
                            nstu::client::AgentMessageType::host_broadcast_stop) {
                     g_viewing_broadcast = false;
+                    apply_broadcast_input_lock(false);
                     PostMessageW(g_broadcast_window,
                                  kBroadcastUpdatedMessage, 0, 0);
                 } else if (message->type ==
@@ -1064,6 +1111,11 @@ void pipe_control_loop(HWND overlay) {
         // (chat_submit rides this pipe), so drop the connected flag and take
         // the chat window down until a fresh session re-seeds server_online.
         g_server_connected = false;
+        apply_broadcast_input_lock(false);
+        g_viewing_broadcast = false;
+        if (g_broadcast_window != nullptr) {
+            PostMessageW(g_broadcast_window, kBroadcastUpdatedMessage, 0, 0);
+        }
         PostMessageW(overlay, kAgentCommandMessage,
                      static_cast<WPARAM>(
                          nstu::client::AgentMessageType::server_online),
@@ -1834,17 +1886,87 @@ LRESULT CALLBACK annotation_window_proc(HWND window, UINT message,
 
 LRESULT CALLBACK broadcast_window_proc(HWND window, UINT message,
                                        WPARAM wparam, LPARAM lparam) {
-    (void)lparam;
-    if (message == kBroadcastUpdatedMessage) {
-        ShowWindow(window, wparam != 0 ? SW_SHOWNOACTIVATE : SW_HIDE);
+    if (message == kBroadcastModeChangedMessage) {
+        const auto mode = static_cast<nstu::control::DemonstrationMode>(wparam);
+        const bool lock_input = (lparam != 0);
+        if (mode == nstu::control::DemonstrationMode::focus) {
+            SetWindowLongPtrW(window, GWL_STYLE, WS_POPUP);
+            SetWindowLongPtrW(window, GWL_EXSTYLE,
+                              WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
+                                  WS_EX_NOACTIVATE);
+            const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+            const int height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+            SetWindowPos(window, HWND_TOPMOST, x, y, width, height,
+                         SWP_FRAMECHANGED |
+                             (g_viewing_broadcast.load() ? SWP_SHOWWINDOW
+                                                         : 0));
+            if (g_viewing_broadcast.load()) {
+                ShowWindow(window, SW_SHOWNOACTIVATE);
+            }
+            apply_broadcast_input_lock(lock_input &&
+                                       g_viewing_broadcast.load());
+        } else {
+            apply_broadcast_input_lock(false);
+            SetWindowLongPtrW(window, GWL_STYLE, WS_OVERLAPPEDWINDOW);
+            SetWindowLongPtrW(window, GWL_EXSTYLE, WS_EX_APPWINDOW);
+            RECT rect{};
+            GetWindowRect(window, &rect);
+            int width = rect.right - rect.left;
+            int height = rect.bottom - rect.top;
+            if (width <= 0 || height <= 0 || width > 1920) {
+                width = 960;
+                height = 540;
+            }
+            int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
+            int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+            SetWindowPos(window, HWND_NOTOPMOST, x, y, width, height,
+                         SWP_FRAMECHANGED |
+                             (g_viewing_broadcast.load() ? SWP_SHOWWINDOW
+                                                         : 0));
+            if (g_viewing_broadcast.load()) {
+                ShowWindow(window, SW_SHOW);
+            }
+        }
         InvalidateRect(window, nullptr, FALSE);
-        restore_control_window_order();
+        return 0;
+    }
+    if (message == kBroadcastUpdatedMessage) {
+        (void)lparam;
+        const bool show = (wparam != 0);
+        if (show) {
+            if (g_broadcast_mode.load() ==
+                nstu::control::DemonstrationMode::focus) {
+                ShowWindow(window, SW_SHOWNOACTIVATE);
+                if (g_broadcast_lock_input.load()) {
+                    apply_broadcast_input_lock(true);
+                }
+            } else {
+                ShowWindow(window, SW_SHOW);
+                apply_broadcast_input_lock(false);
+            }
+        } else {
+            ShowWindow(window, SW_HIDE);
+            apply_broadcast_input_lock(false);
+        }
+        InvalidateRect(window, nullptr, FALSE);
+        if (g_broadcast_mode.load() ==
+            nstu::control::DemonstrationMode::focus) {
+            restore_control_window_order();
+        }
+        return 0;
+    }
+    if (message == WM_CLOSE) {
+        ShowWindow(window, SW_HIDE);
         return 0;
     }
     if (message == WM_ERASEBKGND) {
         return 1;
     }
     if (message == WM_PAINT) {
+        (void)wparam;
+        (void)lparam;
         PAINTSTRUCT paint{};
         HDC context = BeginPaint(window, &paint);
         RECT client{};
@@ -1865,8 +1987,10 @@ LRESULT CALLBACK broadcast_window_proc(HWND window, UINT message,
             SetStretchBltMode(context, HALFTONE);
             StretchDIBits(
                 context, 0, 0, client.right - client.left,
-                client.bottom - client.top, 0, 0, g_broadcast_image.width,
-                g_broadcast_image.height, g_broadcast_image.pixels.data(),
+                client.bottom - client.top, 0, 0,
+                static_cast<int>(g_broadcast_image.width),
+                static_cast<int>(g_broadcast_image.height),
+                g_broadcast_image.pixels.data(),
                 &information, DIB_RGB_COLORS, SRCCOPY);
         }
         EndPaint(window, &paint);
@@ -1885,6 +2009,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         // ExamHost owns a UI/STA WebView2 controller. Stop it before the
         // message loop exits so no asynchronous browser callback can outlive
         // the agent window or pipe thread.
+        apply_broadcast_input_lock(false);
+        (void)BlockInput(FALSE);
         g_exam_host.stop();
         restore_exam_suppressed_windows();
         stop_remote_control();
@@ -1944,6 +2070,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
             const bool was_connected = g_server_connected.load();
             const bool now_connected = lparam != 0;
             g_server_connected = now_connected;
+            if (!now_connected) {
+                apply_broadcast_input_lock(false);
+                g_viewing_broadcast = false;
+                if (g_broadcast_window != nullptr) {
+                    ShowWindow(g_broadcast_window, SW_HIDE);
+                }
+            }
             if (!now_connected && g_chat_window != nullptr) {
                 // The teacher session dropped. Take the chat window down so it
                 // cannot sit open against a server that is no longer there, and

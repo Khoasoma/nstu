@@ -487,6 +487,9 @@ struct DashboardState {
     std::uint32_t annotation_rgba = 0xe5484dffu;
     int annotation_thickness = 4;
     std::chrono::steady_clock::time_point next_host_snapshot{};
+    nstu::control::DemonstrationMode broadcast_mode =
+        nstu::control::DemonstrationMode::focus;
+    bool broadcast_lock_input = false;
     std::string control_status;
     std::string pairing_status;
     bool pairing_panel_open = false;
@@ -3213,6 +3216,12 @@ void set_room_lock(const std::vector<nstu::server::ClientRecord>& clients,
 
 void toggle_teacher_broadcast(DashboardState& state,
                               nstu::server::ServerControlPlane& control_plane) {
+    if (!nstu::server::is_action_permitted(state.current_role,
+                                           nstu::server::OperatorAction::broadcast)) {
+        state.control_status = tr(state, "Permission denied for broadcast action.",
+                                  "Không có quyền phát màn hình.");
+        return;
+    }
     if (state.broadcast_enabled) {
         std::string error;
         if (control_plane.stop_host_broadcast(&error)) {
@@ -3226,10 +3235,32 @@ void toggle_teacher_broadcast(DashboardState& state,
         }
         return;
     }
+    std::string error;
+    if (!control_plane.set_broadcast_mode(state.broadcast_mode,
+                                         state.broadcast_lock_input,
+                                         &error)) {
+        state.control_status = error;
+        record_operation_failure("Broadcast", "Set mode failed", error);
+        return;
+    }
     state.broadcast_enabled = true;
     state.next_host_snapshot = {};
     state.control_status = tr(state, "Teacher broadcast started.",
                               "Đã bắt đầu phát màn hình giáo viên.");
+}
+
+void update_teacher_broadcast_mode(DashboardState& state,
+                                   nstu::server::ServerControlPlane& control_plane,
+                                   nstu::control::DemonstrationMode mode,
+                                   bool lock_input) {
+    state.broadcast_mode = mode;
+    state.broadcast_lock_input = lock_input;
+    if (state.broadcast_enabled) {
+        std::string error;
+        if (!control_plane.set_broadcast_mode(mode, lock_input, &error)) {
+            record_operation_failure("Broadcast", "Update mode failed", error);
+        }
+    }
 }
 
 void draw_diagnostics_popup(DashboardState& state, float pos_x, float button_width) {
@@ -4230,7 +4261,7 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
     draw_ribbon_divider();
     ImGui::SameLine();
     const char* broadcast_caption = tr(state, "Teacher screen", "Màn hình GV");
-    const float broadcast_width = ribbon_group_width(92.0f, broadcast_caption);
+    const float broadcast_width = ribbon_group_width(190.0f, broadcast_caption);
     if (ImGui::BeginChild("broadcast-commands", {broadcast_width, scaled(74.0f)},
                           false, ImGuiWindowFlags_NoScrollbar)) {
         if (draw_icon_button(
@@ -4238,10 +4269,44 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
                 state.broadcast_enabled ? tr(state, "Stop", "Dừng")
                                         : tr(state, "Broadcast", "Phát"),
                 state.broadcast_enabled ? IconKind::stop : IconKind::broadcast,
-                {broadcast_width, scaled(54.0f)}, state.broadcast_enabled,
+                {scaled(60.0f), scaled(54.0f)}, state.broadcast_enabled,
                 has_clients)) {
             toggle_teacher_broadcast(state, control_plane);
         }
+        ImGui::SameLine();
+        ImGui::BeginGroup();
+        const bool is_follow =
+            (state.broadcast_mode == nstu::control::DemonstrationMode::follow_along);
+        if (ImGui::SmallButton(is_follow ? tr(state, "Follow-Along", "Cửa sổ nổi")
+                                         : tr(state, "Focus Mode", "Toàn màn hình"))) {
+            const auto next_mode = is_follow
+                ? nstu::control::DemonstrationMode::focus
+                : nstu::control::DemonstrationMode::follow_along;
+            update_teacher_broadcast_mode(state, control_plane, next_mode,
+                                          state.broadcast_lock_input);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", is_follow
+                ? tr(state, "Switch to Focus Mode (fullscreen topmost presentation)",
+                            "Chuyển sang Chế độ Tiêu điểm (toàn màn hình)")
+                : tr(state, "Switch to Follow-Along Mode (resizable floating window)",
+                            "Chuyển sang Chế độ Theo dõi (cửa sổ nổi)"));
+        }
+        bool lock_val = state.broadcast_lock_input;
+        ImGui::BeginDisabled(is_follow);
+        if (ImGui::Checkbox(tr(state, "Lock input", "Khóa phím"), &lock_val)) {
+            update_teacher_broadcast_mode(state, control_plane, state.broadcast_mode,
+                                          lock_val);
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", is_follow
+                ? tr(state, "Input locking is disabled in Follow-Along mode",
+                            "Khóa phím bị tắt trong Chế độ Theo dõi")
+                : tr(state, "Lock student mouse and keyboard during Focus broadcast",
+                            "Khóa chuột và bàn phím học sinh khi phát"));
+        }
+        ImGui::EndDisabled();
+        ImGui::EndGroup();
         draw_ribbon_group_caption(broadcast_width, broadcast_caption);
     }
     ImGui::EndChild();
