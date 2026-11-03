@@ -1,6 +1,8 @@
 #include "nstu/client_registry.hpp"
+#include "nstu/operator_role.hpp"
 #include "nstu/snapshot_generation_gate.hpp"
 #include "nstu/stream_rearm_watchdog.hpp"
+#include "nstu/support_bundle.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -297,6 +299,112 @@ int main() {
         assert(watchdog.watched_client_id() == 0);
         assert(watchdog.update(9, 500, base + 103s, stall) ==
                StreamRearm::none);  // seeds, no re-arm
+    }
+
+    {
+        // Support bundle role and consent decision evaluation
+        using nstu::server::OperatorRole;
+        using nstu::server::OperatorAction;
+        using nstu::server::is_action_permitted;
+        using nstu::support::SupportBundleConsentDecision;
+
+        // Role action permissions
+        assert(is_action_permitted(OperatorRole::technician, OperatorAction::view_fleet_health));
+        assert(is_action_permitted(OperatorRole::developer, OperatorAction::export_telemetry_report));
+        assert(!is_action_permitted(OperatorRole::teacher, OperatorAction::view_fleet_health));
+        assert(!is_action_permitted(OperatorRole::technician, OperatorAction::export_telemetry_report));
+        assert(!is_action_permitted(OperatorRole::teacher, OperatorAction::export_telemetry_report));
+
+        // Support bundle consent gating
+        assert(nstu::support::evaluate_support_bundle_export(
+                   static_cast<int>(OperatorRole::teacher), false) ==
+               SupportBundleConsentDecision::denied_no_consent);
+        assert(nstu::support::evaluate_support_bundle_export(
+                   static_cast<int>(OperatorRole::teacher), true) ==
+               SupportBundleConsentDecision::denied_insufficient_role);
+        assert(nstu::support::evaluate_support_bundle_export(
+                   static_cast<int>(OperatorRole::technician), true) ==
+               SupportBundleConsentDecision::permitted);
+        assert(nstu::support::evaluate_support_bundle_export(
+                   static_cast<int>(OperatorRole::developer), true) ==
+               SupportBundleConsentDecision::permitted);
+
+        // Fleet inventory summary aggregation into support bundle
+        nstu::server::ClientRegistry reg;
+        nstu::server::ClientRecord c1{};
+        c1.id = 1;
+        c1.hostname = "PC-01";
+        c1.address = "192.168.1.10";
+        c1.status = nstu::server::ClientStatus::online;
+        c1.agent_connected = true;
+        reg.upsert(c1);
+
+        nstu::server::ClientRecord c2{};
+        c2.id = 2;
+        c2.hostname = "PC-02";
+        c2.address = "192.168.1.11";
+        c2.status = nstu::server::ClientStatus::online;
+        c2.agent_connected = false;
+        reg.upsert(c2);
+
+        nstu::server::ClientRecord c3{};
+        c3.id = 3;
+        c3.hostname = "PC-03";
+        c3.address = "192.168.1.12";
+        c3.status = nstu::server::ClientStatus::offline;
+        c3.agent_connected = false;
+        reg.upsert(c3);
+
+        const auto snapshot = reg.snapshot();
+        assert(snapshot.size() == 3);
+
+        std::size_t online_count = 0;
+        std::size_t agent_count = 0;
+        for (const auto& c : snapshot) {
+            if (c.status != nstu::server::ClientStatus::offline) {
+                online_count++;
+                if (c.agent_connected) {
+                    agent_count++;
+                }
+            }
+        }
+        assert(online_count == 2);
+        assert(agent_count == 1);
+
+        nstu::support::SystemDiagnosticSummary summary{
+            .application = "NSTU Server",
+            .version = "0.1.0",
+            .build_channel = "Release",
+            .os_version = "Windows",
+            .operator_role = "Technician",
+            .graphics_mode = "Direct3D 11",
+            .network_adapter = "",
+            .total_clients_known = static_cast<std::uint32_t>(snapshot.size()),
+            .active_clients_count = static_cast<std::uint32_t>(online_count),
+            .stale_clients_count = 0,
+            .agent_connected_count = static_cast<std::uint32_t>(agent_count),
+            .uwf_protected_count = 0,
+        };
+
+        std::deque<nstu::support::DiagnosticEvent> events;
+        events.push_back({
+            .timestamp = "12:00:00",
+            .severity = nstu::support::Severity::information,
+            .component = "Registry",
+            .detail = "Clients snapshot synchronized",
+        });
+
+        const auto bundle = nstu::support::create_sanitized_bundle(summary, events);
+        assert(bundle.canaries_verified);
+        assert(bundle.summary.total_clients_known == 3);
+        assert(bundle.summary.active_clients_count == 2);
+        assert(bundle.summary.agent_connected_count == 1);
+
+        const auto md = nstu::support::build_support_bundle_markdown(bundle);
+        assert(md.find("Total Known Clients | 3") != std::string::npos);
+        assert(md.find("Active Clients | 2") != std::string::npos);
+        assert(md.find("Agent Connected Clients | 1") != std::string::npos);
+        assert(nstu::support::verify_bundle_canaries(md));
     }
     return 0;
 }

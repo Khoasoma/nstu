@@ -15,6 +15,7 @@
 #include "nstu/classroom_roster.hpp"
 #include "nstu/file_distribution.hpp"
 #include "nstu/operator_role.hpp"
+#include "nstu/support_bundle.hpp"
 #include "nstu/url_validation.hpp"
 
 #include <d3d11.h>
@@ -496,6 +497,9 @@ struct DashboardState {
     std::string startup_error;
     std::string telemetry_report_preview;
     bool telemetry_report_requested = false;
+    bool support_bundle_modal_open = false;
+    bool support_bundle_consented = false;
+    std::string support_bundle_preview;
     std::array<char, 96> client_filter{};
     std::array<char, 512> chat_input{};
     std::array<char, nstu::exam::kMaximumExamControlPathBytes + 1>
@@ -3405,6 +3409,107 @@ void draw_telemetry_report_popup(DashboardState& state,
     ImGui::EndPopup();
 }
 
+void draw_support_bundle_modal(DashboardState& state) {
+    if (state.support_bundle_modal_open) {
+        state.support_bundle_modal_open = false;
+        ImGui::OpenPopup("support-bundle-modal");
+    }
+    const ImVec2 viewport_size = ImGui::GetMainViewport()->WorkSize;
+    ImGui::SetNextWindowSize(
+        {std::min(scaled(760.0f), viewport_size.x - scaled(32.0f)),
+         std::min(scaled(620.0f), viewport_size.y - scaled(32.0f))},
+        ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("support-bundle-modal", nullptr,
+                                ImGuiWindowFlags_NoResize)) {
+        return;
+    }
+    ImGui::TextUnformatted(tr(state, "Export Sanitized Support Bundle",
+                              "Xuất gói hỗ trợ đã lọc"));
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextWrapped("%s", tr(
+        state,
+        "This support bundle contains sanitized system and fleet diagnostics for troubleshooting. "
+        "Passwords, cryptographic keys, enrollment secrets, student names, and exam responses are strictly excluded.",
+        "Gói hỗ trợ này chứa thông tin chẩn đoán hệ thống đã được lọc để khắc phục sự cố. "
+        "Mật khẩu, khóa mã hóa, bí mật ghép nối, tên học sinh và bài thi được loại trừ tuyệt đối."));
+    ImGui::Spacing();
+
+    ImGui::Checkbox(tr(state, "I consent to exporting this sanitized support bundle.",
+                              "Tôi đồng ý xuất gói hỗ trợ đã lọc này."),
+                    &state.support_bundle_consented);
+    ImGui::Spacing();
+
+    if (ImGui::BeginChild("support-bundle-preview", {0.0f, scaled(-52.0f)}, true,
+                          ImGuiWindowFlags_HorizontalScrollbar)) {
+        ImGui::TextUnformatted(state.support_bundle_preview.c_str());
+    }
+    ImGui::EndChild();
+
+    const auto consent_decision = nstu::support::evaluate_support_bundle_export(
+        static_cast<int>(state.current_role), state.support_bundle_consented);
+    const bool can_export = (consent_decision == nstu::support::SupportBundleConsentDecision::permitted);
+
+    if (!can_export) {
+        ImGui::BeginDisabled();
+    }
+    ImGui::BeginGroup();
+    if (ImGui::Button(tr(state, "Copy Bundle Markdown", "Sao chép Markdown"),
+                      {scaled(170.0f), 0.0f})) {
+        ImGui::SetClipboardText(state.support_bundle_preview.c_str());
+        state.control_status = tr(state, "Support bundle copied to clipboard.",
+                                  "Đã sao chép gói hỗ trợ vào bộ nhớ tạm.");
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Save to Documents", "Lưu vào Documents"),
+                      {scaled(160.0f), 0.0f})) {
+        std::string docs_path;
+        char profile_buf[MAX_PATH]{};
+        const DWORD env_len = GetEnvironmentVariableA("USERPROFILE", profile_buf, MAX_PATH);
+        if (env_len > 0 && env_len < MAX_PATH) {
+            docs_path = std::string(profile_buf) + "\\Documents";
+        } else {
+            docs_path = ".";
+        }
+        SYSTEMTIME st{};
+        GetLocalTime(&st);
+        char filename[128]{};
+        sprintf_s(filename, "\\NSTU_Support_Bundle_%04u%02u%02u_%02u%02u%02u.md",
+                  st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        const std::string full_file_path = docs_path + filename;
+        std::ofstream out(full_file_path);
+        if (out.is_open()) {
+            out << state.support_bundle_preview;
+            out.close();
+            state.control_status = tr(state, "Support bundle saved to Documents.",
+                                      "Đã lưu gói hỗ trợ vào Documents.");
+            ImGui::CloseCurrentPopup();
+        } else {
+            state.control_status = tr(state, "Failed to write support bundle file.",
+                                      "Không thể ghi tệp gói hỗ trợ.");
+        }
+    }
+    ImGui::EndGroup();
+    if (!can_export) {
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (!state.support_bundle_consented) {
+                ImGui::SetTooltip("%s", tr(state, "Consent required before export.",
+                                                  "Yêu cầu đồng ý trước khi xuất."));
+            } else {
+                ImGui::SetTooltip("%s", tr(state, "Technician or Developer role required.",
+                                                  "Yêu cầu quyền Kỹ thuật viên hoặc Nhà phát triển."));
+            }
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(tr(state, "Close", "Đóng"), {scaled(80.0f), 0.0f})) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 // The computer name is the only label a teacher reliably recognises in a
 // selection menu. The beacon sanitizes it again before it reaches the wire.
 std::string local_server_name() {
@@ -4829,6 +4934,48 @@ void draw_technician_fleet_health(
     draw_telemetry_card(tr(state, "Average Network Latency", "Độ trễ mạng trung bình"), avg_lat_buf, card_width);
 
     ImGui::Spacing();
+    if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health)) {
+        if (ImGui::Button(tr(state, "Export Support Bundle...", "Xuất gói hỗ trợ..."),
+                          {scaled(180.0f), scaled(26.0f)})) {
+            const auto now_time = std::chrono::steady_clock::now();
+            std::size_t stale_count = 0;
+            for (const auto& client : clients) {
+                if (client.status != nstu::server::ClientStatus::offline &&
+                    nstu::server::is_client_stale(client, now_time)) {
+                    stale_count++;
+                }
+            }
+            nstu::support::SystemDiagnosticSummary summary{
+                .application = "NSTU Server",
+                .version = NSTU_PROJECT_VERSION,
+                .build_channel = NSTU_BUILD_CHANNEL,
+                .os_version = "Windows",
+                .operator_role = to_string(state.current_role),
+                .graphics_mode = g_graphics_report.device_mode,
+                .network_adapter = "",
+                .total_clients_known = static_cast<std::uint32_t>(clients.size()),
+                .active_clients_count = static_cast<std::uint32_t>(online_count),
+                .stale_clients_count = static_cast<std::uint32_t>(stale_count),
+                .agent_connected_count = static_cast<std::uint32_t>(agent_active_count),
+                .uwf_protected_count = static_cast<std::uint32_t>(uwf_proven_count),
+            };
+            std::deque<nstu::support::DiagnosticEvent> events;
+            for (const auto& diag : g_diagnostics) {
+                events.push_back({
+                    .timestamp = diag.timestamp,
+                    .severity = (diag.severity == "error" ? nstu::support::Severity::error :
+                                 (diag.severity == "warning" ? nstu::support::Severity::warning :
+                                  nstu::support::Severity::information)),
+                    .component = diag.source,
+                    .detail = diag.message,
+                });
+            }
+            const auto bundle = nstu::support::create_sanitized_bundle(summary, events);
+            state.support_bundle_preview = nstu::support::build_support_bundle_markdown(bundle);
+            state.support_bundle_consented = false;
+            state.support_bundle_modal_open = true;
+        }
+    }
     ImGui::Separator();
     ImGui::Spacing();
 
@@ -5044,6 +5191,7 @@ void draw_dashboard_shell(
     }
     draw_menu_strip(state, !clients.empty(), control_plane);
     draw_telemetry_report_popup(state, clients.size());
+    draw_support_bundle_modal(state);
     draw_bulk_action_confirmation_popup(clients, state, control_plane);
     draw_ribbon(clients, selected_client, state, control_plane);
     draw_workspace_toolbar(clients, state);
