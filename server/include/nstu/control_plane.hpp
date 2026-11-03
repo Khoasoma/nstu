@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nstu/client_registry.hpp"
+#include "nstu/control_messages.hpp"
 #include "nstu/exam_auth.hpp"
 #include "nstu/exam_control.hpp"
 #include "nstu/exam_sync.hpp"
@@ -155,6 +156,10 @@ public:
     [[nodiscard]] bool broadcast_host_snapshot(
         const control::SnapshotFrame& frame,
         std::string* error = nullptr);
+    [[nodiscard]] bool set_broadcast_mode(
+        control::DemonstrationMode mode, bool lock_input,
+        std::string* error = nullptr);
+    [[nodiscard]] control::BroadcastModeMessage broadcast_mode() const;
     [[nodiscard]] bool stop_host_broadcast(std::string* error = nullptr);
     [[nodiscard]] bool request_keyframe(std::uint64_t client_id,
                                         std::string* error = nullptr);

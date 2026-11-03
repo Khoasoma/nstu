@@ -284,6 +284,41 @@ int main() {
     assert(nstu::control::decode_snapshot_frame(host_snapshot->payload)
                .has_value());
 
+    // Demonstration mode state query, bounds validation, broadcast, and cleanup
+    assert(control_plane.broadcast_mode().mode ==
+           nstu::control::DemonstrationMode::focus);
+    assert(!control_plane.broadcast_mode().lock_input);
+
+    // Invalid demonstration mode is rejected
+    assert(!control_plane.set_broadcast_mode(
+        static_cast<nstu::control::DemonstrationMode>(99), false, &error));
+
+    // Valid follow_along demonstration mode with student input lock
+    assert(control_plane.set_broadcast_mode(
+        nstu::control::DemonstrationMode::follow_along, true, &error));
+    assert(control_plane.broadcast_mode().mode ==
+           nstu::control::DemonstrationMode::follow_along);
+    assert(control_plane.broadcast_mode().lock_input);
+
+    const auto mode_command = channel.receive(&error);
+    assert(mode_command.has_value());
+    assert(mode_command->envelope.type ==
+           nstu::protocol::CommandType::host_broadcast_mode);
+    const auto decoded_mode =
+        nstu::control::decode_broadcast_mode(mode_command->payload);
+    assert(decoded_mode.has_value());
+    assert(decoded_mode->mode == nstu::control::DemonstrationMode::follow_along);
+    assert(decoded_mode->lock_input);
+
+    // Stopping broadcast dispatches host_broadcast_stop and clears lock_input
+    assert(control_plane.stop_host_broadcast(&error));
+    assert(!control_plane.broadcast_mode().lock_input);
+    const auto stop_command = channel.receive(&error);
+    assert(stop_command.has_value());
+    assert(stop_command->envelope.type ==
+           nstu::protocol::CommandType::host_broadcast_stop);
+    assert(stop_command->payload.empty());
+
     status.locked = true;
     const auto locked_payload = nstu::control::encode_status_report(status);
     assert(channel.send(nstu::protocol::CommandType::status_report, 5,

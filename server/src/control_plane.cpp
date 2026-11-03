@@ -675,6 +675,10 @@ public:
             std::scoped_lock lock(exam_contexts_mutex_);
             active_exam_contexts_.clear();
         }
+        {
+            std::scoped_lock lock(broadcast_mode_mutex_);
+            broadcast_mode_ = control::BroadcastModeMessage{};
+        }
         enrollment_authority_.reset();
         {
             std::scoped_lock queue_lock(telemetry_queue_mutex_);
@@ -2634,6 +2638,43 @@ public:
         }
         return counts;
     }
+    bool set_broadcast_mode(control::DemonstrationMode mode, bool lock_input,
+                            std::string* error) {
+        if (static_cast<std::uint8_t>(mode) >
+            static_cast<std::uint8_t>(control::DemonstrationMode::follow_along)) {
+            set_error(error, "invalid demonstration mode");
+            return false;
+        }
+        const control::BroadcastModeMessage msg{
+            .mode = mode,
+            .lock_input = lock_input,
+        };
+        const auto payload = control::encode_broadcast_mode(msg);
+        if (payload.empty()) {
+            set_error(error, "failed to encode demonstration mode payload");
+            return false;
+        }
+        {
+            std::scoped_lock lock(broadcast_mode_mutex_);
+            broadcast_mode_ = msg;
+        }
+        return broadcast_command(protocol::CommandType::host_broadcast_mode,
+                                 payload, error);
+    }
+    control::BroadcastModeMessage broadcast_mode() const {
+        std::scoped_lock lock(broadcast_mode_mutex_);
+        return broadcast_mode_;
+    }
+    bool stop_host_broadcast(std::string* error) {
+        {
+            std::scoped_lock lock(broadcast_mode_mutex_);
+            broadcast_mode_.lock_input = false;
+        }
+        return broadcast_command(
+            protocol::CommandType::host_broadcast_stop, {}, error);
+    }
+    mutable std::mutex broadcast_mode_mutex_;
+    control::BroadcastModeMessage broadcast_mode_{};
     mutable std::mutex states_mutex_;
     mutable std::mutex exam_contexts_mutex_;
     std::unordered_map<net::ConnectionId,
@@ -3152,9 +3193,18 @@ bool ServerControlPlane::broadcast_host_snapshot(
                                     payload, error);
 }
 
+bool ServerControlPlane::set_broadcast_mode(control::DemonstrationMode mode,
+                                            bool lock_input,
+                                            std::string* error) {
+    return impl_->set_broadcast_mode(mode, lock_input, error);
+}
+
+control::BroadcastModeMessage ServerControlPlane::broadcast_mode() const {
+    return impl_->broadcast_mode();
+}
+
 bool ServerControlPlane::stop_host_broadcast(std::string* error) {
-    return impl_->broadcast_command(
-        protocol::CommandType::host_broadcast_stop, {}, error);
+    return impl_->stop_host_broadcast(error);
 }
 
 bool ServerControlPlane::request_keyframe(std::uint64_t client_id,
