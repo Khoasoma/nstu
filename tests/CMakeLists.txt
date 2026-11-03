@@ -116,6 +116,12 @@ nstu_enable_warnings(nstu_room_profile_tests)
 nstu_enable_test_assertions(nstu_room_profile_tests)
 add_test(NAME nstu.room_profile COMMAND nstu_room_profile_tests)
 
+add_executable(nstu_update_manifest_tests update_manifest_tests.cpp)
+target_link_libraries(nstu_update_manifest_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_update_manifest_tests)
+nstu_enable_test_assertions(nstu_update_manifest_tests)
+add_test(NAME nstu.update_manifest COMMAND nstu_update_manifest_tests)
+
 add_executable(nstu_rate_limiter_tests rate_limiter_tests.cpp)
 target_link_libraries(nstu_rate_limiter_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_rate_limiter_tests)
