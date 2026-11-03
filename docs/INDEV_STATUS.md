@@ -125,6 +125,13 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Client Receiver Engine & Safe Staging** | `client/service/main.cpp` handling `file_dist_start`, `file_dist_chunk`, `file_dist_finish`, `file_dist_cancel`, staging to `%PUBLIC%\Documents\NSTU_Received` via atomic `.nstu_part` streaming, full SHA-256 verification before rename commit, cleanup on hash mismatch, cancellation, and disconnect, exam lockdown rejection, and strict zero auto-execution | **Merged to main** (`4ac60be`) |
 | **Teacher Console UI & Modal Validation** | `server/app/main.cpp` single-client and toolbar bulk "Send File" triggers, real-time modal path existence, regular file, 64 MiB limit, and safe filename validation, and `OperatorAction::distribute_file` permission enforcement | **Merged to main** (`4ac60be`) |
 
+## Integrated Demonstration Modes (Roadmap P2.3 / Tooling)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Wire Protocol Commands & Domain Types** | `CommandType::host_broadcast_mode = 68` protocol command; `DemonstrationMode` enum class (`focus = 0`, `follow_along = 1`), and `BroadcastModeMessage` struct (`mode`, `lock_input`) | **Merged to main** (`0f7210c`) |
+| **Fail-Closed Binary Codecs** | `encode_broadcast_mode` and `decode_broadcast_mode` enforcing strict 4-byte buffer size, LE version 1 negotiation, enum bounds checks, boolean bounds checks, and instant rejection of trailing bytes | **Merged to main** (`0f7210c`) |
+| **Isolation & Assertion Baseline** | Zero assertion removals across all 67 test suites; snapshot frame codecs and low-bandwidth snapshot wall monitoring completely unaffected | **Merged to main** (`0f7210c`) |
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
 
