@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 70/70 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 71/71 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -171,6 +171,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | Work Area | Scope & Implementation | Status |
 |---|---|---|
 | **Signed Update Manifest & Asymmetric Verification** | `common/include/nstu/update_manifest.hpp` and `common/src/update_manifest.cpp` implementing update manifest data model, asymmetric ECDSA P-256 digital signature signing & verification via Windows BCrypt (`BCRYPT_ECDSA_P256_ALGORITHM`) with client public trust root verification, canonical signing payload binding `rollout_percentage`, anti-downgrade and equal-version (`already_up_to_date`) engine, fail-closed JSON parser, and deterministic canary rollout bucketing engine in `tests/update_manifest_tests.cpp` | **Merged to main** (`7a8db01`) |
+| **Update Staging & Rollback State Machine** | `common/include/nstu/update_staging.hpp` and `common/src/update_staging.cpp` implementing 11-stage client update lifecycle (`UpdateStagingController`), atomic chunk streaming to `.part` files with incremental BCrypt SHA-256 computation, fail-closed deletion upon mismatch/overflow/truncation, transactional active directory backup, atomic rollback restoration upon validation failure, immediate disk space reclamation, and persistent `staging_record.json` state recording in `tests/update_staging_tests.cpp` | **Merged to main** (`bd8749d`) |
 
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
