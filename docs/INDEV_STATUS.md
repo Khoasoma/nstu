@@ -148,6 +148,14 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **UWF Overlay Reporting Codec** | `nstu::uwf::OverlayReport` 23-byte binary codec with bounds validation, WMI signed VT_I4 limits, and pending-reboot threshold handling | **Merged to main** (`471553e`) |
 | **Servicing & Decommissioning** | `set_uwf_servicing` for Windows Update maintenance, `disable_uwf` for controlled decommissioning, and `add_uwf_defender_exclusions` | **Merged to main** (`471553e`) |
 
+## Integrated Fleet Health & Telemetry Diagnostics (Roadmap P3.1 / FLEET-01 & FLEET-02)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Stale-Data Detection & Age Calculation** | Pure `is_client_stale`, `client_age_seconds`, and `format_relative_age` in `server/include/nstu/classroom_roster.hpp` and `server/src/classroom_roster.cpp` enforcing monotonic delta evaluation, uninitialized sentinel handling, and negative delta clamping without intrusive polling | **Merged to main** (`f22b3f4`) |
+| **Technician Fleet Table Telemetry & Freshness** | `server/app/main.cpp` expanded `fleet-health-table` (9 columns) displaying formatted relative age, amber `[Stale]` warning badge with hover tooltip for stale online clients, live activity states (`Streaming`, `Capturing`, `Viewing Screen`, `Idle`), and enriched delivery/WoL/MAC tooltips | **Merged to main** (`f22b3f4`) |
+| **Roster Diagnostics Test Suite** | `tests/classroom_roster_tests.cpp` `test_stale_data_detection()` covering fresh reporting, 30s threshold boundaries, 45s stale state, minute/hour formatting, offline client exclusion, uninitialized timestamp sentinel, and EN/VI localization | **Merged to main** (`f22b3f4`) |
+
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
 | Task | Title | Key Objective | Status |
