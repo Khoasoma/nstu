@@ -21,7 +21,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 
 ## Verification Baseline
 
-- **C++ Tests**: 64/64 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
+- **C++ Tests**: 65/65 unit and integration test executables pass cleanly under MSVC and MinGW/UCRT64.
 - **Node.js Web Tests**: 63 browser state recovery and submission tests pass.
 - **Local Verification Gate**: `./scripts/verify-gate.sh` (fast gate) and `./scripts/verify-gate.sh --strict` (Release with `-Werror`) pass with 0 warnings.
 - **Continuous Integration**: 4/4 Windows jobs on feature branches and 5/5 jobs on `main` passing clean.
@@ -85,6 +85,15 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Service Named-Pipe Relay & Defense-in-Depth** | Inbound `launch_url = 60` handling in `nstu-service`, dropping command if `g_exam_lockdown_controller.is_armed()`, and forwarding validated payload via `AgentMessageType::launch_url = 40` across named pipe | **Merged to main** (`3328d95`) |
 | **Student Agent Execution & Kiosk Containment** | `nstu-agent` URL launching via `ShellExecuteW` on validated URLs in interactive desktop session, strictly dropping launch and enforcing foreground containment when `exam_host_engaged() == true`, and recording in chat history | **Merged to main** (`3328d95`) |
 | **Teacher Console UI & Validation UX** | Dear ImGui "Launch Web" bulk toolbar button, single-client action in selected client view, and modal confirmation popup featuring real-time URL validation, LMS/Docs presets, and execution guards | **Merged to main** (`3328d95`) |
+
+## Integrated Power Actions: Reboot & Shutdown (Roadmap P2.3 / Core)
+
+| Work Area | Scope & Implementation | Status |
+|---|---|---|
+| **Wire Protocol & 2-Byte Codecs** | Protocol command `power_action = 61` with fixed 2-byte binary codecs (`encode_power_action` / `decode_power_action`), validating action kind (`reboot = 1`, `shutdown = 2`) and flag bit 0 (`force`), rejecting reserved bits 1–7 | **Merged to main** (`9750b37`) |
+| **Server-Side Authorization & Gating** | Added `OperatorAction::shutdown_client = 11` to role matrix; `ServerControlPlane::power_action` enforcing Teacher disarmed from disruptive operations, Technician & Developer authorization, and `force == true` requiring elevated role | **Merged to main** (`9750b37`) |
+| **Active Exam Containment Guard** | `ServerControlPlane::power_action` strictly checking `exam_active(client_id)` to refuse reboots or shutdowns on clients with ongoing exams, with remote session audit logging | **Merged to main** (`9750b37`) |
+| **Classroom Roster Bulk Actions** | `BulkActionKind::reboot = 5` and `BulkActionKind::shutdown = 6` in `execute_bulk_action`, skipping offline clients, with bilingual EN/VI confirmation warnings ("Any unsaved work may be lost." / "Các thay đổi chưa lưu có thể bị mất.") and execution status formatting | **Merged to main** (`9750b37`) |
 
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
