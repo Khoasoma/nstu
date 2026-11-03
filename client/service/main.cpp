@@ -1929,6 +1929,13 @@ void handle_server_command(
                  command.payload});
         }
         break;
+    case nstu::protocol::CommandType::host_broadcast_mode:
+        if (nstu::control::decode_broadcast_mode(command.payload)) {
+            queue_agent_message(
+                {nstu::client::AgentMessageType::host_broadcast_mode,
+                 command.payload});
+        }
+        break;
     case nstu::protocol::CommandType::host_broadcast_stop:
         queue_agent_message(
             {nstu::client::AgentMessageType::host_broadcast_stop, {}});

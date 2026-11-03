@@ -86,6 +86,9 @@ enum class AgentMessageType : std::uint16_t {
     // Launch validated website URL in interactive session.
     // service -> agent: launch validated URL.
     launch_url = 40,
+    // Teacher demonstration mode configuration (Focus vs Follow-Along, input lock).
+    // service -> agent: carries encoded BroadcastModeMessage payload.
+    host_broadcast_mode = 41,
 };
 
 struct AgentMessage {

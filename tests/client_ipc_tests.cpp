@@ -225,9 +225,9 @@ int main() {
         assert(!valid_wire.empty());
         assert(nstu::client::decode_agent_message(valid_wire).has_value());
 
-        // Type 41 (just above bound 40) must be rejected
+        // Type 42 (just above bound 41) must be rejected
         auto wire38 = valid_wire;
-        wire38[6] = std::byte{41};
+        wire38[6] = std::byte{42};
         wire38[7] = std::byte{0};
         assert(!nstu::client::decode_agent_message(wire38).has_value());
 
@@ -436,6 +436,45 @@ int main() {
         const auto decoded_launch = nstu::control::decode_launch_url(pending[0].payload);
         assert(decoded_launch.has_value());
         assert(decoded_launch->url == launch.url);
+    }
+
+    {
+        // Host broadcast mode IPC encode/decode and queue test
+        using nstu::client::AgentMessage;
+        using nstu::client::AgentMessageType;
+        nstu::client::AgentServiceQueue queue(10);
+
+        nstu::control::BroadcastModeMessage mode_msg{
+            .mode = nstu::control::DemonstrationMode::follow_along,
+            .lock_input = true,
+        };
+        const auto payload = nstu::control::encode_broadcast_mode(mode_msg);
+        assert(!payload.empty());
+        assert(payload.size() == 4);
+
+        // Test encode_agent_message and decode_agent_message round-trip
+        const AgentMessage original_msg{
+            .type = AgentMessageType::host_broadcast_mode,
+            .payload = payload,
+        };
+        const auto wire = nstu::client::encode_agent_message(original_msg);
+        assert(!wire.empty());
+
+        const auto decoded_wire = nstu::client::decode_agent_message(wire);
+        assert(decoded_wire.has_value());
+        assert(decoded_wire->type == AgentMessageType::host_broadcast_mode);
+        assert(decoded_wire->payload == payload);
+
+        // Test queue delivery
+        queue.push(*decoded_wire);
+        auto pending = queue.take_pending();
+        assert(pending.size() == 1);
+        assert(pending[0].type == AgentMessageType::host_broadcast_mode);
+
+        const auto decoded_mode = nstu::control::decode_broadcast_mode(pending[0].payload);
+        assert(decoded_mode.has_value());
+        assert(decoded_mode->mode == nstu::control::DemonstrationMode::follow_along);
+        assert(decoded_mode->lock_input);
     }
 
     return 0;
