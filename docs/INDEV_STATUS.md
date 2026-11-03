@@ -160,6 +160,7 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Server Registry & Ingestion Engine** | `ClientRecord` extension (`client_version`, `agent_connected`), `ClientRegistry::set_fleet_metadata` thread-safe mutation, non-clobbering `upsert` preservation, and fail-closed `control_plane` command dispatch for `CommandType::fleet_metadata` | **Merged to main** (`1336324`) |
 | **Technician UI Version & Agent Surfacing** | `server/app/main.cpp` enriched Computer name tooltip with version and agent status, amber `[No Agent]` warning badge in Status column with explanatory tooltip, and aggregate agent active metric in summary card | **Merged to main** (`1336324`) |
 | **Server State Registry Test Suite** | `tests/server_state_tests.cpp` test coverage for `set_fleet_metadata` defaults, successful updates, non-clobbering `upsert` persistence, empty version preservation on disconnect, and unknown client rejection | **Merged to main** (`1336324`) |
+| **Client Service Metadata & Agent State Sync** | `client/service/main.cpp` dispatching `CommandType::fleet_metadata` on authenticated connection setup and on student agent named-pipe connect/disconnect edges; `tests/client_control_tests.cpp` end-to-end integration test | **Merged to main** (`360ce50`) |
 
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
