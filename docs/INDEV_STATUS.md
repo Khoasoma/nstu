@@ -134,6 +134,8 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Isolation & Assertion Baseline** | Zero assertion removals across all 67 test suites; snapshot frame codecs and low-bandwidth snapshot wall monitoring completely unaffected | **Merged to main** (`0f7210c`) |
 | **Server Control Plane Demonstration Modes** | `ServerControlPlane::set_broadcast_mode` and `broadcast_mode` managing active demonstration modes (`focus` vs `follow_along`), enum bounds checking, and broadcasting `host_broadcast_mode` | **Merged to main** (`bf5a254`) |
 | **Input Lock & Resource Cleanup Guarantee** | `stop_host_broadcast` unconditionally clearing `lock_input = false` on control plane and dispatching `host_broadcast_stop`; `stop()` resetting demonstration state | **Merged to main** (`bf5a254`) |
+| **Client Service Broadcast Mode Relay** | `client/service/main.cpp` handling `protocol::CommandType::host_broadcast_mode`, verifying payload fail-closed via `control::decode_broadcast_mode`, and relaying to local agent queue | **Merged to main** (`7e0d884`) |
+| **Agent IPC Channel & Type Validation** | `client/include/nstu/agent_protocol.hpp` declaring `AgentMessageType::host_broadcast_mode = 41`, `client/src/agent_protocol.cpp` updating valid type bounds, and `tests/client_ipc_tests.cpp` validating serialization, deserialization, queue transport, and out-of-bounds rejection | **Merged to main** (`7e0d884`) |
 
 ## Integrated Fleet Reboot-to-Restore & Diagnostics (Stream S5)
 
