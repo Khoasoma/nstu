@@ -385,6 +385,79 @@ void test_help_request_roster_and_codecs() {
     assert(status_vi.find("5 thành công") != std::string::npos);
 }
 
+void test_bulk_action_distribute_file_formatters_and_execution() {
+    using namespace nstu::server;
+
+    // 1. Title formatters
+    assert(format_bulk_confirmation_title(BulkActionKind::distribute_file, false) == "Confirm Bulk File Distribution");
+    assert(format_bulk_confirmation_title(BulkActionKind::distribute_file, true) == "Xác nhận phát tệp hàng loạt");
+
+    // 2. Confirmation message formatters
+    const std::string msg_en = format_bulk_confirmation_message(
+        BulkActionKind::distribute_file, 4, "Lab 204", false);
+    assert(msg_en.find("DISTRIBUTE") != std::string::npos);
+    assert(msg_en.find("4") != std::string::npos);
+    assert(msg_en.find("Lab 204") != std::string::npos);
+
+    const std::string msg_vi = format_bulk_confirmation_message(
+        BulkActionKind::distribute_file, 4, "Phòng 204", true);
+    assert(msg_vi.find("PHÁT TỆP") != std::string::npos);
+    assert(msg_vi.find("4") != std::string::npos);
+    assert(msg_vi.find("Phòng 204") != std::string::npos);
+
+    // 3. Result status formatters
+    BulkActionResult res{.attempted = 4, .succeeded = 3, .failed = 1, .error_messages = {}};
+    const std::string status_en = format_bulk_action_result_status(
+        BulkActionKind::distribute_file, res, false);
+    assert(status_en.find("file distribution") != std::string::npos);
+    assert(status_en.find("3 succeeded") != std::string::npos);
+    assert(status_en.find("1 failed") != std::string::npos);
+
+    const std::string status_vi = format_bulk_action_result_status(
+        BulkActionKind::distribute_file, res, true);
+    assert(status_vi.find("phát tệp") != std::string::npos);
+    assert(status_vi.find("3 thành công") != std::string::npos);
+    assert(status_vi.find("1 thất bại") != std::string::npos);
+
+    // 4. Control Plane File Distribution guards
+    nstu::security::KeyStore key_store;
+    ClientRegistry registry;
+    ServerControlPlane control_plane(registry, key_store);
+
+    // 4a. Client not found in registry
+    {
+        std::string err;
+        assert(!control_plane.distribute_file(99999, "non_existent.txt", OperatorRole::teacher, &err));
+        assert(err.find("not found") != std::string::npos);
+    }
+
+    // 4b. Offline client in registry
+    {
+        ClientRecord offline_client;
+        offline_client.id = 555;
+        offline_client.hostname = "PC-OFFLINE";
+        offline_client.status = ClientStatus::offline;
+        registry.upsert(offline_client);
+
+        std::string err;
+        assert(!control_plane.distribute_file(555, "non_existent.txt", OperatorRole::teacher, &err));
+        assert(err.find("offline") != std::string::npos);
+    }
+
+    // 4c. Online client with non-existent file
+    {
+        ClientRecord online_client;
+        online_client.id = 777;
+        online_client.hostname = "PC-ONLINE";
+        online_client.status = ClientStatus::online;
+        registry.upsert(online_client);
+
+        std::string err;
+        assert(!control_plane.distribute_file(777, "completely_nonexistent_file_xyz123.bin", OperatorRole::teacher, &err));
+        assert(err.find("File does not exist") != std::string::npos);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -396,6 +469,7 @@ int main() {
     test_format_bulk_messages();
     test_scalability_and_responsiveness_benchmarks();
     test_help_request_roster_and_codecs();
+    test_bulk_action_distribute_file_formatters_and_execution();
     std::cout << "All classroom roster tests passed successfully.\n";
     return 0;
 }

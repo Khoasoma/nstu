@@ -25,6 +25,7 @@ enum class OperatorAction : int {
     manage_settings = 10,
     shutdown_client = 11,
     wake_on_lan = 12,
+    distribute_file = 13,
 };
 
 [[nodiscard]] bool is_action_permitted(

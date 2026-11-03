@@ -14,6 +14,7 @@
 #include "nstu/pairing.hpp"
 #include "nstu/url_validation.hpp"
 #include "nstu/wake_on_lan.hpp"
+#include "nstu/file_distribution.hpp"
 
 #include <windows.h>
 
@@ -23,6 +24,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <mutex>
@@ -2890,6 +2892,174 @@ bool ServerControlPlane::wake_client(std::uint64_t client_id,
                                 dispatched ? it->mac_address
                                            : (error != nullptr ? *error : "broadcast failed"));
     return dispatched;
+}
+
+bool ServerControlPlane::distribute_file(std::uint64_t client_id,
+                                         const std::filesystem::path& file_path,
+                                         OperatorRole caller_role,
+                                         std::string* error) {
+    if (exam_active(client_id)) {
+        if (error != nullptr) {
+            *error = "Cannot distribute file: exam active on client.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "denied",
+                                    "exam active on client");
+        return false;
+    }
+
+    if (!is_action_permitted(caller_role, OperatorAction::distribute_file)) {
+        if (error != nullptr) {
+            *error = "Caller role is not authorized for file distribution.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "denied",
+                                    "unauthorized role");
+        return false;
+    }
+
+    const auto clients = impl_->registry_.snapshot();
+    const auto it = std::find_if(clients.begin(), clients.end(),
+                                 [client_id](const ClientRecord& r) {
+                                     return r.id == client_id;
+                                 });
+    if (it == clients.end()) {
+        if (error != nullptr) {
+            *error = "Client not found in registry.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "client not found");
+        return false;
+    }
+
+    if (it->status == ClientStatus::offline) {
+        if (error != nullptr) {
+            *error = "Cannot distribute file: client is offline.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "ignored",
+                                    "client is offline");
+        return false;
+    }
+
+    std::error_code ec;
+    if (!std::filesystem::exists(file_path, ec) || !std::filesystem::is_regular_file(file_path, ec)) {
+        if (error != nullptr) {
+            *error = "File does not exist or is not a regular file.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "file not found or not regular");
+        return false;
+    }
+
+    const auto file_size = std::filesystem::file_size(file_path, ec);
+    if (ec || file_size > file_dist::kMaxFileSize) {
+        if (error != nullptr) {
+            *error = "File size exceeds maximum distribution limit of 64 MiB.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "file exceeds maximum limit");
+        return false;
+    }
+
+    std::ifstream file(file_path, std::ios::binary);
+    if (!file.is_open()) {
+        if (error != nullptr) {
+            *error = "Unable to open file for reading.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "unable to open file");
+        return false;
+    }
+
+    std::vector<std::uint8_t> buffer(static_cast<std::size_t>(file_size));
+    if (file_size > 0) {
+        file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(file_size));
+        if (!file) {
+            if (error != nullptr) {
+                *error = "Failed to read complete file data.";
+            }
+            record_remote_session_audit(client_id, "distribute_file", "failed",
+                                        "read failure");
+            return false;
+        }
+    }
+
+    const auto digest = security::sha256(std::as_bytes(std::span(buffer)));
+    if (!digest.has_value()) {
+        if (error != nullptr) {
+            *error = "Failed to compute SHA-256 digest of file.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "sha256 calculation failure");
+        return false;
+    }
+
+    const std::string filename = file_dist::sanitize_filename(file_path.filename().string());
+    if (!file_dist::is_safe_filename(filename)) {
+        if (error != nullptr) {
+            *error = "Filename cannot be sanitized to a safe name.";
+        }
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "unsafe filename");
+        return false;
+    }
+
+    static std::atomic<std::uint64_t> s_file_session_counter{1};
+    const std::uint64_t session_id = s_file_session_counter.fetch_add(1);
+
+    // 1. Send start message
+    const auto start_payload = file_dist::encode_file_dist_start(file_dist::FileDistStartMessage{
+        .session_id = session_id,
+        .file_size = file_size,
+        .sha256 = *digest,
+        .filename = filename,
+    });
+    if (start_payload.empty()) {
+        if (error != nullptr) {
+            *error = "Failed to encode file distribution start message.";
+        }
+        return false;
+    }
+
+    if (!send_command(client_id, protocol::CommandType::file_dist_start,
+                      std::as_bytes(std::span(start_payload)), error)) {
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "send start failed");
+        return false;
+    }
+
+    // 2. Stream chunks
+    std::size_t offset = 0;
+    while (offset < buffer.size()) {
+        const std::size_t chunk_len = std::min(file_dist::kMaxChunkSize, buffer.size() - offset);
+        std::vector<std::uint8_t> chunk_data(buffer.begin() + offset, buffer.begin() + offset + chunk_len);
+        const auto chunk_payload = file_dist::encode_file_dist_chunk(file_dist::FileDistChunkMessage{
+            .session_id = session_id,
+            .offset = static_cast<std::uint64_t>(offset),
+            .data = std::move(chunk_data),
+        });
+
+        if (!send_command(client_id, protocol::CommandType::file_dist_chunk,
+                          std::as_bytes(std::span(chunk_payload)), error)) {
+            record_remote_session_audit(client_id, "distribute_file", "failed",
+                                        "send chunk failed");
+            return false;
+        }
+        offset += chunk_len;
+    }
+
+    // 3. Send finish message
+    const auto finish_payload = file_dist::encode_file_dist_finish(file_dist::FileDistFinishMessage{
+        .session_id = session_id,
+    });
+    if (!send_command(client_id, protocol::CommandType::file_dist_finish,
+                      std::as_bytes(std::span(finish_payload)), error)) {
+        record_remote_session_audit(client_id, "distribute_file", "failed",
+                                    "send finish failed");
+        return false;
+    }
+
+    record_remote_session_audit(client_id, "distribute_file", "dispatched",
+                                filename + " (" + std::to_string(file_size) + " bytes)");
+    return true;
 }
 
 bool ServerControlPlane::configure_uwf(

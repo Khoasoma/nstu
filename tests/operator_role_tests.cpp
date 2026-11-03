@@ -39,6 +39,8 @@ void test_teacher_permissions() {
     assert(is_action_permitted(role, OperatorAction::chat));
     assert(is_action_permitted(role, OperatorAction::manage_exam));
     assert(is_action_permitted(role, OperatorAction::manage_settings));
+    assert(is_action_permitted(role, OperatorAction::wake_on_lan));
+    assert(is_action_permitted(role, OperatorAction::distribute_file));
 
     // Disruptive/maintenance actions must NOT be permitted for Teacher
     assert(!is_action_permitted(role, OperatorAction::configure_uwf));
@@ -63,6 +65,8 @@ void test_technician_permissions() {
     assert(is_action_permitted(role, OperatorAction::chat));
     assert(is_action_permitted(role, OperatorAction::manage_exam));
     assert(is_action_permitted(role, OperatorAction::manage_settings));
+    assert(is_action_permitted(role, OperatorAction::wake_on_lan));
+    assert(is_action_permitted(role, OperatorAction::distribute_file));
 
     // Technician has fleet health & UWF recovery permissions
     assert(is_action_permitted(role, OperatorAction::view_fleet_health));
@@ -95,6 +99,8 @@ void test_developer_permissions() {
     assert(is_action_permitted(role, OperatorAction::view_diagnostics_raw));
     assert(is_action_permitted(role, OperatorAction::export_telemetry_report));
     assert(is_action_permitted(role, OperatorAction::manage_settings));
+    assert(is_action_permitted(role, OperatorAction::wake_on_lan));
+    assert(is_action_permitted(role, OperatorAction::distribute_file));
 }
 
 } // namespace
