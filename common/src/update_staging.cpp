@@ -13,6 +13,7 @@
 #include <limits>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace nstu::update {
 
@@ -38,6 +39,26 @@ constexpr std::array<std::string_view, 12> kStagingRecordFields{
     "schema_version", "active_version", "target_version", "target_sha256_hex",
     "expected_bytes", "staged_bytes", "current_state", "last_error",
     "state_timestamp_utc", "requires_reboot", "backup_path", "staged_package_path"};
+
+class RecordReadHandle {
+public:
+    explicit RecordReadHandle(HANDLE value) noexcept : value_(value) {}
+    RecordReadHandle(const RecordReadHandle&) = delete;
+    RecordReadHandle& operator=(const RecordReadHandle&) = delete;
+    ~RecordReadHandle() noexcept { (void)close_checked(); }
+
+    [[nodiscard]] HANDLE get() const noexcept { return value_; }
+    [[nodiscard]] bool valid() const noexcept { return value_ != INVALID_HANDLE_VALUE; }
+    [[nodiscard]] bool close_checked() noexcept {
+        // Relinquish ownership before the close attempt so cleanup cannot close
+        // the same value again, including after a reported close failure.
+        const HANDLE owned = std::exchange(value_, INVALID_HANDLE_VALUE);
+        return owned == INVALID_HANDLE_VALUE || CloseHandle(owned) != 0;
+    }
+
+private:
+    HANDLE value_;
+};
 
 std::uint64_t current_time_seconds() noexcept {
     const auto now = std::chrono::system_clock::now();
@@ -462,38 +483,49 @@ UpdateStagingResult UpdateStagingController::init() {
             std::filesystem::create_directories(config_.staging_directory);
         }
 
-        const std::string record_file = get_record_file_path();
-        // Query the directory entry itself: exists/status can follow a dangling
-        // symbolic link and mistake an existing recovery entry for absence.
-        const std::filesystem::path record_path(record_file);
-        const DWORD attributes = GetFileAttributesW(record_path.c_str());
-        if (attributes == INVALID_FILE_ATTRIBUTES) {
+        const std::filesystem::path record_path(get_record_file_path());
+        // Open the leaf itself once, without following its reparse point. The
+        // read lease excludes ordinary writable/delete handles through preflight.
+        RecordReadHandle file(CreateFileW(record_path.c_str(), GENERIC_READ,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+        if (!file.valid()) {
             const DWORD error = GetLastError();
             if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
-                return {UpdateStagingError::io_error, "Unable to inspect recovery record"};
+                return {UpdateStagingError::io_error, "Unable to open recovery record"};
             }
         } else {
-            if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
-                               FILE_ATTRIBUTE_DEVICE)) != 0) {
-                return {UpdateStagingError::io_error, "Recovery record is not a regular file"};
+            BY_HANDLE_FILE_INFORMATION information{};
+            if (GetFileType(file.get()) != FILE_TYPE_DISK ||
+                !GetFileInformationByHandle(file.get(), &information) ||
+                (information.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                    FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DEVICE)) != 0 ||
+                information.nNumberOfLinks != 1) {
+                return {UpdateStagingError::io_error, "Recovery record is not a regular single-link file"};
             }
-            std::ifstream ifs(record_file, std::ios::binary);
-            if (!ifs.is_open()) return {UpdateStagingError::io_error, "Unable to open recovery record"};
             std::string content(kMaximumStagingRecordBytes + 1u, '\0');
-            ifs.read(content.data(), static_cast<std::streamsize>(content.size()));
-            const auto bytes = ifs.gcount();
-            if (bytes < 0 || ifs.bad() || (ifs.fail() && !ifs.eof())) {
-                return {UpdateStagingError::io_error, "Unable to read recovery record"};
+            std::size_t bytes = 0;
+            while (bytes < content.size()) {
+                DWORD received = 0;
+                if (!ReadFile(file.get(), content.data() + bytes,
+                    static_cast<DWORD>(content.size() - bytes), &received, nullptr)) {
+                    return {UpdateStagingError::io_error, "Unable to read recovery record"};
+                }
+                if (received == 0) break;
+                bytes += received;
             }
-            if (bytes > static_cast<std::streamsize>(kMaximumStagingRecordBytes)) {
+            if (bytes > kMaximumStagingRecordBytes) {
                 return {UpdateStagingError::invalid_state, "Recovery record exceeds size limit"};
             }
-            content.resize(static_cast<std::size_t>(bytes));
+            content.resize(bytes);
             auto loaded = import_staging_record_json(content);
             if (!loaded) return {UpdateStagingError::invalid_state, "Recovery record is malformed or incompatible"};
             if (!bind_record_path(loaded->staged_package_path, get_final_package_path(), false) ||
                 !bind_record_path(loaded->backup_path, config_.backup_directory, true)) {
                 return {UpdateStagingError::invalid_state, "Recovery record paths do not match configuration"};
+            }
+            if (!file.close_checked()) {
+                return {UpdateStagingError::io_error, "Unable to close recovery record"};
             }
             record_ = std::move(*loaded);
             // Existing interrupted-download recovery runs only after preflight.

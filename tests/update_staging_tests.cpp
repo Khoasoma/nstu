@@ -605,6 +605,117 @@ void test_rejected_serialization_does_not_touch_disk() {
     assert(!std::filesystem::exists(dirs.staging));
 }
 
+void test_record_hardlink_preflight() {
+    ScopedTestDirs dirs("record_hardlink_" + std::to_string(GetCurrentProcessId()));
+    UpdateStagingController controller(dirs.config());
+    assert(controller.init().ok());
+    controller.set_deferred("trusted prior state");
+    const auto before = export_staging_record_json(controller.record());
+    const auto record = std::filesystem::path(dirs.staging) / "staging_record.json";
+    const auto source = dirs.root / "linked-source.json";
+    const auto part = std::filesystem::path(dirs.staging) / "update_package.part";
+    const auto package = std::filesystem::path(dirs.staging) / "update_package.pkg";
+    const auto active = std::filesystem::path(dirs.active) / "nstu-service.exe";
+    std::filesystem::create_directories(dirs.backup);
+    const auto backup = std::filesystem::path(dirs.backup) / "nstu-service.exe";
+    const std::array paths{part, package, active, backup};
+    for (const auto& path : paths) write_test_file(path, "preserved leaf canary");
+    StagingRecord candidate;
+    candidate.current_state = UpdateState::downloading;
+    candidate.expected_bytes = 10;
+    candidate.staged_bytes = 4;
+    candidate.target_sha256_hex = std::string(64, '0');
+    candidate.staged_package_path = package.string();
+    candidate.backup_path = dirs.backup;
+    const auto bytes = export_staging_record_json(candidate);
+    assert(import_staging_record_json(bytes));
+    write_test_file(source, bytes);
+    assert(DeleteFileW(record.c_str()));
+    assert(CreateHardLinkW(record.c_str(), source.c_str(), nullptr));
+    const HANDLE probe = CreateFileW(record.c_str(), GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(probe != INVALID_HANDLE_VALUE);
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool inspected = GetFileInformationByHandle(probe, &information) != 0;
+    const bool probe_closed = CloseHandle(probe) != 0;
+    assert(inspected && probe_closed && information.nNumberOfLinks >= 2);
+    const auto result = controller.init();
+    const auto memory_after = export_staging_record_json(controller.record());
+    const auto record_after = read_test_file(record);
+    const auto source_after = read_test_file(source);
+    std::array<std::string, 4> observed;
+    for (std::size_t i = 0; i < paths.size(); ++i) {
+        if (std::filesystem::exists(paths[i])) observed[i] = read_test_file(paths[i]);
+    }
+    const bool link_removed = DeleteFileW(record.c_str()) != 0;
+    std::cerr << "[leaf hardlink witness] accepted=" << result.ok()
+              << " memory_changed=" << (memory_after != before)
+              << " linked_bytes_changed=" << (source_after != bytes) << '\n';
+    assert(link_removed);
+    assert(!result.ok() && result.error == UpdateStagingError::io_error);
+    assert(result.message.size() <= 192);
+    assert(memory_after == before && record_after == bytes && source_after == bytes);
+    for (const auto& content : observed) assert(content == "preserved leaf canary");
+    write_test_file(record, before);
+    assert(controller.init().ok());
+    assert(export_staging_record_json(controller.record()) == before);
+}
+
+void test_record_native_sharing_and_recovery() {
+    ScopedTestDirs dirs("record_sharing_" + std::to_string(GetCurrentProcessId()));
+    UpdateStagingController controller(dirs.config());
+    assert(controller.init().ok());
+    controller.set_deferred("trusted sharing state");
+    const auto before = export_staging_record_json(controller.record());
+    const auto record = std::filesystem::path(dirs.staging) / "staging_record.json";
+    for (const DWORD access : std::array<DWORD, 2>{GENERIC_WRITE, DELETE}) {
+        const HANDLE other = CreateFileW(record.c_str(), access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        assert(other != INVALID_HANDLE_VALUE);
+        const auto result = controller.init();
+        const auto memory_after = export_staging_record_json(controller.record());
+        const bool other_closed = CloseHandle(other) != 0;
+        std::cerr << "[leaf sharing witness] access=" << access
+                  << " accepted=" << result.ok() << '\n';
+        assert(other_closed);
+        assert(!result.ok() && result.error == UpdateStagingError::io_error);
+        assert(result.message.size() <= 192);
+        assert(memory_after == before && read_test_file(record) == before);
+        assert(controller.init().ok());
+    }
+    const HANDLE reader = CreateFileW(record.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(reader != INVALID_HANDLE_VALUE);
+    const auto readable = controller.init();
+    const bool reader_closed = CloseHandle(reader) != 0;
+    assert(reader_closed && readable.ok());
+    assert(export_staging_record_json(controller.record()) == before);
+    const auto part = std::filesystem::path(dirs.staging) / "update_package.part";
+    const auto package = std::filesystem::path(dirs.staging) / "update_package.pkg";
+    const auto active = std::filesystem::path(dirs.active) / "nstu-service.exe";
+    std::filesystem::create_directories(dirs.backup);
+    const auto backup = std::filesystem::path(dirs.backup) / "nstu-service.exe";
+    for (const auto& path : {part, package, active, backup}) write_test_file(path, "recovery canary");
+    StagingRecord downloading;
+    downloading.current_state = UpdateState::downloading;
+    downloading.expected_bytes = 10;
+    downloading.staged_bytes = 4;
+    downloading.target_sha256_hex = std::string(64, '0');
+    downloading.staged_package_path = package.string();
+    downloading.backup_path = dirs.backup;
+    write_test_file(record, export_staging_record_json(downloading));
+    const auto recovered = controller.init();
+    const auto persisted = import_staging_record_json(read_test_file(record));
+    assert(recovered.ok() && controller.state() == UpdateState::failed);
+    assert(persisted && persisted->current_state == UpdateState::failed);
+    assert(persisted->last_error == "Download interrupted by system restart");
+    assert(persisted->expected_bytes == 10 && persisted->staged_bytes == 4);
+    assert(!std::filesystem::exists(part));
+    for (const auto& path : {package, active, backup}) assert(read_test_file(path) == "recovery canary");
+}
+
 } // namespace
 
 int main() {
@@ -643,5 +754,8 @@ int main() {
     test_record_serialization_locale();
     test_rejected_serialization_does_not_touch_disk();
     std::cout << "[update_staging_tests] ALL SERIALIZATION REGRESSIONS PASSED.\n";
+    test_record_hardlink_preflight();
+    test_record_native_sharing_and_recovery();
+    std::cout << "[update_staging_tests] ALL LEAF READ REGRESSIONS PASSED.\n";
     return 0;
 }
