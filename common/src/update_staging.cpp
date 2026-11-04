@@ -5,12 +5,14 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <sstream>
+#include <stdexcept>
 
 namespace nstu::update {
 
@@ -43,30 +45,86 @@ std::uint64_t current_time_seconds() noexcept {
         std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count());
 }
 
-std::string escape_json_string(std::string_view s) {
-    std::string out;
-    out.reserve(s.size() + 8);
-    for (const char c : s) {
+struct CappedRecordSize {
+    std::size_t bytes = 0;
+    bool append(std::string_view text) noexcept {
+        if (text.size() > kMaximumStagingRecordBytes - bytes) return false;
+        bytes += text.size();
+        return true;
+    }
+};
+
+struct RecordTextSink {
+    std::string& text;
+    bool append(std::string_view part) {
+        if (part.size() > kMaximumStagingRecordBytes - text.size()) return false;
+        text.append(part);
+        return true;
+    }
+};
+
+template<class Sink>
+bool emit_record_string(Sink& sink, std::string_view text) {
+    if (text.size() > kMaximumStagingRecordBytes || !sink.append("\"")) return false;
+    constexpr char digits[] = "0123456789abcdef";
+    for (const char c : text) {
         switch (c) {
-        case '"': out += "\\\""; break;
-        case '\\': out += "\\\\"; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
+        case '"': if (!sink.append("\\\"")) return false; break;
+        case '\\': if (!sink.append("\\\\")) return false; break;
+        case '\b': if (!sink.append("\\b")) return false; break;
+        case '\f': if (!sink.append("\\f")) return false; break;
+        case '\n': if (!sink.append("\\n")) return false; break;
+        case '\r': if (!sink.append("\\r")) return false; break;
+        case '\t': if (!sink.append("\\t")) return false; break;
         default:
-            if (static_cast<unsigned char>(c) < 0x20) {
-                char buf[8];
-                sprintf_s(buf, "\\u%04x", static_cast<unsigned int>(static_cast<unsigned char>(c)));
-                out += buf;
-            } else {
-                out += c;
-            }
+            if (const auto value = static_cast<unsigned char>(c); value < 0x20u) {
+                const char escaped[]{'\\', 'u', '0', '0', digits[value >> 4u], digits[value & 0x0fu]};
+                if (!sink.append(std::string_view(escaped, sizeof(escaped)))) return false;
+            } else if (!sink.append(std::string_view(&c, 1))) return false;
             break;
         }
     }
-    return out;
+    return sink.append("\"");
+}
+
+template<class Sink>
+bool emit_record_number(Sink& sink, std::uint64_t value) {
+    char digits[20];
+    const auto converted = std::to_chars(digits, digits + sizeof(digits), value);
+    return converted.ec == std::errc{} &&
+           sink.append(std::string_view(digits, static_cast<std::size_t>(converted.ptr - digits)));
+}
+
+template<class Sink>
+bool emit_record_version(Sink& sink, const SemanticVersion& version) {
+    return sink.append("\"") && emit_record_number(sink, version.major) &&
+           sink.append(".") && emit_record_number(sink, version.minor) &&
+           sink.append(".") && emit_record_number(sink, version.patch) && sink.append("\"");
+}
+
+template<class Sink, class ValueWriter>
+bool emit_record_field(Sink& sink, std::size_t index, ValueWriter write_value,
+                       bool last = false) {
+    return sink.append("  \"") && sink.append(kStagingRecordFields[index]) &&
+           sink.append("\": ") && write_value() && sink.append(last ? "\n" : ",\n");
+}
+
+template<class Sink>
+bool emit_record(Sink& sink, const StagingRecord& record) {
+    return sink.append("{\n") &&
+        emit_record_field(sink, 0, [&] { return emit_record_string(sink, record.schema_version); }) &&
+        emit_record_field(sink, 1, [&] { return emit_record_version(sink, record.active_version); }) &&
+        emit_record_field(sink, 2, [&] { return emit_record_version(sink, record.target_version); }) &&
+        emit_record_field(sink, 3, [&] { return emit_record_string(sink, record.target_sha256_hex); }) &&
+        emit_record_field(sink, 4, [&] { return emit_record_number(sink, record.expected_bytes); }) &&
+        emit_record_field(sink, 5, [&] { return emit_record_number(sink, record.staged_bytes); }) &&
+        emit_record_field(sink, 6, [&] { return emit_record_string(sink, to_string(record.current_state)); }) &&
+        emit_record_field(sink, 7, [&] { return emit_record_string(sink, record.last_error); }) &&
+        emit_record_field(sink, 8, [&] { return emit_record_number(sink, record.state_timestamp_utc); }) &&
+        emit_record_field(sink, 9, [&] { return sink.append(record.requires_reboot ? "true" : "false"); }) &&
+        emit_record_field(sink, 10, [&] { return emit_record_string(sink, record.backup_path); }) &&
+        emit_record_field(sink, 11, [&] { return emit_record_string(sink, record.staged_package_path); }, true) &&
+        sink.append("}\n");
 }
 
 struct MiniJsonReader {
@@ -230,22 +288,14 @@ bool bind_record_path(std::string& supplied, const std::string& configured,
 } // namespace
 
 std::string export_staging_record_json(const StagingRecord& record) {
-    std::ostringstream ss;
-    ss << "{\n";
-    ss << "  \"schema_version\": \"" << escape_json_string(record.schema_version) << "\",\n";
-    ss << "  \"active_version\": \"" << record.active_version.to_string() << "\",\n";
-    ss << "  \"target_version\": \"" << record.target_version.to_string() << "\",\n";
-    ss << "  \"target_sha256_hex\": \"" << escape_json_string(record.target_sha256_hex) << "\",\n";
-    ss << "  \"expected_bytes\": " << record.expected_bytes << ",\n";
-    ss << "  \"staged_bytes\": " << record.staged_bytes << ",\n";
-    ss << "  \"current_state\": \"" << to_string(record.current_state) << "\",\n";
-    ss << "  \"last_error\": \"" << escape_json_string(record.last_error) << "\",\n";
-    ss << "  \"state_timestamp_utc\": " << record.state_timestamp_utc << ",\n";
-    ss << "  \"requires_reboot\": " << (record.requires_reboot ? "true" : "false") << ",\n";
-    ss << "  \"backup_path\": \"" << escape_json_string(record.backup_path) << "\",\n";
-    ss << "  \"staged_package_path\": \"" << escape_json_string(record.staged_package_path) << "\"\n";
-    ss << "}\n";
-    return ss.str();
+    constexpr char oversized[] = "Staging record exceeds the 64 KiB serialization limit";
+    CappedRecordSize size;
+    if (!emit_record(size, record)) throw std::length_error(oversized);
+    std::string text;
+    text.reserve(size.bytes);
+    RecordTextSink sink{text};
+    if (!emit_record(sink, record)) throw std::length_error(oversized);
+    return text;
 }
 
 std::optional<StagingRecord> import_staging_record_json(std::string_view json_str) {
@@ -391,10 +441,10 @@ std::string UpdateStagingController::get_record_file_path() const {
 
 bool UpdateStagingController::save_record_to_disk() {
     try {
+        const std::string json = export_staging_record_json(record_);
         if (!config_.staging_directory.empty()) {
             std::filesystem::create_directories(config_.staging_directory);
             const std::string record_file = get_record_file_path();
-            const std::string json = export_staging_record_json(record_);
             std::ofstream ofs(record_file, std::ios::trunc | std::ios::binary);
             if (ofs.is_open()) {
                 ofs.write(json.data(), static_cast<std::streamsize>(json.size()));

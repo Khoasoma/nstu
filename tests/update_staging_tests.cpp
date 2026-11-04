@@ -7,6 +7,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <locale>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -514,6 +517,94 @@ void test_record_path_preflight() {
     for (const auto& path : {part, package, active, backup}) assert(read_test_file(path) == "preserved path canary");
 }
 
+void test_record_serialization_limits() {
+    StagingRecord record;
+    const auto empty = export_staging_record_json(record);
+    constexpr std::string_view expected_default =
+        "{\n"
+        "  \"schema_version\": \"1.0\",\n"
+        "  \"active_version\": \"0.0.0\",\n"
+        "  \"target_version\": \"0.0.0\",\n"
+        "  \"target_sha256_hex\": \"\",\n"
+        "  \"expected_bytes\": 0,\n"
+        "  \"staged_bytes\": 0,\n"
+        "  \"current_state\": \"idle\",\n"
+        "  \"last_error\": \"\",\n"
+        "  \"state_timestamp_utc\": 0,\n"
+        "  \"requires_reboot\": true,\n"
+        "  \"backup_path\": \"\",\n"
+        "  \"staged_package_path\": \"\"\n"
+        "}\n";
+    assert(empty == expected_default);
+    record.last_error.assign(64 * 1024 - empty.size(), 'a');
+    const auto boundary = export_staging_record_json(record);
+    assert(boundary.size() == 64 * 1024);
+    assert(import_staging_record_json(boundary));
+    record.last_error.push_back('a');
+    bool rejected = false;
+    try { (void)export_staging_record_json(record); }
+    catch (const std::length_error& error) { rejected = true; assert(std::strlen(error.what()) <= 192); }
+    assert(rejected);
+    record.last_error.assign(12000, '\1');
+    rejected = false;
+    try { (void)export_staging_record_json(record); }
+    catch (const std::length_error&) { rejected = true; }
+    assert(rejected);
+    record.last_error.clear();
+    record.backup_path.assign(64 * 1024 + 1, 'b');
+    rejected = false;
+    try { (void)export_staging_record_json(record); }
+    catch (const std::length_error&) { rejected = true; }
+    assert(rejected);
+}
+
+struct GroupedRecordNumbers : std::numpunct<char> {
+    GroupedRecordNumbers() : std::numpunct<char>(1) {}
+    char do_thousands_sep() const override { return ','; }
+    std::string do_grouping() const override { return "\3"; }
+};
+
+void test_record_serialization_locale() {
+    StagingRecord record;
+    record.active_version = {1234, 5678, 9012};
+    record.target_version = {4321, 8765, 2109};
+    record.expected_bytes = std::numeric_limits<std::uint64_t>::max();
+    record.staged_bytes = 1234567890;
+    record.state_timestamp_utc = 9876543210;
+    GroupedRecordNumbers grouped;
+    const auto prior = std::locale::global(std::locale(std::locale::classic(), &grouped));
+    std::string bytes;
+    try { bytes = export_staging_record_json(record); }
+    catch (...) { std::locale::global(prior); throw; }
+    std::locale::global(prior);
+    assert(bytes.find("\"active_version\": \"1234.5678.9012\"") != std::string::npos);
+    assert(bytes.find("\"target_version\": \"4321.8765.2109\"") != std::string::npos);
+    assert(bytes.find("\"expected_bytes\": 18446744073709551615") != std::string::npos);
+    assert(bytes.find("\"staged_bytes\": 1234567890") != std::string::npos);
+    assert(bytes.find("\"state_timestamp_utc\": 9876543210") != std::string::npos);
+    const auto parsed = import_staging_record_json(bytes);
+    assert(parsed && parsed->active_version == record.active_version);
+    assert(parsed->target_version == record.target_version);
+    assert(parsed->expected_bytes == record.expected_bytes);
+}
+
+void test_rejected_serialization_does_not_touch_disk() {
+    const std::string unsupported(12000, '\1');
+    ScopedTestDirs dirs("serialization_save_" + std::to_string(GetCurrentProcessId()));
+    UpdateStagingController controller(dirs.config());
+    assert(controller.init().ok());
+    controller.set_deferred("existing valid state");
+    const auto record = std::filesystem::path(dirs.staging) / "staging_record.json";
+    const auto before = read_test_file(record);
+    controller.set_deferred(unsupported);
+    assert(read_test_file(record) == before);
+    assert(import_staging_record_json(read_test_file(record)));
+    std::filesystem::remove_all(dirs.staging);
+    UpdateStagingController missing(dirs.config());
+    missing.set_deferred(unsupported);
+    assert(!std::filesystem::exists(dirs.staging));
+}
+
 } // namespace
 
 int main() {
@@ -548,5 +639,9 @@ int main() {
     test_record_startup_preflight();
     test_record_path_preflight();
     std::cout << "[update_staging_tests] ALL PREFLIGHT REGRESSIONS PASSED.\n";
+    test_record_serialization_limits();
+    test_record_serialization_locale();
+    test_rejected_serialization_does_not_touch_disk();
+    std::cout << "[update_staging_tests] ALL SERIALIZATION REGRESSIONS PASSED.\n";
     return 0;
 }

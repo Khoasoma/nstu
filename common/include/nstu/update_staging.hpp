@@ -59,6 +59,8 @@ struct StagingRecord {
     std::string staged_package_path;
 };
 
+// Canonical numeric formatting and the existing 64 KiB record limit.
+// Throws std::length_error before output allocation if serialization exceeds it.
 [[nodiscard]] std::string export_staging_record_json(const StagingRecord& record);
 [[nodiscard]] std::optional<StagingRecord> import_staging_record_json(std::string_view json_str);
 
