@@ -205,3 +205,43 @@ required. This surface and the wider update workflow remain **INDEV**.
 2. **Persistent VM Qualification**: Exercising real WebView2 runtime installation and UWF reboot-to-restore cycles in an isolated persistent VM (per `tasks/task-plans/qualify-real-webview2-vm-1.md`).
 3. **Authenticode Production Signing**: Signing all binaries and installer packages with a genuine, trusted CA code-signing certificate (replacing development test signatures).
 4. **Independent Security Audit**: Fuzzing binary protocols, named pipes, and WFP filters prior to official high-stakes assessment deployments.
+
+## Verification Scope and Staging Record Hardening — November 4, 2026
+
+The merged-work tables and verification summaries above record implemented code
+and scoped checks. Outstanding original task and checkpoint acceptance, real
+service/peer/runtime behavior, isolated VM qualification, physical lab soak,
+trusted signing, production readiness and exam acceptance remain open.
+
+These staging record increments are integrated as **INDEV**:
+
+| Increment | Qualified revision | Exact main CI |
+|---|---|---|
+| Startup schema and configuration-path preflight before recovery | `310b12e812c360fd4147a8bfcff585374d757606` | [41792898775](https://github.com/Khoasoma/nstu/actions/runs/41792898775) |
+| Bounded canonical serialization and pre-save oversize refusal | `10b237f6f91ff283a5da4dd0a65f04aa466db883` | [41802619616](https://github.com/Khoasoma/nstu/actions/runs/41802619616) |
+| Opened-leaf native admission and preflight read lease | `3164f65e0f819333eec1b046ecdc49f4518104d6` | [41809306480](https://github.com/Khoasoma/nstu/actions/runs/41809306480) |
+
+Each revision passed four Windows build/test jobs with 71 C++ tests per job,
+plus the separate Development release job on Ubuntu. Local fast and strict gates
+passed all 71 C++ tests and 63 web cases with zero compiler warnings; independent
+non-author reviews covered the respective source revisions. The internal VM
+installer job supplies build evidence; real guest/runtime qualification remains
+required.
+
+The record retains schema 1.0 and its 12 fields, with a 64 KiB size limit.
+Serialization counts exact escaped bytes before output allocation and uses
+locale-independent decimal values. Oversized serialization is refused before
+directory creation or live-record truncation. Startup reads the admitted leaf
+through one native handle, rejects reparse entries, multiple hardlinks and
+incompatible writable/delete sharing, and closes the reader before memory
+assignment or existing interrupted-download recovery. Compatible readers,
+refusal preservation, retry and persisted recovery JSON have regression coverage.
+
+Full deferred publication remains pending. Stable/private ancestors and
+namespace, retained temporary-object identity, preserved owner/group/ordered
+DACL/control flags/mandatory-label metadata, checked complete-file atomic
+publication and observable persistence failures still require qualification.
+Deferral still advances memory before persistence, and other transitions still
+ignore save failures. Post-close races, existing mapped views, crash/power-loss
+recovery, signed updater transport/apply, real VM/UWF/Deep Freeze behavior and
+production or exam acceptance are not established by these increments or CI.
