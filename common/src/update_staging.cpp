@@ -3,6 +3,8 @@
 #include <windows.h>
 #include <bcrypt.h>
 
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -28,6 +30,12 @@ std::optional<UpdateState> parse_update_state(std::string_view str) noexcept {
 }
 
 namespace {
+
+constexpr std::size_t kMaximumStagingRecordBytes = 64u * 1024u;
+constexpr std::array<std::string_view, 12> kStagingRecordFields{
+    "schema_version", "active_version", "target_version", "target_sha256_hex",
+    "expected_bytes", "staged_bytes", "current_state", "last_error",
+    "state_timestamp_utc", "requires_reboot", "backup_path", "staged_package_path"};
 
 std::uint64_t current_time_seconds() noexcept {
     const auto now = std::chrono::system_clock::now();
@@ -85,16 +93,50 @@ struct MiniJsonReader {
         return false;
     }
 
+    bool read_hex_quad(std::uint32_t& value) noexcept {
+        value = 0;
+        for (unsigned int index = 0; index < 4; ++index) {
+            if (pos >= input.size()) return false;
+            const char c = input[pos++];
+            unsigned int digit = 0;
+            if (c >= '0' && c <= '9') digit = static_cast<unsigned int>(c - '0');
+            else if (c >= 'a' && c <= 'f') digit = static_cast<unsigned int>(c - 'a') + 10u;
+            else if (c >= 'A' && c <= 'F') digit = static_cast<unsigned int>(c - 'A') + 10u;
+            else return false;
+            value = value * 16u + digit;
+        }
+        return true;
+    }
+
+    static void append_utf8(std::string& out, std::uint32_t codepoint) {
+        if (codepoint <= 0x7fu) out.push_back(static_cast<char>(codepoint));
+        else if (codepoint <= 0x7ffu) {
+            out.push_back(static_cast<char>(0xc0u | (codepoint >> 6u)));
+            out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+        } else if (codepoint <= 0xffffu) {
+            out.push_back(static_cast<char>(0xe0u | (codepoint >> 12u)));
+            out.push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
+            out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+        } else {
+            out.push_back(static_cast<char>(0xf0u | (codepoint >> 18u)));
+            out.push_back(static_cast<char>(0x80u | ((codepoint >> 12u) & 0x3fu)));
+            out.push_back(static_cast<char>(0x80u | ((codepoint >> 6u) & 0x3fu)));
+            out.push_back(static_cast<char>(0x80u | (codepoint & 0x3fu)));
+        }
+    }
+
     bool parse_string(std::string& out) {
         skip_whitespace();
         if (pos >= input.size() || input[pos] != '"') return false;
         ++pos;
         out.clear();
-        bool escaped = false;
         while (pos < input.size()) {
             const char c = input[pos++];
-            if (escaped) {
-                switch (c) {
+            if (c == '"') return true;
+            if (static_cast<unsigned char>(c) < 0x20u) return false;
+            if (c == '\\') {
+                if (pos >= input.size()) return false;
+                switch (input[pos++]) {
                 case '"': out.push_back('"'); break;
                 case '\\': out.push_back('\\'); break;
                 case '/': out.push_back('/'); break;
@@ -103,13 +145,21 @@ struct MiniJsonReader {
                 case 'n': out.push_back('\n'); break;
                 case 'r': out.push_back('\r'); break;
                 case 't': out.push_back('\t'); break;
-                default: out.push_back(c); break;
+                case 'u': {
+                    std::uint32_t codepoint = 0;
+                    if (!read_hex_quad(codepoint)) return false;
+                    if (codepoint >= 0xd800u && codepoint <= 0xdbffu) {
+                        if (input.substr(pos, 2) != "\\u") return false;
+                        pos += 2;
+                        std::uint32_t low = 0;
+                        if (!read_hex_quad(low) || low < 0xdc00u || low > 0xdfffu) return false;
+                        codepoint = 0x10000u + (codepoint - 0xd800u) * 0x400u + low - 0xdc00u;
+                    } else if (codepoint >= 0xdc00u && codepoint <= 0xdfffu) return false;
+                    append_utf8(out, codepoint);
+                    break;
                 }
-                escaped = false;
-            } else if (c == '\\') {
-                escaped = true;
-            } else if (c == '"') {
-                return true;
+                default: return false;
+                }
             } else {
                 out.push_back(c);
             }
@@ -120,6 +170,8 @@ struct MiniJsonReader {
     bool parse_uint64(std::uint64_t& out) noexcept {
         skip_whitespace();
         if (pos >= input.size() || !std::isdigit(static_cast<unsigned char>(input[pos]))) return false;
+        if (input[pos] == '0' && pos + 1 < input.size() &&
+            std::isdigit(static_cast<unsigned char>(input[pos + 1]))) return false;
         std::uint64_t val = 0;
         while (pos < input.size() && std::isdigit(static_cast<unsigned char>(input[pos]))) {
             const unsigned int digit = static_cast<unsigned int>(input[pos++] - '0');
@@ -147,21 +199,33 @@ struct MiniJsonReader {
         return false;
     }
 
-    bool skip_value() noexcept {
-        skip_whitespace();
-        if (pos >= input.size()) return false;
-        const char c = input[pos];
-        if (c == '"') {
-            std::string discard;
-            return parse_string(discard);
-        }
-        while (pos < input.size() && input[pos] != ',' && input[pos] != '}' && input[pos] != ']' &&
-               input[pos] != ' ' && input[pos] != '\t' && input[pos] != '\r' && input[pos] != '\n') {
-            ++pos;
-        }
-        return true;
-    }
 };
+
+bool bind_record_path(std::string& supplied, const std::string& configured,
+                      bool directory) {
+    if (supplied.empty()) return true;
+    if (configured.empty() || supplied.find('\0') != std::string::npos ||
+        configured.find('\0') != std::string::npos) return false;
+    const auto separator = [](char c) { return c == '/' || c == '\\'; };
+    if (supplied.size() >= 2 && separator(supplied[0]) && separator(supplied[1])) return false;
+    auto candidate = std::filesystem::path(supplied);
+    if (candidate.has_root_name() && !candidate.has_root_directory()) return false;
+    for (const auto& component : candidate) {
+        if (component == "." || component == "..") return false;
+    }
+    candidate = candidate.lexically_normal().make_preferred();
+    auto expected = std::filesystem::path(configured).lexically_normal().make_preferred();
+    if (directory) {
+        if (candidate.filename().empty()) candidate = candidate.parent_path();
+        if (expected.filename().empty()) expected = expected.parent_path();
+    }
+    if (candidate.native().size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        expected.native().size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) return false;
+    if (CompareStringOrdinal(candidate.c_str(), static_cast<int>(candidate.native().size()),
+                             expected.c_str(), static_cast<int>(expected.native().size()), TRUE) != CSTR_EQUAL) return false;
+    supplied = configured;
+    return true;
+}
 
 } // namespace
 
@@ -185,12 +249,13 @@ std::string export_staging_record_json(const StagingRecord& record) {
 }
 
 std::optional<StagingRecord> import_staging_record_json(std::string_view json_str) {
-    if (json_str.empty() || json_str.size() > 64 * 1024) return std::nullopt;
+    if (json_str.empty() || json_str.size() > kMaximumStagingRecordBytes) return std::nullopt;
 
     MiniJsonReader reader{json_str, 0};
     if (!reader.match_char('{')) return std::nullopt;
 
     StagingRecord rec;
+    std::uint16_t seen = 0;
 
     while (true) {
         reader.skip_whitespace();
@@ -198,6 +263,12 @@ std::optional<StagingRecord> import_staging_record_json(std::string_view json_st
 
         std::string key;
         if (!reader.parse_string(key) || !reader.match_char(':')) return std::nullopt;
+        const auto field = std::find(kStagingRecordFields.begin(), kStagingRecordFields.end(), key);
+        if (field == kStagingRecordFields.end()) return std::nullopt;
+        const auto index = static_cast<unsigned int>(field - kStagingRecordFields.begin());
+        const auto bit = static_cast<std::uint16_t>(1u << index);
+        if ((seen & bit) != 0) return std::nullopt;
+        seen = static_cast<std::uint16_t>(seen | bit);
 
         if (key == "schema_version") {
             if (!reader.parse_string(rec.schema_version)) return std::nullopt;
@@ -235,8 +306,6 @@ std::optional<StagingRecord> import_staging_record_json(std::string_view json_st
             if (!reader.parse_string(rec.backup_path)) return std::nullopt;
         } else if (key == "staged_package_path") {
             if (!reader.parse_string(rec.staged_package_path)) return std::nullopt;
-        } else {
-            if (!reader.skip_value()) return std::nullopt;
         }
 
         reader.skip_whitespace();
@@ -245,11 +314,14 @@ std::optional<StagingRecord> import_staging_record_json(std::string_view json_st
             if (reader.pos < reader.input.size() && reader.input[reader.pos] == '}') {
                 return std::nullopt; // Trailing comma
             }
-        }
+        } else if (reader.match_char('}')) break;
+        else return std::nullopt;
     }
 
     reader.skip_whitespace();
     if (reader.pos != json_str.size()) return std::nullopt;
+    constexpr std::uint16_t required = (1u << kStagingRecordFields.size()) - 1u;
+    if (seen != required || rec.schema_version != "1.0" || rec.staged_bytes > rec.expected_bytes) return std::nullopt;
 
     return rec;
 }
@@ -341,29 +413,52 @@ UpdateStagingResult UpdateStagingController::init() {
         }
 
         const std::string record_file = get_record_file_path();
-        if (std::filesystem::exists(record_file)) {
-            std::ifstream ifs(record_file, std::ios::binary);
-            if (ifs.is_open()) {
-                std::string content((std::istreambuf_iterator<char>(ifs)),
-                                    std::istreambuf_iterator<char>());
-                const auto loaded = import_staging_record_json(content);
-                if (loaded) {
-                    record_ = *loaded;
-                    // If an interrupted download was in progress, reset to failed/idle
-                    if (record_.current_state == UpdateState::downloading) {
-                        record_.current_state = UpdateState::failed;
-                        record_.last_error = "Download interrupted by system restart";
-                        std::filesystem::remove(get_part_file_path());
-                        save_record_to_disk();
-                    }
-                    res.error = UpdateStagingError::ok;
-                    return res;
-                }
+        // Query the directory entry itself: exists/status can follow a dangling
+        // symbolic link and mistake an existing recovery entry for absence.
+        const std::filesystem::path record_path(record_file);
+        const DWORD attributes = GetFileAttributesW(record_path.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            const DWORD error = GetLastError();
+            if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND) {
+                return {UpdateStagingError::io_error, "Unable to inspect recovery record"};
             }
+        } else {
+            if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT |
+                               FILE_ATTRIBUTE_DEVICE)) != 0) {
+                return {UpdateStagingError::io_error, "Recovery record is not a regular file"};
+            }
+            std::ifstream ifs(record_file, std::ios::binary);
+            if (!ifs.is_open()) return {UpdateStagingError::io_error, "Unable to open recovery record"};
+            std::string content(kMaximumStagingRecordBytes + 1u, '\0');
+            ifs.read(content.data(), static_cast<std::streamsize>(content.size()));
+            const auto bytes = ifs.gcount();
+            if (bytes < 0 || ifs.bad() || (ifs.fail() && !ifs.eof())) {
+                return {UpdateStagingError::io_error, "Unable to read recovery record"};
+            }
+            if (bytes > static_cast<std::streamsize>(kMaximumStagingRecordBytes)) {
+                return {UpdateStagingError::invalid_state, "Recovery record exceeds size limit"};
+            }
+            content.resize(static_cast<std::size_t>(bytes));
+            auto loaded = import_staging_record_json(content);
+            if (!loaded) return {UpdateStagingError::invalid_state, "Recovery record is malformed or incompatible"};
+            if (!bind_record_path(loaded->staged_package_path, get_final_package_path(), false) ||
+                !bind_record_path(loaded->backup_path, config_.backup_directory, true)) {
+                return {UpdateStagingError::invalid_state, "Recovery record paths do not match configuration"};
+            }
+            record_ = std::move(*loaded);
+            // Existing interrupted-download recovery runs only after preflight.
+            if (record_.current_state == UpdateState::downloading) {
+                record_.current_state = UpdateState::failed;
+                record_.last_error = "Download interrupted by system restart";
+                std::filesystem::remove(get_part_file_path());
+                save_record_to_disk();
+            }
+            res.error = UpdateStagingError::ok;
+            return res;
         }
-    } catch (const std::exception& e) {
+    } catch (const std::exception&) {
         res.error = UpdateStagingError::io_error;
-        res.message = e.what();
+        res.message = "Unable to initialize update staging";
         return res;
     }
 

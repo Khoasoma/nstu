@@ -1,5 +1,7 @@
 #include "nstu/update_staging.hpp"
 
+#include <windows.h>
+#include <array>
 #include <cassert>
 #include <cstring>
 #include <filesystem>
@@ -311,6 +313,209 @@ void test_staging_deferral() {
     assert(reloaded.record().last_error == "Maintenance window closed; client is thawed-reboot bound");
 }
 
+namespace {
+
+std::string replace_record_text(std::string text, std::string_view old,
+                                std::string_view replacement) {
+    const auto position = text.find(old);
+    assert(position != std::string::npos);
+    text.replace(position, old.size(), replacement);
+    return text;
+}
+
+void write_test_file(const std::filesystem::path& path, std::string_view content) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    out.write(content.data(), static_cast<std::streamsize>(content.size()));
+    assert(out.good());
+}
+
+std::string read_test_file(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    assert(in.is_open());
+    return std::string(std::istreambuf_iterator<char>(in), {});
+}
+
+void test_record_json_preflight() {
+    assert(!import_staging_record_json("{}"));
+    const auto valid = export_staging_record_json(StagingRecord{});
+    assert(import_staging_record_json(valid));
+    constexpr std::array<std::string_view, 12> fields{
+        "schema_version", "active_version", "target_version", "target_sha256_hex",
+        "expected_bytes", "staged_bytes", "current_state", "last_error",
+        "state_timestamp_utc", "requires_reboot", "backup_path", "staged_package_path"};
+    for (const auto field : fields) {
+        auto missing = valid;
+        const auto key = missing.find('"' + std::string(field) + '"');
+        assert(key != std::string::npos);
+        const auto start = missing.rfind('\n', key) + 1;
+        const auto end = missing.find('\n', key);
+        assert(end != std::string::npos);
+        missing.erase(start, end - start + 1);
+        if (field == "staged_package_path") {
+            const auto comma = missing.rfind(",\n");
+            assert(comma != std::string::npos);
+            missing.erase(comma, 1);
+        }
+        assert(!import_staging_record_json(missing));
+    }
+    for (const auto& malformed : {
+        replace_record_text(valid, "{\n", "{\n\"unknown\": 0,\n"),
+        replace_record_text(valid, "{\n", "{\n\"schema_version\": \"1.0\",\n"),
+        replace_record_text(valid, "\"schema_version\": \"1.0\"", "\"schema_version\": \"2.0\""),
+        replace_record_text(valid, "\"schema_version\": \"1.0\",", "\"schema_version\": \"1.0\""),
+        replace_record_text(valid, "\"current_state\": \"idle\"", "\"current_state\": \"unknown\""),
+        replace_record_text(valid, "\"expected_bytes\": 0", "\"expected_bytes\": true"),
+        replace_record_text(valid, "\"expected_bytes\": 0", "\"expected_bytes\": 00"),
+        replace_record_text(valid, "\"expected_bytes\": 0", "\"expected_bytes\": 18446744073709551616"),
+        replace_record_text(valid, "\"last_error\": \"\"", "\"last_error\": \"\\q\""),
+        replace_record_text(valid, "\"last_error\": \"\"", "\"last_error\": \"raw\ncontrol\""),
+        replace_record_text(valid, "\"last_error\": \"\"", "\"last_error\": \"\\uGGGG\""),
+        replace_record_text(valid, "\"last_error\": \"\"", "\"last_error\": \"\\uD800\""),
+        replace_record_text(valid, "\"last_error\": \"\"", "\"last_error\": \"\\uDC00\""),
+        replace_record_text(valid, "\"staged_package_path\": \"\"", "\"staged_package_path\": \"\","),
+        valid + "garbage"}) {
+        assert(!import_staging_record_json(malformed));
+    }
+    StagingRecord escaped;
+    escaped.last_error = "quote\" slash\\ tab\t newline\n return\r backspace\b formfeed\f";
+    escaped.last_error.push_back('\1');
+    escaped.last_error += "\xc3\xa9";
+    const auto roundtrip = import_staging_record_json(export_staging_record_json(escaped));
+    assert(roundtrip && roundtrip->last_error == escaped.last_error);
+    const auto unicode = import_staging_record_json(replace_record_text(
+        valid, "\"last_error\": \"\"", "\"last_error\": \"\\u00e9\\uD83D\\uDE00\""));
+    assert(unicode && unicode->last_error == "\xc3\xa9\xf0\x9f\x98\x80");
+    StagingRecord inconsistent;
+    inconsistent.expected_bytes = 1;
+    inconsistent.staged_bytes = 2;
+    assert(!import_staging_record_json(export_staging_record_json(inconsistent)));
+}
+
+void test_record_startup_preflight() {
+    ScopedTestDirs dirs("record_preflight_" + std::to_string(GetCurrentProcessId()));
+    UpdateStagingController controller(dirs.config());
+    assert(controller.init().ok());
+    controller.set_deferred("trusted prior state");
+    const auto before = export_staging_record_json(controller.record());
+    const auto record = std::filesystem::path(dirs.staging) / "staging_record.json";
+    const auto part = std::filesystem::path(dirs.staging) / "update_package.part";
+    const auto package = std::filesystem::path(dirs.staging) / "update_package.pkg";
+    const auto active = std::filesystem::path(dirs.active) / "nstu-service.exe";
+    std::filesystem::create_directories(dirs.backup);
+    const auto backup = std::filesystem::path(dirs.backup) / "nstu-service.exe";
+    for (const auto& path : {part, package, active, backup}) write_test_file(path, "preserved canary");
+    for (const auto& bad : {std::string{}, std::string("{}"), std::string(64 * 1024 + 1, ' ')}) {
+        write_test_file(record, bad);
+        const auto result = controller.init();
+        assert(!result.ok());
+        assert(result.error == UpdateStagingError::invalid_state);
+        assert(result.message.size() <= 192);
+        assert(export_staging_record_json(controller.record()) == before);
+        assert(read_test_file(record) == bad);
+        for (const auto& path : {part, package, active, backup}) assert(read_test_file(path) == "preserved canary");
+    }
+    write_test_file(record, before);
+    const HANDLE lock = CreateFileW(record.c_str(), GENERIC_READ, 0, nullptr,
+                                    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    assert(lock != INVALID_HANDLE_VALUE);
+    const auto locked = controller.init();
+    assert(CloseHandle(lock));
+    assert(!locked.ok() && locked.error == UpdateStagingError::io_error);
+    assert(locked.message.size() <= 192);
+    assert(export_staging_record_json(controller.record()) == before);
+    assert(read_test_file(record) == before);
+    std::filesystem::remove(record);
+    std::filesystem::create_directory(record);
+    const auto directory = controller.init();
+    assert(!directory.ok() && directory.error == UpdateStagingError::io_error);
+    assert(directory.message.size() <= 192);
+    assert(export_staging_record_json(controller.record()) == before);
+    std::filesystem::remove(record);
+    const auto missing_target = dirs.root / "missing-record-target";
+    assert(!std::filesystem::exists(missing_target));
+    assert(CreateSymbolicLinkW(record.c_str(), missing_target.c_str(),
+                               SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE));
+    const auto link_attributes = GetFileAttributesW(record.c_str());
+    assert(link_attributes != INVALID_FILE_ATTRIBUTES);
+    assert((link_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
+    const auto dangling = controller.init();
+    assert(!dangling.ok() && dangling.error == UpdateStagingError::io_error);
+    assert(dangling.message.size() <= 192);
+    assert(export_staging_record_json(controller.record()) == before);
+    const auto preserved_attributes = GetFileAttributesW(record.c_str());
+    assert(preserved_attributes != INVALID_FILE_ATTRIBUTES);
+    assert((preserved_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0);
+    assert(!std::filesystem::exists(missing_target));
+    for (const auto& path : {part, package, active, backup}) assert(read_test_file(path) == "preserved canary");
+    assert(DeleteFileW(record.c_str()));
+    auto boundary = export_staging_record_json(StagingRecord{});
+    boundary.resize(64 * 1024, ' ');
+    write_test_file(record, boundary);
+    assert(controller.init().ok());
+    assert(controller.state() == UpdateState::idle);
+    boundary.push_back(' ');
+    write_test_file(record, boundary);
+    const auto oversized = controller.init();
+    assert(!oversized.ok() && oversized.error == UpdateStagingError::invalid_state);
+    assert(controller.state() == UpdateState::idle);
+    assert(read_test_file(record) == boundary);
+}
+
+void test_record_path_preflight() {
+    ScopedTestDirs dirs("record_paths_" + std::to_string(GetCurrentProcessId()));
+    UpdateStagingController controller(dirs.config());
+    assert(controller.init().ok());
+    controller.set_deferred("trusted prior state");
+    const auto before = export_staging_record_json(controller.record());
+    const auto record = std::filesystem::path(dirs.staging) / "staging_record.json";
+    const auto part = std::filesystem::path(dirs.staging) / "update_package.part";
+    const auto package = std::filesystem::path(dirs.staging) / "update_package.pkg";
+    const auto active = std::filesystem::path(dirs.active) / "nstu-service.exe";
+    std::filesystem::create_directories(dirs.backup);
+    const auto backup = std::filesystem::path(dirs.backup) / "nstu-service.exe";
+    for (const auto& path : {part, package, active, backup}) write_test_file(path, "preserved path canary");
+    std::vector<StagingRecord> invalid;
+    StagingRecord candidate;
+    candidate.current_state = UpdateState::downloading;
+    candidate.expected_bytes = 10;
+    candidate.target_sha256_hex = std::string(64, '0');
+    for (const auto& path : {(dirs.root / "foreign.pkg").string(),
+                            dirs.staging + "\\..\\staging\\update_package.pkg",
+                            dirs.staging + "\\.\\update_package.pkg",
+                            std::string("C:drive-relative.pkg"),
+                            std::string("\\\\no-probe.invalid\\share\\package.pkg")}) {
+        candidate.staged_package_path = path;
+        invalid.push_back(candidate);
+    }
+    candidate.staged_package_path = package.string() + std::string(1, '\0') + "suffix";
+    invalid.push_back(candidate);
+    candidate.staged_package_path.clear();
+    candidate.backup_path = (dirs.root / "foreign_backup").string();
+    invalid.push_back(candidate);
+    for (const auto& value : invalid) {
+        const auto bytes = export_staging_record_json(value);
+        write_test_file(record, bytes);
+        const auto result = controller.init();
+        assert(!result.ok() && result.error == UpdateStagingError::invalid_state);
+        assert(result.message.size() <= 192);
+        assert(export_staging_record_json(controller.record()) == before);
+        assert(read_test_file(record) == bytes);
+        for (const auto& path : {part, package, active, backup}) assert(read_test_file(path) == "preserved path canary");
+    }
+    candidate.current_state = UpdateState::staged;
+    candidate.staged_bytes = candidate.expected_bytes;
+    candidate.backup_path = dirs.backup;
+    candidate.staged_package_path = package.generic_string();
+    write_test_file(record, export_staging_record_json(candidate));
+    assert(controller.init().ok());
+    assert(controller.state() == UpdateState::staged);
+    assert(controller.record().backup_path == dirs.backup);
+    assert(controller.record().staged_package_path == package.string());
+    for (const auto& path : {part, package, active, backup}) assert(read_test_file(path) == "preserved path canary");
+}
+
+} // namespace
+
 int main() {
     std::cout << "[update_staging_tests] running test suites...\n";
 
@@ -339,5 +544,9 @@ int main() {
     std::cout << "  PASS test_staging_deferral\n";
 
     std::cout << "[update_staging_tests] ALL 8 TEST SUITES PASSED.\n";
+    test_record_json_preflight();
+    test_record_startup_preflight();
+    test_record_path_preflight();
+    std::cout << "[update_staging_tests] ALL PREFLIGHT REGRESSIONS PASSED.\n";
     return 0;
 }
