@@ -1,4 +1,4 @@
-<img width="1280" height="640" alt="photo_2026-09-11_19-20-47" src="docs/assets/banner.png" />
+<img width="1280" height="640" alt="NSTU Windows computer lab management banner" src="docs/assets/banner.png" />
 
 ---
 
