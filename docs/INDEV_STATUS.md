@@ -173,6 +173,21 @@ The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`ta
 | **Signed Update Manifest & Asymmetric Verification** | `common/include/nstu/update_manifest.hpp` and `common/src/update_manifest.cpp` implementing update manifest data model, asymmetric ECDSA P-256 digital signature signing & verification via Windows BCrypt (`BCRYPT_ECDSA_P256_ALGORITHM`) with client public trust root verification, canonical signing payload binding `rollout_percentage`, anti-downgrade and equal-version (`already_up_to_date`) engine, fail-closed JSON parser, and deterministic canary rollout bucketing engine in `tests/update_manifest_tests.cpp` | **Merged to main** (`7a8db01`) |
 | **Update Staging & Rollback State Machine** | `common/include/nstu/update_staging.hpp` and `common/src/update_staging.cpp` implementing 11-stage client update lifecycle (`UpdateStagingController`), atomic chunk streaming to `.part` files with incremental BCrypt SHA-256 computation, fail-closed deletion upon mismatch/overflow/truncation, transactional active directory backup, atomic rollback restoration upon validation failure, immediate disk space reclamation, and persistent `staging_record.json` state recording in `tests/update_staging_tests.cpp` | **Merged to main** (`bd8749d`) |
 
+## Fleet Version Inventory & Rollout Draft — INDEV
+
+`FLEET-UPDATE-SERVICE-UI-1A` adds a Technician/Developer version inventory and
+session-only release-channel, maintenance-plan and canary-percentage draft.
+Teacher access is denied, invalid draft changes preserve the current settings,
+and changing to an unauthorized role closes the modal and resets the draft.
+Unknown versions and offline reports remain explicitly unknown or last reported;
+no approved-target or up-to-date status is inferred.
+
+The manifest and staging modules above remain foundations. This increment does
+not deploy packages, send settings to clients, verify thaw/maintenance readiness
+or execute rollback. Production updater wiring, authenticated status reports,
+canary health/pause, rollback and real VM/LTSC/UWF/Deep Freeze qualification remain
+required. This surface and the wider update workflow remain **INDEV**.
+
 ## Phase 5 Security Delivery Roadmap (Tasks 18–23) — Complete
 
 | Task | Title | Key Objective | Status |

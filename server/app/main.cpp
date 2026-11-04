@@ -48,6 +48,7 @@
 #include <fstream>
 #include <deque>
 #include <iomanip>
+#include <map>
 #include <sstream>
 #include <span>
 #include <string>
@@ -502,6 +503,8 @@ struct DashboardState {
     bool support_bundle_consented = false;
     std::string support_bundle_preview;
     bool room_profile_modal_open = false;
+    bool software_updates_modal_open = false;
+    nstu::server::FleetUpdateConfig fleet_update_config;
     std::string room_profile_export_text;
     std::array<char, 65536> room_profile_import_buffer{};
     std::string room_profile_status_message;
@@ -3415,6 +3418,139 @@ void draw_telemetry_report_popup(DashboardState& state,
     ImGui::EndPopup();
 }
 
+void draw_software_updates_modal(
+    const std::vector<nstu::server::ClientRecord>& clients,
+    DashboardState& state) {
+    const bool permitted = is_action_permitted(
+        state.current_role, OperatorAction::manage_software_updates);
+    const char* title = tr(state, "Software Updates###software-updates-modal",
+                                 "Cập nhật phần mềm###software-updates-modal");
+    if (state.software_updates_modal_open) {
+        state.software_updates_modal_open = false;
+        if (permitted) {
+            ImGui::OpenPopup(title);
+        }
+    }
+    if (!permitted) {
+        state.fleet_update_config = {};
+    }
+
+    constexpr float kFleetUpdateModalWidth = 760.0f;
+    constexpr float kFleetUpdateModalHeight = 620.0f;
+    const auto* viewport = ImGui::GetMainViewport();
+    const auto& style = ImGui::GetStyle();
+    const ImVec2 available{
+        std::max(1.0f, viewport->WorkSize.x - style.WindowPadding.x * 2.0f),
+        std::max(1.0f, viewport->WorkSize.y - style.WindowPadding.y * 2.0f)};
+    ImGui::SetNextWindowPos(viewport->GetWorkCenter(), ImGuiCond_Appearing, {0.5f, 0.5f});
+    ImGui::SetNextWindowSize({std::min(scaled(kFleetUpdateModalWidth), available.x),
+                              std::min(scaled(kFleetUpdateModalHeight), available.y)});
+    bool open = true;
+    if (!ImGui::BeginPopupModal(title, &open, ImGuiWindowFlags_NoResize)) {
+        return;
+    }
+    if (!permitted || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+
+    std::map<std::string, std::size_t> versions;
+    std::size_t known_versions = 0;
+    for (const auto& client : clients) {
+        if (!client.client_version.empty()) {
+            ++versions[client.client_version];
+            ++known_versions;
+        }
+    }
+    ImGui::Text(tr(state, "Computers: %zu | Reported version: %zu | Unknown: %zu",
+                         "Máy tính: %zu | Có phiên bản: %zu | Chưa rõ: %zu"),
+                clients.size(), known_versions, clients.size() - known_versions);
+    if (ImGui::TreeNode(tr(state, "Reported version distribution", "Phân bố phiên bản được báo cáo"))) {
+        for (const auto& [version, count] : versions) {
+            ImGui::BulletText("%s: %zu", version.c_str(), count);
+        }
+        ImGui::TreePop();
+    }
+    ImGui::TextWrapped("%s", tr(state,
+        "Offline versions are last reported and may be stale. No approved target release is selected.",
+        "Phiên bản của máy ngoại tuyến là báo cáo gần nhất và có thể đã cũ. Chưa chọn bản phát hành đích được phê duyệt."));
+    ImGui::Separator();
+    ImGui::TextUnformatted(tr(state, "Rollout draft (this app session only)",
+                                   "Bản nháp triển khai (chỉ trong phiên ứng dụng này)"));
+    ImGui::TextWrapped("%s", tr(state,
+        "These preferences are not saved or sent to computers. Package deployment and rollback are not available yet.",
+        "Các lựa chọn này không được lưu hoặc gửi tới máy tính. Chức năng triển khai gói và khôi phục phiên bản chưa khả dụng."));
+    auto proposed = state.fleet_update_config;
+    int channel_index = static_cast<int>(proposed.channel) - 1;
+    const char* channel_labels[] = {
+        tr(state, "LTSC Stable", "LTSC ổn định"),
+        tr(state, "Security Hotfixes", "Bản vá bảo mật"),
+        tr(state, "Pilot Canary", "Thử nghiệm Canary"),
+    };
+    bool changed = ImGui::Combo(tr(state, "Release channel", "Kênh phát hành"),
+                                &channel_index, channel_labels, 3);
+    proposed.channel = static_cast<nstu::update::ReleaseChannel>(channel_index + 1);
+    changed |= ImGui::Checkbox(tr(state, "Maintenance window planned", "Đã lên lịch bảo trì"),
+                               &proposed.maintenance_window_planned);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("%s", tr(state,
+            "Planning acknowledgment only. Verify the actual UWF or Deep Freeze thaw/maintenance state on each computer before deployment.",
+            "Chỉ xác nhận kế hoạch. Cần kiểm tra trạng thái bảo trì hoặc Thawed của UWF/Deep Freeze trên từng máy trước khi triển khai."));
+    }
+    changed |= ImGui::SliderInt(tr(state, "Canary rollout", "Tỷ lệ thử nghiệm"),
+                                &proposed.canary_rollout_percentage, 0, 100, "%d%%",
+                                ImGuiSliderFlags_AlwaysClamp);
+    if (changed) {
+        (void)nstu::server::try_set_fleet_update_config(
+            state.current_role, state.fleet_update_config, proposed);
+    }
+    ImGui::Spacing();
+    if (clients.empty()) {
+        ImGui::TextWrapped("%s", tr(state, "No computers have reported fleet metadata yet.",
+                                          "Chưa có máy tính báo cáo thông tin hệ thống."));
+    } else {
+        const float table_height = std::max(ImGui::GetTextLineHeightWithSpacing(),
+            ImGui::GetContentRegionAvail().y - ImGui::GetFrameHeightWithSpacing());
+        ImGui::PushStyleVar(ImGuiStyleVar_CellPadding,
+            {style.CellPadding.x, std::max(style.CellPadding.y, scaled(6.0f))});
+        ImGui::PushStyleColor(ImGuiCol_TableHeaderBg,
+                              ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
+        if (ImGui::BeginTable("software-update-inventory", 4,
+            ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+            {0.0f, table_height})) {
+            ImGui::TableSetupColumn(tr(state, "Computer", "Máy tính"));
+            ImGui::TableSetupColumn(tr(state, "Address", "Địa chỉ"));
+            ImGui::TableSetupColumn(tr(state, "Reported version", "Phiên bản báo cáo"));
+            ImGui::TableSetupColumn(tr(state, "Connection", "Kết nối"));
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableHeadersRow();
+            for (const auto& client : clients) {
+                push_client_id(client.id);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(client.hostname.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(client.address.c_str());
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(client.client_version.empty()
+                    ? tr(state, "Unknown", "Chưa rõ") : client.client_version.c_str());
+                ImGui::TableNextColumn();
+                draw_status_badge(client.status, state);
+                pop_client_id();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
+    }
+    if (ImGui::Button(tr(state, "Close", "Đóng"))) {
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 void draw_support_bundle_modal(DashboardState& state) {
     if (state.support_bundle_modal_open) {
         state.support_bundle_modal_open = false;
@@ -5003,6 +5139,12 @@ void draw_technician_fleet_health(
     const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
+    if (is_action_permitted(state.current_role, OperatorAction::manage_software_updates)) {
+        if (ImGui::Button(tr(state, "Software Updates...", "Cập nhật phần mềm..."))) {
+            state.software_updates_modal_open = true;
+        }
+        ImGui::Spacing();
+    }
     if (clients.empty()) {
         ImGui::SetCursorPosY(scaled(80.0f));
         ImGui::TextDisabled("%s", tr(state, "No computers enrolled or discovered in fleet.",
@@ -5365,6 +5507,7 @@ void draw_dashboard_shell(
         state.view = DashboardView::room_screens;
     }
     draw_menu_strip(state, !clients.empty(), control_plane);
+    draw_software_updates_modal(clients, state);
     draw_telemetry_report_popup(state, clients.size());
     draw_support_bundle_modal(state);
     draw_room_profile_modal(state, control_plane);

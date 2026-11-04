@@ -21,6 +21,7 @@ bool is_action_permitted(OperatorRole role, OperatorAction action) noexcept {
         case OperatorAction::view_fleet_health:
         case OperatorAction::view_diagnostics_raw:
         case OperatorAction::export_telemetry_report:
+        case OperatorAction::manage_software_updates:
             return false;
         }
         return false;
@@ -39,6 +40,7 @@ bool is_action_permitted(OperatorRole role, OperatorAction action) noexcept {
         case OperatorAction::manage_settings:
         case OperatorAction::wake_on_lan:
         case OperatorAction::distribute_file:
+        case OperatorAction::manage_software_updates:
             return true;
         case OperatorAction::view_diagnostics_raw:
         case OperatorAction::export_telemetry_report:
@@ -47,6 +49,24 @@ bool is_action_permitted(OperatorRole role, OperatorAction action) noexcept {
         return false;
 
     case OperatorRole::developer:
+        return true;
+    }
+    return false;
+}
+
+bool try_set_fleet_update_config(
+    OperatorRole role, FleetUpdateConfig& current,
+    const FleetUpdateConfig& proposed) noexcept {
+    if (!is_action_permitted(role, OperatorAction::manage_software_updates) ||
+        proposed.canary_rollout_percentage < 0 ||
+        proposed.canary_rollout_percentage > 100) {
+        return false;
+    }
+    switch (proposed.channel) {
+    case update::ReleaseChannel::ltsc_stable:
+    case update::ReleaseChannel::security:
+    case update::ReleaseChannel::pilot:
+        current = proposed;
         return true;
     }
     return false;

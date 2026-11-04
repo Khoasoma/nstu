@@ -49,6 +49,7 @@ void test_teacher_permissions() {
     assert(!is_action_permitted(role, OperatorAction::view_fleet_health));
     assert(!is_action_permitted(role, OperatorAction::view_diagnostics_raw));
     assert(!is_action_permitted(role, OperatorAction::export_telemetry_report));
+    assert(!is_action_permitted(role, OperatorAction::manage_software_updates));
 }
 
 void test_technician_permissions() {
@@ -77,6 +78,7 @@ void test_technician_permissions() {
     // Raw internal diagnostics & export remain developer-only
     assert(!is_action_permitted(role, OperatorAction::view_diagnostics_raw));
     assert(!is_action_permitted(role, OperatorAction::export_telemetry_report));
+    assert(is_action_permitted(role, OperatorAction::manage_software_updates));
 }
 
 void test_developer_permissions() {
@@ -101,6 +103,7 @@ void test_developer_permissions() {
     assert(is_action_permitted(role, OperatorAction::manage_settings));
     assert(is_action_permitted(role, OperatorAction::wake_on_lan));
     assert(is_action_permitted(role, OperatorAction::distribute_file));
+    assert(is_action_permitted(role, OperatorAction::manage_software_updates));
 }
 
 } // namespace

@@ -4,6 +4,7 @@
 #include "nstu/stream_rearm_watchdog.hpp"
 #include "nstu/support_bundle.hpp"
 #include "nstu/room_profile.hpp"
+#include "nstu/update_manifest.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -26,9 +27,62 @@ nstu::control::UwfProtectionProbe protected_probe() {
     return probe;
 }
 
+void test_fleet_update_draft() {
+    using nstu::server::FleetUpdateConfig;
+    using nstu::server::OperatorRole;
+    using nstu::server::try_set_fleet_update_config;
+    using nstu::update::ReleaseChannel;
+
+    FleetUpdateConfig current;
+    assert(current.channel == ReleaseChannel::ltsc_stable);
+    assert(current.canary_rollout_percentage == 0);
+    assert(!current.maintenance_window_planned);
+
+    const FleetUpdateConfig requested{ReleaseChannel::pilot, true, 10};
+    assert(!try_set_fleet_update_config(OperatorRole::teacher, current, requested));
+    assert(current.channel == ReleaseChannel::ltsc_stable);
+    assert(current.canary_rollout_percentage == 0);
+    assert(!current.maintenance_window_planned);
+    assert(!try_set_fleet_update_config(static_cast<OperatorRole>(-1), current, requested));
+    assert(current.channel == ReleaseChannel::ltsc_stable);
+    assert(current.canary_rollout_percentage == 0);
+    assert(!current.maintenance_window_planned);
+
+    for (const auto role : {OperatorRole::technician, OperatorRole::developer}) {
+        for (const auto channel : {ReleaseChannel::ltsc_stable, ReleaseChannel::security, ReleaseChannel::pilot}) {
+            for (const int percentage : {0, 10, 100}) {
+                const FleetUpdateConfig valid{channel, true, percentage};
+                assert(try_set_fleet_update_config(role, current, valid));
+                assert(current.channel == channel);
+                assert(current.canary_rollout_percentage == percentage);
+                assert(current.maintenance_window_planned);
+            }
+        }
+    }
+    for (const auto invalid_channel : {static_cast<ReleaseChannel>(0), static_cast<ReleaseChannel>(4)}) {
+        const FleetUpdateConfig invalid{invalid_channel, false, 10};
+        assert(!try_set_fleet_update_config(OperatorRole::technician, current, invalid));
+        assert(current.channel == ReleaseChannel::pilot);
+        assert(current.canary_rollout_percentage == 100);
+        assert(current.maintenance_window_planned);
+    }
+    for (const int invalid_percentage : {-1, 101}) {
+        const FleetUpdateConfig invalid{ReleaseChannel::security, false, invalid_percentage};
+        assert(!try_set_fleet_update_config(OperatorRole::developer, current, invalid));
+        assert(current.channel == ReleaseChannel::pilot);
+        assert(current.canary_rollout_percentage == 100);
+        assert(current.maintenance_window_planned);
+    }
+    assert(!try_set_fleet_update_config(OperatorRole::teacher, current, requested));
+    assert(current.channel == ReleaseChannel::pilot);
+    assert(current.canary_rollout_percentage == 100);
+    assert(current.maintenance_window_planned);
+}
+
 } // namespace
 
 int main() {
+    test_fleet_update_draft();
     using namespace std::chrono_literals;
     nstu::server::ClientRegistry registry;
     assert(registry.size() == 0);

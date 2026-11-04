@@ -1,5 +1,7 @@
 #pragma once
 
+#include "nstu/update_manifest.hpp"
+
 #include <cstdint>
 #include <string_view>
 
@@ -26,7 +28,20 @@ enum class OperatorAction : int {
     shutdown_client = 11,
     wake_on_lan = 12,
     distribute_file = 13,
+    manage_software_updates = 14,
 };
+
+struct FleetUpdateConfig {
+    // Session-only planning preferences, never proof of maintenance readiness
+    // or authorization to stage/apply a package on a client.
+    update::ReleaseChannel channel{update::ReleaseChannel::ltsc_stable};
+    bool maintenance_window_planned{false};
+    int canary_rollout_percentage{0};
+};
+
+[[nodiscard]] bool try_set_fleet_update_config(
+    OperatorRole role, FleetUpdateConfig& current,
+    const FleetUpdateConfig& proposed) noexcept;
 
 [[nodiscard]] bool is_action_permitted(
     OperatorRole role,
