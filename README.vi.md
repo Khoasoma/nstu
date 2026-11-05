@@ -25,9 +25,22 @@ NSTU là dự án quản lý lớp học và phòng máy Windows miễn phí, m�
 lệnh điều khiển được xác thực, chat, snapshot màn hình tiết kiệm băng thông và
 broadcast màn hình giáo viên trong mạng nội bộ.
 
-![Dashboard NSTU Server ở chế độ sáng tiếng Anh và chế độ tối tiếng Việt](docs/assets/server-dashboard-preview.png)
+## Bản xem trước thiết kế giao diện
 
-*Dashboard server: chế độ sáng tiếng Anh và chế độ tối tiếng Việt.*
+Giao diện tổng quan lớp học mới bằng tiếng Anh, sử dụng máy tính mẫu và thao tác mô phỏng.
+
+![Bản thiết kế giao diện lớp học Project NSTU ở chế độ sáng với dữ liệu mẫu](docs/assets/classroom-design-light.png)
+
+<details>
+<summary>Xem giao diện tối</summary>
+
+![Bản thiết kế giao diện lớp học Project NSTU ở chế độ tối với dữ liệu mẫu](docs/assets/classroom-design-dark.png)
+
+</details>
+
+*Chỉ là bản xem trước thiết kế. Ảnh sử dụng dữ liệu mẫu và thao tác mô phỏng; không có máy tính thật được kết nối.*
+
+[Website dự án](https://nstu-em7.pages.dev)
 
 > **Trạng thái phát triển:** NSTU hiện là engineering MVP, chưa phải bản
 > production. Persisted enrollment, dispatcher nhiều client, authenticated

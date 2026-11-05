@@ -25,9 +25,22 @@ for Windows. It is designed around a centralized teacher server, lightweight
 student clients, authenticated control commands, chat, low-bandwidth client
 screen snapshots, and teacher-screen broadcast over a local network.
 
-![NSTU Server dashboard in English light mode and Vietnamese dark mode](docs/assets/server-dashboard-preview.png)
+## Interface design preview
 
-*Server dashboard: English light mode and Vietnamese dark mode.*
+A preview of the new classroom overview in English, using sample computers and simulated actions.
+
+![Project NSTU classroom interface design in light appearance with sample data](docs/assets/classroom-design-light.png)
+
+<details>
+<summary>View the dark appearance</summary>
+
+![Project NSTU classroom interface design in dark appearance with sample data](docs/assets/classroom-design-dark.png)
+
+</details>
+
+*Design preview only. These images show sample data and simulated actions; no real computers are connected.*
+
+[Project website](https://nstu-em7.pages.dev)
 
 > **Development status:** NSTU is currently an engineering MVP, not a
 > production release. Persisted enrollment, multi-client dispatch, authenticated
