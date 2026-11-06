@@ -146,3 +146,68 @@ assert.equal(fields.exam.questions[2].answerPlaceholder, 'Original C');
 fields.setIndex(999); placeholderInput('Missing target event');
 assert.equal(fields.exam.questions.length, 3);
 console.log('Studio short-answer placeholder binding and manifest: 6 scenarios passed');
+
+const renderStart = studioSource.indexOf('  function renderEditor() {');
+const renderEnd = studioSource.indexOf('  function renderActiveQuestionForm()', renderStart);
+const addStart = studioSource.indexOf('  function addQuestion(type) {');
+const addEnd = studioSource.indexOf('  let previewIndex = 0;', addStart);
+const syncStart = studioSource.indexOf('  function syncExamMetadata() {');
+const syncEnd = studioSource.indexOf('  async function exportPackage()', syncStart);
+const originsStart = studioSource.indexOf('  function parseOriginsInput(raw) {');
+const originsEnd = studioSource.indexOf('  function validateOrigin(', originsStart);
+assert.ok([renderStart, renderEnd, addStart, addEnd, syncStart, syncEnd, originsStart, originsEnd].every(index => index >= 0));
+const transitionNodes = new Map();
+function transitionNode(id = '') {
+  const node = { value: '', children: [], listeners: {}, textContent: '',
+    addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); },
+    appendChild(child) { this.children.push(child); } };
+  Object.defineProperty(node, 'innerHTML', { set(value) { this.html = value; this.children = []; }, get() { return this.html; } });
+  if (id) transitionNodes.set(id, node);
+  return node;
+}
+const transitions = vm.runInNewContext(`(() => {
+  let currentExam = { id: 'old-id', title: 'Old title', subject: 'Old subject', durationSeconds: 600,
+    questions: [{ id: 'a', type: 'short_answer', prompt: 'A' }, { id: 'b', type: 'short_answer', prompt: 'B' }] };
+  let activeQuestionIndex = 0;
+  const el = getNode, escapeHtml = value => value;
+  const renderActiveQuestionForm = () => {}, showToast = () => {};
+  ${studioSource.slice(renderStart, renderEnd)}
+  ${studioSource.slice(addStart, addEnd)}
+  ${studioSource.slice(originsStart, originsEnd)}
+  ${studioSource.slice(syncStart, syncEnd)}
+  renderEditor();
+  return { exam: currentExam, add: addQuestion, selectedIndex() { return activeQuestionIndex; } };
+})()`, { getNode: id => transitionNodes.get(id) || transitionNode(id),
+  document: { createElement: () => transitionNode() } });
+function editTransitionMetadata(title) {
+  const values = { 'exam-id': ' new-id ', 'exam-title': title, 'exam-subject': ' New subject ',
+    'exam-duration': '43', 'exam-allowed-origins': ' https://example.test\nhttps://example.test ' };
+  for (const [id, value] of Object.entries(values)) transitionNodes.get(id).value = value;
+}
+function assertTransitionMetadata(title) {
+  assert.equal(transitions.exam.id, 'new-id');
+  assert.equal(transitions.exam.title, title);
+  assert.equal(transitions.exam.subject, 'New subject');
+  assert.equal(transitions.exam.durationSeconds, 2580);
+  assert.deepEqual([...transitions.exam.allowedOrigins], ['https://example.test']);
+  assert.equal(transitionNodes.get('exam-title').value, title);
+}
+function clickQuestion(index, remove = false) {
+  const row = transitionNodes.get('question-nav-list').children[index];
+  row.listeners.click[0]({ target: { closest: () => remove ? {} : null } });
+}
+editTransitionMetadata('Selection metadata'); clickQuestion(1); assertTransitionMetadata('Selection metadata');
+assert.equal(transitions.selectedIndex(), 1);
+assert.deepEqual([...transitions.exam.questions].map(q => q.id), ['a', 'b']);
+editTransitionMetadata('Added metadata'); transitions.add('short_answer'); assertTransitionMetadata('Added metadata');
+assert.equal(transitions.exam.questions.length, 3); assert.equal(transitions.selectedIndex(), 2);
+const addedQuestion = JSON.stringify(transitions.exam.questions[2]);
+editTransitionMetadata('Deleted metadata'); clickQuestion(0, true); assertTransitionMetadata('Deleted metadata');
+assert.equal(transitions.exam.questions.length, 2); assert.equal(transitions.selectedIndex(), 1);
+assert.equal(JSON.stringify(transitions.exam.questions[1]), addedQuestion);
+clickQuestion(0, true); assert.equal(transitions.exam.questions.length, 1);
+editTransitionMetadata('Last-question guard metadata'); clickQuestion(0, true);
+assertTransitionMetadata('Last-question guard metadata');
+assert.equal(transitions.exam.questions.length, 1);
+assert.equal(JSON.stringify(transitions.exam.questions[0]), addedQuestion);
+console.log('Studio metadata on select/add/delete/last-question guard: 4 scenarios passed');

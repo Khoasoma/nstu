@@ -175,6 +175,7 @@
       `;
 
       item.addEventListener("click", (e) => {
+        syncExamMetadata();
         if (e.target.closest("[data-delete]")) {
           deleteQuestion(idx);
           return;
@@ -311,6 +312,7 @@
   }
 
   function addQuestion(type) {
+    syncExamMetadata();
     const nextNum = currentExam.questions.length + 1;
     let newQ;
 
