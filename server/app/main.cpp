@@ -2653,20 +2653,14 @@ void draw_selected_client(
     if (stream.fps_sample_ready) ImGui::Text("%.1f FPS", stream.observed_fps);
     ImGui::PopStyleColor();
 
-    ImGui::PushStyleColor(
-        ImGuiCol_Button, g_dark_mode ? ImVec4{0.82f, 0.81f, 0.78f, 1.0f}
-                                     : ImVec4{0.12f, 0.12f, 0.11f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_ButtonHovered,
-        g_dark_mode ? ImVec4{0.90f, 0.89f, 0.86f, 1.0f}
-                    : ImVec4{0.20f, 0.20f, 0.19f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_ButtonActive,
-        g_dark_mode ? ImVec4{0.96f, 0.95f, 0.92f, 1.0f}
-                    : ImVec4{0.25f, 0.25f, 0.24f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_Text, g_dark_mode ? ImVec4{0.10f, 0.10f, 0.09f, 1.0f}
-                                   : ImVec4{1.0f, 1.0f, 1.0f, 1.0f});
+    ImGui::PushStyleColor(ImGuiCol_Button,
+        nstu::ui::interim_color(nstu::ui::ColorRole::accent, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+        nstu::ui::interim_color(nstu::ui::ColorRole::accent_hover, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+        nstu::ui::interim_color(nstu::ui::ColorRole::accent_hover, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        nstu::ui::interim_color(nstu::ui::ColorRole::on_accent, g_dark_mode));
     ImGui::BeginDisabled(state.auto_monitor);
     if (ImGui::Button(selected_client->snapshotting
                           ? tr(state, "Stop snapshots", "Dừng chụp")
@@ -2699,7 +2693,6 @@ void draw_selected_client(
             "snapshot theo từng máy."));
     }
     ImGui::PopStyleColor(4);
-    ImGui::SameLine();
     const bool remote_available = selected_client->status !=
         nstu::server::ClientStatus::offline;
     const bool legacy_open_here = g_remote_window != nullptr &&
@@ -2808,14 +2801,20 @@ void draw_selected_client(
     // Keyboard entry and the offline auto-stop now belong to the separate
     // remote-control window: it forwards real key events and the main loop
     // closes it when the controlled client drops offline.
-    ImGui::SameLine();
+    ImGui::Separator();
+    const auto next_action = [&](const char* label) {
+        const float width = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
+        if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width <= right)
+            ImGui::SameLine();
+    };
     if (ImGui::Button(state.annotation_enabled
                           ? tr(state, "Finish drawing", "Kết thúc vẽ")
                           : tr(state, "Draw on screen", "Vẽ lên màn hình"))) {
         state.annotation_enabled = !state.annotation_enabled;
         state.annotation_dragging = false;
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Clear drawing", "Xóa nét vẽ"));
     if (ImGui::Button(tr(state, "Clear drawing", "Xóa nét vẽ"))) {
         std::string error;
         const bool cleared =
@@ -2829,18 +2828,16 @@ void draw_selected_client(
         }
         ImGui::OpenPopup("control-status");
     }
-    ImGui::SameLine();
-    ImGui::PushStyleColor(
-        ImGuiCol_Button, g_dark_mode ? ImVec4{0.27f, 0.13f, 0.13f, 1.0f}
-                                     : ImVec4{0.99f, 0.92f, 0.92f, 1.0f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-        g_dark_mode ? ImVec4{0.36f, 0.17f, 0.17f, 1.0f}
-                    : ImVec4{0.97f, 0.86f, 0.86f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_Text, g_dark_mode ? ImVec4{0.94f, 0.56f, 0.55f, 1.0f}
-                                   : ImVec4{0.62f, 0.18f, 0.17f, 1.0f});
     const bool is_locked =
         selected_client->status == nstu::server::ClientStatus::locked;
+    next_action(is_locked ? tr(state, "Unlock client", "Mở khóa máy")
+                          : tr(state, "Lock client", "Khóa máy"));
+    ImGui::PushStyleColor(ImGuiCol_Button,
+        nstu::ui::interim_color(nstu::ui::ColorRole::danger_bg, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+        nstu::ui::interim_color(nstu::ui::ColorRole::danger_bg, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        nstu::ui::interim_color(nstu::ui::ColorRole::danger, g_dark_mode));
     if (ImGui::Button(is_locked
                            ? tr(state, "Unlock client", "Mở khóa máy")
                            : tr(state, "Lock client", "Khóa máy"))) {
@@ -2861,13 +2858,13 @@ void draw_selected_client(
         ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(3);
-    ImGui::SameLine();
+    next_action(tr(state, "Launch Web", "Mở trang web"));
     if (ImGui::Button(tr(state, "Launch Web", "Mở trang web"))) {
         state.checked_client_ids = {selected_client->id};
         state.pending_bulk_action = BulkActionKind::launch_url;
         state.bulk_confirmation_open = true;
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Reboot", "Khởi động lại"));
     const bool exam_on_selected = control_plane.exam_active(selected_client->id);
     if (exam_on_selected) {
         ImGui::BeginDisabled();
@@ -2881,7 +2878,7 @@ void draw_selected_client(
         ImGui::SetTooltip("%s", tr(state, "Power actions are disabled during active assessments.",
                                           "Không thể thao tác nguồn khi đang có bài thi."));
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Shutdown", "Tắt máy"));
     if (ImGui::Button(tr(state, "Shutdown", "Tắt máy"))) {
         state.checked_client_ids = {selected_client->id};
         state.pending_bulk_action = BulkActionKind::shutdown;
@@ -2894,7 +2891,7 @@ void draw_selected_client(
     if (exam_on_selected) {
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Wake", "Bật máy"));
     const bool is_client_online = (selected_client->status != nstu::server::ClientStatus::offline);
     const bool missing_mac = selected_client->mac_address.empty();
     const bool unsupported_wol = (selected_client->wol_support == nstu::net::WolSupportState::unsupported);
@@ -2931,7 +2928,7 @@ void draw_selected_client(
     if (disable_wake) {
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Send File", "Phát tệp"));
     const bool disable_send_file = !is_client_online || exam_on_selected;
     if (disable_send_file) {
         ImGui::BeginDisabled();
