@@ -348,3 +348,81 @@ await replacements.importFile({ name: 'broken.json', text: async () => '{broken'
 assert.equal(replacements.inspect().previewRenders, unchangedPreview.previewRenders);
 assert.equal(replacements.inspect().currentExam, unchangedPreview.currentExam);
 console.log('Studio Preview reset/refresh on model replacement: 8 scenarios passed');
+
+const exportStart = studioSource.indexOf('  let exportGeneration =') >= 0
+  ? studioSource.indexOf('  let exportGeneration =') : studioSource.indexOf('  async function exportPackage() {');
+const exportEnd = studioSource.indexOf('  async function handleImportFile(', exportStart);
+assert.ok(exportStart >= 0 && exportEnd > exportStart);
+function exportLifecycleHarness() {
+  const nodes = new Map(), pending = [], downloads = [];
+  const node = id => {
+    if (!nodes.has(id)) nodes.set(id, { style: {}, classList: { add() {} }, innerHTML: '', textContent: '', disabled: false });
+    return nodes.get(id);
+  };
+  const model = { id: 'old-export', title: 'Old content', questions: [] };
+  const exporter = vm.runInNewContext(`(() => {
+    let currentExam = model;
+    const el = getNode, syncExamMetadata = () => {},
+      validateExam = exam => exam.title ? [] : ['Invalid title'],
+      compileManifest = exam => ({ id: exam.id, title: exam.title }),
+      verifiedBrandPng = async bytes => bytes, showToast = () => {}, escapeHtml = value => value;
+    ${studioSource.slice(exportStart, exportEnd)}
+    return { exportPackage };
+  })()`, { model, getNode: node, Uint8Array, window: { NSTU_RUNNER_TEMPLATE: {
+    indexHtml: 'HTML', stylesCss: 'CSS', appJs: 'JS', brandPngBase64: 'A'.repeat(228760) } },
+    atob: () => 'PNG', btoa: () => 'A'.repeat(228760), NstuZip: { Writer: class {
+      constructor() { this.entries = new Map(); }
+      add(name, bytes) { this.entries.set(name, bytes); }
+      build() { return new Promise((resolve, reject) => pending.push({ resolve, reject,
+        manifest: JSON.parse(this.entries.get('manifest.json')) })); }
+    } }, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
+    document: { createElement: () => ({ click() { downloads.push(this.download); } }) } });
+  const result = id => ({ fileCount: 5, totalBytes: 100, archiveSha256: id + '-archive', contentSha256: id + '-content', blob: {} });
+  async function start() {
+    const promise = exporter.exportPackage();
+    for (let i = 0; i < 10; ++i) await Promise.resolve();
+    return { promise };
+  }
+  return { model, node, pending, downloads, result, start };
+}
+{
+  const h = exportLifecycleHarness(), first = await h.start();
+  assert.equal(h.pending.length, 1);
+  h.model.id = 'new-export'; h.model.title = '';
+  await (await h.start()).promise;
+  const latestStatus = h.node('export-validation-status').innerHTML;
+  h.pending[0].resolve(h.result('old')); await first.promise;
+  assert.equal(h.node('export-validation-status').innerHTML, latestStatus);
+  assert.equal(h.node('btn-download-nstuexam').disabled, true);
+}
+{
+  const h = exportLifecycleHarness(), first = await h.start();
+  h.model.id = 'new-export'; h.model.title = 'New content'; const second = await h.start();
+  h.pending[1].resolve(h.result('new')); await second.promise;
+  h.pending[0].resolve(h.result('old')); await first.promise;
+  assert.equal(h.node('lbl-content-hash').textContent, 'new-content');
+  h.node('btn-download-nstuexam').onclick(); assert.deepEqual(h.downloads, ['new-export.nstuexam']);
+  assert.equal(h.pending[1].manifest.id, 'new-export');
+}
+{
+  const h = exportLifecycleHarness(), first = await h.start();
+  h.model.title = ''; await (await h.start()).promise;
+  const latestStatus = h.node('export-validation-status').innerHTML;
+  h.pending[0].reject(new Error('Obsolete build error')); await first.promise;
+  assert.equal(h.node('export-validation-status').innerHTML, latestStatus);
+  assert.equal(h.node('btn-download-nstuexam').disabled, true);
+}
+{
+  const h = exportLifecycleHarness(), first = await h.start();
+  assert.equal(h.pending[0].manifest.id, 'old-export');
+  h.model.id = 'edited-while-building'; h.pending[0].resolve(h.result('old')); await first.promise;
+  assert.match(h.node('lbl-stage-command').textContent, /old-export\.nstuexam/);
+  h.node('btn-download-nstuexam').onclick(); assert.deepEqual(h.downloads, ['old-export.nstuexam']);
+}
+{
+  const h = exportLifecycleHarness(), first = await h.start();
+  h.pending[0].reject(new Error('Current build error')); await first.promise;
+  assert.match(h.node('export-validation-status').innerHTML, /Current build error/);
+  assert.equal(h.node('btn-download-nstuexam').disabled, true);
+}
+console.log('Studio asynchronous export ownership and manifest identity: 5 scenarios passed');

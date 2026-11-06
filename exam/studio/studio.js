@@ -935,7 +935,9 @@
     }
   }
 
+  let exportGeneration = 0;
   async function exportPackage() {
+    const generation = ++exportGeneration;
     syncExamMetadata();
 
     const modal = el("export-modal");
@@ -959,6 +961,7 @@
     try {
       const manifestObj = compileManifest(currentExam);
       const manifestJson = JSON.stringify(manifestObj, null, 2);
+      const packageId = manifestObj.id;
 
       const zip = new NstuZip.Writer();
       zip.add("manifest.json", manifestJson);
@@ -996,6 +999,7 @@
       zip.add("exam/web/assets/nstu-brand.png", brand);
 
       const result = await zip.build();
+      if (generation !== exportGeneration) return;
 
       statusBox.style.color = "var(--success)";
       statusBox.innerHTML = `✓ <strong>Exam Package Validated & Compiled Successfully!</strong><br><span style="font-size: 12px; color: var(--text-muted);">${result.fileCount} files · ${Math.round(result.totalBytes / 1024)} KiB</span>`;
@@ -1003,7 +1007,7 @@
       el("lbl-archive-hash").textContent = result.archiveSha256;
       el("lbl-content-hash").textContent = result.contentSha256;
 
-      const stageCmd = `& stage-exam-package.ps1 -ArchivePath "$env:TEMP\\${currentExam.id}.nstuexam" -PublishRoot "$env:ProgramData\\NSTU\\exams\\packages" -ExpectedArchiveSha256 "${result.archiveSha256}" -ExpectedContentSha256 "${result.contentSha256}" -AllowUnsigned`;
+      const stageCmd = `& stage-exam-package.ps1 -ArchivePath "$env:TEMP\\${packageId}.nstuexam" -PublishRoot "$env:ProgramData\\NSTU\\exams\\packages" -ExpectedArchiveSha256 "${result.archiveSha256}" -ExpectedContentSha256 "${result.contentSha256}" -AllowUnsigned`;
       el("lbl-stage-command").textContent = stageCmd;
 
       hashesBox.style.display = "flex";
@@ -1013,13 +1017,14 @@
         const url = URL.createObjectURL(result.blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${currentExam.id}.nstuexam`;
+        a.download = `${packageId}.nstuexam`;
         a.click();
         URL.revokeObjectURL(url);
         showToast("Package downloaded successfully", "success");
       };
 
     } catch (err) {
+      if (generation !== exportGeneration) return;
       statusBox.style.color = "var(--danger)";
       statusBox.innerHTML = `<strong>Build Error:</strong> ${escapeHtml(err.message)}`;
     }
