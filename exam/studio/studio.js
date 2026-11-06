@@ -236,7 +236,7 @@
     } else if (q.type === "short_answer") {
       el("q-sa-placeholder").value = q.answerPlaceholder || "";
     } else if (q.type === "essay") {
-      el("q-essay-limit").value = q.wordLimit || 250;
+      el("q-essay-limit").value = q.wordLimit ?? "";
     }
   }
 
@@ -1142,6 +1142,15 @@
     el("q-sa-placeholder").addEventListener("input", (e) => {
       const q = currentExam.questions[activeQuestionIndex];
       if (q && q.type === "short_answer") q.answerPlaceholder = e.target.value;
+    });
+
+    el("q-essay-limit").addEventListener("input", (e) => {
+      const q = currentExam.questions[activeQuestionIndex];
+      if (!q || q.type !== "essay") return;
+      if (!e.target.validity.valid) return;
+      if (e.target.value === "") delete q.wordLimit;
+      else if (Number.isInteger(e.target.valueAsNumber))
+        q.wordLimit = e.target.valueAsNumber;
     });
 
     el("q-passage").addEventListener("input", (e) => {

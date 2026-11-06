@@ -211,3 +211,31 @@ assertTransitionMetadata('Last-question guard metadata');
 assert.equal(transitions.exam.questions.length, 1);
 assert.equal(JSON.stringify(transitions.exam.questions[0]), addedQuestion);
 console.log('Studio metadata on select/add/delete/last-question guard: 4 scenarios passed');
+
+function essayLimitInput(value, valid = true, number = Number(value)) {
+  const node = fieldNode('q-essay-limit');
+  node.value = value; node.valueAsNumber = number; node.validity = { valid };
+  for (const callback of node.listeners.input || []) callback({ target: node });
+}
+fields.setIndex(2);
+fields.exam.questions[2].wordLimit = 300;
+essayLimitInput('420');
+assert.equal(fields.exam.questions[2].wordLimit, 420);
+assert.equal(fields.manifest().questions[2].wordLimit, 420);
+for (const [input, numeric] of [['9', 9], ['2001', 2001], ['21.5', 21.5], ['invalid', NaN]]) {
+  essayLimitInput(input, false, numeric);
+  assert.equal(fields.exam.questions[2].wordLimit, 420, 'invalid/intermediate input must preserve previous model value');
+}
+essayLimitInput('10'); assert.equal(fields.exam.questions[2].wordLimit, 10);
+essayLimitInput('2000'); assert.equal(fields.exam.questions[2].wordLimit, 2000);
+essayLimitInput('21.5', true, 21.5); assert.equal(fields.exam.questions[2].wordLimit, 2000);
+essayLimitInput('', false, NaN); assert.equal(fields.exam.questions[2].wordLimit, 2000,
+  'invalid number input may expose an empty value without representing optional clearing');
+essayLimitInput('');
+assert.equal(Object.hasOwn(fields.exam.questions[2], 'wordLimit'), false);
+assert.equal(Object.hasOwn(fields.manifest().questions[2], 'wordLimit'), false);
+fields.setIndex(0); essayLimitInput('100');
+assert.equal(Object.hasOwn(fields.exam.questions[0], 'wordLimit'), false);
+fields.setIndex(999); essayLimitInput('100'); assert.equal(fields.exam.questions.length, 3);
+assert.equal(fields.exam.questions[2].answerPlaceholder, 'Original C');
+console.log('Studio suggested essay limit binding/optional/invalid/type cases: 12 scenarios passed');
