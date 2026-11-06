@@ -35,6 +35,7 @@
 #include "imgui.h"
 #include "interim_presentation.hpp"
 #include "brand_image.hpp"
+#include "focus_stream_observer.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -474,13 +475,7 @@ struct DashboardState {
     // The client currently receiving a live Focus stream (~15fps). Distinct
     // from the slow class-view snapshots; zero when no client is focused.
     std::uint64_t streaming_client_id = 0;
-    // Measured delivered-frame rate for the focused stream (from
-    // ClientRecord::snapshot_generation deltas) — Epic B diagnostic so the
-    // Focus label shows real fps instead of a fixed "~15fps".
-    std::uint64_t fps_sample_client_id = 0;
-    std::uint64_t fps_sample_generation = 0;
-    std::chrono::steady_clock::time_point fps_sample_time{};
-    double measured_stream_fps = 0.0;
+    nstu::ui::FocusStreamObserver focus_stream;
     // Self-heals a stalled Focus/remote stream. Arming above is edge-triggered
     // on the streamed client id, so a start_stream lost across a client/agent
     // reconnect leaves the server believing a client streams while its agent
@@ -2396,29 +2391,8 @@ void draw_selected_client(
     draw_telemetry_card(tr(state, "Snapshot refresh", "Chu kỳ chụp"),
                         refresh, telemetry_width);
 
-    ImGui::TextUnformatted(tr(state, "Latest screen snapshot",
-                              "Ảnh chụp màn hình mới nhất"));
-    const bool live_now = selected_client->streaming;
-    ImGui::SameLine();
-    if (live_now) {
-        const ImVec4 live_color = g_dark_mode
-                                      ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
-                                      : ImVec4{0.10f, 0.55f, 0.24f, 1.0f};
-        std::string live_label;
-        if (state.measured_stream_fps > 0.0) {
-            const long long tenths = static_cast<long long>(
-                state.measured_stream_fps * 10.0 + 0.5);
-            live_label = std::string(tr(state, "· Live ", "· Trực tiếp ")) +
-                         std::to_string(tenths / 10) + "." +
-                         std::to_string(tenths % 10) + " fps";
-        } else {
-            live_label =
-                tr(state, "· Live (measuring)", "· Trực tiếp (đang đo)");
-        }
-        ImGui::TextColored(live_color, "%s", live_label.c_str());
-    } else {
-        ImGui::TextDisabled("%s", tr(state, "· Snapshot", "· Ảnh chụp"));
-    }
+    ImGui::TextUnformatted(tr(state, "Focus stream · requested target 15 FPS",
+                              "Luồng xem máy · mục tiêu yêu cầu 15 FPS"));
     const float preview_width = ImGui::GetContentRegionAvail().x;
     const float preview_height = std::clamp(
         preview_width * 0.5625f, scaled(220.0f),
@@ -2578,6 +2552,53 @@ void draw_selected_client(
     } else {
         state.annotation_dragging = false;
     }
+
+    // Query after the surface and its annotation hit-test: has_frame represents
+    // the successfully uploaded current generation, not merely JPEG presence.
+    using StreamObserver = nstu::ui::FocusStreamObserver;
+    const auto stream = state.focus_stream.present({
+        .rendered_client_id = selected_client->id,
+        .selected_client_id = state.selected_client_id,
+        .generation = selected_client->snapshot_generation,
+        .in_focus = state.view == DashboardView::selected_client,
+        .usable_texture = surface.has_frame,
+        .now = std::chrono::steady_clock::now()});
+    const char* stream_label = tr(state, "○ Cached snapshot · live delivery unverified",
+                                        "○ Ảnh chụp đã lưu · chưa xác minh luồng trực tiếp");
+    auto stream_color = nstu::ui::ColorRole::muted;
+    switch (stream.phase) {
+    case StreamObserver::Phase::live:
+        stream_label = stream.fps_sample_ready
+            ? tr(state, "● Live · delivered frame rate", "● Trực tiếp · tốc độ khung hình nhận")
+            : tr(state, "● Live · measuring delivered FPS", "● Trực tiếp · đang đo FPS nhận");
+        stream_color = nstu::ui::ColorRole::success; break;
+    case StreamObserver::Phase::requesting:
+        stream_label = tr(state, "○ Stream request sent · waiting for new frames",
+                                "○ Đã gửi yêu cầu luồng · chờ khung hình mới"); break;
+    case StreamObserver::Phase::rearming:
+        stream_label = tr(state, "▲ Stream rearm sent · waiting for new frames",
+                                "▲ Đã gửi lại yêu cầu · chờ khung hình mới"); break;
+    case StreamObserver::Phase::request_failed:
+        stream_label = tr(state, "▲ Stream request failed · cached image only",
+                                "▲ Yêu cầu luồng thất bại · chỉ có ảnh đã lưu");
+        stream_color = nstu::ui::ColorRole::danger; break;
+    case StreamObserver::Phase::stalled:
+        stream_label = tr(state, "▲ Frames stalled · cached image only",
+                                "▲ Luồng khung hình bị dừng · chỉ có ảnh đã lưu"); break;
+    case StreamObserver::Phase::generation_reset:
+        stream_label = tr(state, "▲ Frame sequence reset · live delivery unverified",
+                                "▲ Chuỗi khung hình đặt lại · chưa xác minh trực tiếp"); break;
+    case StreamObserver::Phase::frame_unavailable:
+        stream_label = tr(state, "▲ Current frame unavailable", "▲ Khung hình hiện tại không khả dụng"); break;
+    case StreamObserver::Phase::offline:
+        stream_label = tr(state, "○ Offline · no live stream", "○ Ngoại tuyến · không có luồng trực tiếp"); break;
+    case StreamObserver::Phase::inactive:
+    case StreamObserver::Phase::unverified: break;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, nstu::ui::interim_color(stream_color, g_dark_mode));
+    ImGui::TextWrapped("%s", stream_label);
+    if (stream.fps_sample_ready) ImGui::Text("%.1f FPS", stream.observed_fps);
+    ImGui::PopStyleColor();
 
     ImGui::PushStyleColor(
         ImGuiCol_Button, g_dark_mode ? ImVec4{0.82f, 0.81f, 0.78f, 1.0f}
@@ -5938,54 +5959,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         const nstu::server::ClientRecord* selected =
             selected_client == clients.end() ? nullptr : &*selected_client;
 
-        // Delivered-fps meter for the focused/streaming client (Epic B
-        // diagnostic): sample snapshot_generation once per second so the Focus
-        // label reports the real frame rate reaching the manager, not "~15fps".
-        if (selected != nullptr && selected->streaming) {
-            if (dashboard.fps_sample_client_id != selected->id) {
-                dashboard.fps_sample_client_id = selected->id;
-                dashboard.fps_sample_generation = selected->snapshot_generation;
-                dashboard.fps_sample_time = now;
-                dashboard.measured_stream_fps = 0.0;
-            } else {
-                const auto elapsed = now - dashboard.fps_sample_time;
-                if (elapsed >= std::chrono::seconds(1)) {
-                    const double secs =
-                        std::chrono::duration<double>(elapsed).count();
-                    const std::uint64_t current_generation =
-                        selected->snapshot_generation;
-                    // A reconnect under the same id can reset the generation
-                    // below the stored baseline; guard the unsigned subtraction
-                    // so this one sample reports 0 instead of underflowing to an
-                    // absurd frame count.
-                    const std::uint64_t frames =
-                        current_generation >= dashboard.fps_sample_generation
-                            ? current_generation -
-                                  dashboard.fps_sample_generation
-                            : 0;
-                    dashboard.measured_stream_fps =
-                        static_cast<double>(frames) / secs;
-                    dashboard.fps_sample_generation = current_generation;
-                    dashboard.fps_sample_time = now;
-                }
-            }
-        } else {
-            dashboard.fps_sample_client_id = 0;
-            dashboard.measured_stream_fps = 0.0;
-        }
-
         // Live streaming: the independent remote-control window keeps its
         // controlled client streaming regardless of the current view; otherwise
         // the client shown in Focus streams at ~15fps. Leaving Focus with no
         // remote window open, or the client going offline, stops the stream and
         // the class wall falls back to its slower snapshot cadence.
         std::uint64_t desired_stream_id = 0;
+        using StreamObserver = nstu::ui::FocusStreamObserver;
+        auto stream_owner = StreamObserver::Owner::none;
+        auto stream_outcome = StreamObserver::RequestOutcome::none;
         if (g_remote_window != nullptr && g_remote_target_client != 0) {
             for (const auto& streamed : clients) {
                 if (streamed.id == g_remote_target_client &&
                     streamed.status !=
                         nstu::server::ClientStatus::offline) {
                     desired_stream_id = streamed.id;
+                    stream_owner = StreamObserver::Owner::legacy_remote;
                     break;
                 }
             }
@@ -5994,6 +5983,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             dashboard.view == DashboardView::selected_client &&
             selected->status != nstu::server::ClientStatus::offline) {
             desired_stream_id = selected->id;
+            stream_owner = StreamObserver::Owner::focus;
         }
         if (dashboard.streaming_client_id != desired_stream_id) {
             if (dashboard.streaming_client_id != 0) {
@@ -6002,8 +5992,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             }
             if (desired_stream_id != 0) {
                 std::string stream_error;
-                if (!control_plane.set_streaming(desired_stream_id, true, 15,
-                                                 &stream_error)) {
+                const bool sent = control_plane.set_streaming(desired_stream_id, true, 15,
+                                                              &stream_error);
+                if (stream_owner == StreamObserver::Owner::focus)
+                    stream_outcome = sent ? StreamObserver::RequestOutcome::start_sent
+                                          : StreamObserver::RequestOutcome::start_failed;
+                if (!sent) {
                     record_operation_failure(
                         "Focus", "Live stream start failed", stream_error);
                 }
@@ -6034,8 +6028,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                                              kStreamStallRearm);
         if (rearm != nstu::server::StreamRearm::none) {
             std::string rearm_error;
-            if (!control_plane.set_streaming(desired_stream_id, true, 15,
-                                             &rearm_error)) {
+            const bool sent = control_plane.set_streaming(desired_stream_id, true, 15,
+                                                          &rearm_error);
+            if (stream_owner == StreamObserver::Owner::focus)
+                stream_outcome = sent ? StreamObserver::RequestOutcome::rearm_sent
+                                      : StreamObserver::RequestOutcome::rearm_failed;
+            if (!sent) {
                 record_operation_failure("Focus", "Live stream re-arm failed",
                                          rearm_error);
             } else if (rearm == nstu::server::StreamRearm::first) {
@@ -6046,6 +6044,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             }
         }
 
+        dashboard.focus_stream.tick({
+            .in_focus = dashboard.view == DashboardView::selected_client,
+            .selected_client_id = selected ? selected->id : 0,
+            .desired_stream_id = desired_stream_id,
+            .owner = stream_owner,
+            .generation = selected ? selected->snapshot_generation : 0,
+            .non_offline = selected && selected->status != nstu::server::ClientStatus::offline,
+            .reported_streaming = selected && selected->streaming,
+            .outcome = stream_outcome,
+            .now = now});
         draw_dashboard_shell(clients, selected, dashboard, control_plane);
         ImGui::End();
 
