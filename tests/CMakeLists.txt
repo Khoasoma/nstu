@@ -249,6 +249,12 @@ if(TARGET nstu_server_state)
     nstu_enable_test_assertions(nstu_operator_role_tests)
     add_test(NAME nstu.operator_role COMMAND nstu_operator_role_tests)
 
+    add_executable(nstu_exam_fleet_presentation_tests exam_fleet_presentation_tests.cpp)
+    target_link_libraries(nstu_exam_fleet_presentation_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_exam_fleet_presentation_tests)
+    nstu_enable_test_assertions(nstu_exam_fleet_presentation_tests)
+    add_test(NAME nstu.exam_fleet_presentation COMMAND nstu_exam_fleet_presentation_tests)
+
     add_executable(nstu_url_validation_tests url_validation_tests.cpp)
     target_link_libraries(nstu_url_validation_tests PRIVATE nstu_server_state)
     nstu_enable_warnings(nstu_url_validation_tests)
