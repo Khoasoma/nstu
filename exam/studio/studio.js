@@ -108,6 +108,7 @@
     const btnPreview = el("btn-mode-preview");
 
     if (mode === "preview") {
+      syncExamMetadata();
       editorView.style.display = "none";
       previewView.style.display = "flex";
       btnEditor.classList.remove("active");
@@ -896,8 +897,7 @@
     return text;
   }
 
-  async function exportPackage() {
-    // Sync current values from editor inputs
+  function syncExamMetadata() {
     currentExam.id = el("exam-id").value.trim();
     currentExam.title = el("exam-title").value.trim();
     currentExam.subject = el("exam-subject").value.trim();
@@ -908,6 +908,10 @@
     } else {
       delete currentExam.allowedOrigins;
     }
+  }
+
+  async function exportPackage() {
+    syncExamMetadata();
 
     const modal = el("export-modal");
     const statusBox = el("export-validation-status");
@@ -1031,16 +1035,7 @@
   }
 
   function saveDraft() {
-    currentExam.id = el("exam-id").value.trim();
-    currentExam.title = el("exam-title").value.trim();
-    currentExam.subject = el("exam-subject").value.trim();
-    currentExam.durationSeconds = Math.max(60, parseInt(el("exam-duration").value, 10) * 60 || 3600);
-    const origins = parseOriginsInput(el("exam-allowed-origins").value);
-    if (origins.length > 0) {
-      currentExam.allowedOrigins = origins;
-    } else {
-      delete currentExam.allowedOrigins;
-    }
+    syncExamMetadata();
 
     const manifestObj = compileManifest(currentExam);
     const jsonStr = JSON.stringify(manifestObj, null, 2);
