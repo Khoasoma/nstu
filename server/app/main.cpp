@@ -1774,26 +1774,94 @@ ScreenSurfaceResult draw_screen_surface(
     return result;
 }
 
+[[nodiscard]] std::string card_snapshot_age(const nstu::server::ClientRecord& client,
+                              const DashboardState& state) {
+    const auto captured = client.snapshot_captured_at_unix_milliseconds;
+    const auto signed_now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (client.snapshot_generation == 0 || captured == 0 || signed_now <= 0)
+        return tr(state, "Snapshot time unavailable", "Chưa có thời gian chụp");
+    const auto now = static_cast<std::uint64_t>(signed_now);
+    if (captured > now)
+        return tr(state, "Snapshot: client clock differs", "Ảnh chụp: lệch giờ máy học sinh");
+    const auto age = std::chrono::seconds{static_cast<std::chrono::seconds::rep>(
+        (now - captured) / 1000u)};
+    return std::string(tr(state, "Snapshot ", "Ảnh chụp ")) +
+        nstu::server::format_relative_age(age, state.language == Language::vietnamese);
+}
+
 void draw_client_card(const nstu::server::ClientRecord& client, float width,
                       DashboardState& state) {
+    using nstu::ui::ColorRole;
+    const float inset = scaled(nstu::ui::spacing::md);
+    const float inner_width = std::max(1.0f, width - inset * 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {inset, inset});
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, scaled(nstu::ui::radius::card));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                       {scaled(nstu::ui::spacing::sm), scaled(nstu::ui::spacing::sm)});
+    const float gap = ImGui::GetStyle().ItemSpacing.y;
+    const float checkbox_width = ImGui::GetFrameHeight();
+    const float name_width = std::max(1.0f, inner_width - checkbox_width - gap);
+    const float header_height = std::max(ImGui::GetFrameHeight(),
+        ImGui::CalcTextSize(client.hostname.c_str(), nullptr, false, name_width).y);
+    const float media_height = inner_width / nstu::ui::geometry::snapshot_aspect;
+    const auto now = std::chrono::steady_clock::now();
+    const bool stale = nstu::server::is_client_stale(client, now);
+    char network[64]{};
+    sprintf_s(network, "%u ms  %.1f%%", client.latency_ms,
+              client.packet_loss_per_mille / 10.0f);
+    const std::array<std::string, 4> captions{
+        client.address,
+        std::string(stale ? "▲ " : "○ ") + tr(state, "Last contact ", "Liên hệ cuối ") +
+            nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now),
+                                              state.language == Language::vietnamese),
+        card_snapshot_age(client, state), network};
+    float caption_height = 0.0f;
+    if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+    for (const auto& caption : captions)
+        caption_height += ImGui::CalcTextSize(caption.c_str(), nullptr, false, inner_width).y;
+    if (g_caption_font != nullptr) ImGui::PopFont();
+    const char* symbol = client.status == nstu::server::ClientStatus::locked ? "■ "
+        : client.status == nstu::server::ClientStatus::online ? "● "
+        : client.status == nstu::server::ClientStatus::degraded ? "▲ " : "○ ";
+    const std::string status = std::string(symbol) + client_status_label(client.status, state);
+    const std::string help = std::string("▲ ") + tr(state, "Help requested", "Yêu cầu trợ giúp");
+    const float status_height = ImGui::CalcTextSize(status.c_str(), nullptr, false, inner_width).y;
+    const float help_height = client.help_requested
+        ? ImGui::CalcTextSize(help.c_str(), nullptr, false, inner_width).y + gap : 0.0f;
+    const float height = inset * 2.0f + header_height + media_height + status_height +
+        caption_height + ImGui::GetFrameHeight() + help_height +
+        gap * static_cast<float>(captions.size() + 3u);
     push_client_id(client.id);
-    const bool selected = state.selected_client_id == client.id;
-    ImGui::PushStyleColor(ImGuiCol_Border,
-        selected ? (g_dark_mode ? ImVec4{0.42f, 0.68f, 0.78f, 1.0f}
-                                : ImVec4{0.31f, 0.56f, 0.68f, 1.0f})
-                 : ImGui::GetStyleColorVec4(ImGuiCol_Border));
-    if (ImGui::BeginChild("client-card", {width, width * 0.5625f + scaled(58.0f)},
-                          true, ImGuiWindowFlags_NoScrollbar)) {
-        if (draw_screen_surface(client, width * 0.5625f, "##screen", state)
-                .clicked) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, nstu::ui::interim_color(ColorRole::surface, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_Border, nstu::ui::interim_color(
+        state.selected_client_id == client.id ? ColorRole::focus : ColorRole::border, g_dark_mode));
+    if (ImGui::BeginChild("client-card", {width, height},
+            ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoScrollbar)) {
+        const ImVec2 start = ImGui::GetCursorPos();
+        ImGui::PushTextWrapPos(start.x + name_width);
+        ImGui::TextUnformatted(client.hostname.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::SetCursorPos({start.x + inner_width - checkbox_width, start.y});
+        bool checked = nstu::server::is_selected(state.checked_client_ids, client.id);
+        if (ImGui::Checkbox("##check", &checked))
+            nstu::server::set_selected(state.checked_client_ids, client.id, checked);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(
+            state, "Select this computer for checked-target actions", "Chọn máy này cho thao tác đã chọn"));
+        ImGui::SetCursorPos({start.x, start.y + header_height + gap});
+        ImGui::PushTextWrapPos(0.0f);
+        if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+        ImGui::TextDisabled("%s", captions[0].c_str());
+        if (g_caption_font != nullptr) ImGui::PopFont();
+        if (draw_screen_surface(client, media_height, "##screen", state).clicked) {
             state.selected_client_id = client.id;
             state.view = DashboardView::selected_client;
             state.annotation_enabled = false;
         }
-        ImGui::TextUnformatted(client.hostname.c_str());
+        ImGui::TextColored(status_text_color(client.status), "%s", status.c_str());
         if (client.help_requested) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4{1.0f, 0.65f, 0.0f, 1.0f}, "[?]");
+            ImGui::TextColored(nstu::ui::interim_color(ColorRole::warning, g_dark_mode), "%s", help.c_str());
             if (ImGui::IsItemHovered()) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(tr(state, "Help Requested", "Yêu cầu trợ giúp"));
@@ -1804,19 +1872,31 @@ void draw_client_card(const nstu::server::ClientRecord& client, float width,
                 ImGui::EndTooltip();
             }
         }
-        const float status_width =
-            ImGui::CalcTextSize(client_status_label(client.status, state)).x;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - status_width);
-        ImGui::TextColored(status_text_color(client.status), "%s",
-                           client_status_label(client.status, state));
-        ImGui::TextDisabled("%s", client.address.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%u ms  %.1f%%", client.latency_ms,
-                            client.packet_loss_per_mille / 10.0f);
+        if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+        for (std::size_t index = 1; index < captions.size(); ++index) {
+            if (index == 1 && stale)
+                ImGui::TextColored(nstu::ui::interim_color(ColorRole::warning, g_dark_mode), "%s", captions[index].c_str());
+            else ImGui::TextDisabled("%s", captions[index].c_str());
+            if (index == 2 && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(
+                state, "Capture time is reported by the client clock", "Giờ chụp do đồng hồ máy học sinh báo"));
+        }
+        if (g_caption_font != nullptr) ImGui::PopFont();
+        ImGui::PopTextWrapPos();
+        const char* focus = tr(state, "Focus###focus", "Xem máy###focus");
+        const float focus_width = ImGui::CalcTextSize(focus, nullptr, true).x +
+                                  ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+            std::max(0.0f, ImGui::GetContentRegionAvail().x - focus_width));
+        if (ImGui::Button(focus, {focus_width, 0})) {
+            state.selected_client_id = client.id;
+            state.view = DashboardView::selected_client;
+            state.annotation_enabled = false;
+        }
     }
     ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(2);
     pop_client_id();
+    ImGui::PopStyleVar(3);
 }
 
 void draw_room_screen_wall(
@@ -1831,7 +1911,7 @@ void draw_room_screen_wall(
     }
 
     if (visible_clients.empty()) {
-        const float offset = std::max(36.0f,
+        const float offset = std::max(scaled(nstu::ui::spacing::xxl),
                                       ImGui::GetContentRegionAvail().y * 0.34f);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offset);
         const char* heading = clients.empty()
@@ -1840,25 +1920,29 @@ void draw_room_screen_wall(
                  "Không có máy phù hợp với bộ lọc");
         const ImVec2 heading_size = ImGui::CalcTextSize(heading);
         ImGui::SetCursorPosX(
-            std::max(20.0f, (ImGui::GetWindowWidth() - heading_size.x) * 0.5f));
+            std::max(scaled(nstu::ui::spacing::xl),
+                     (ImGui::GetWindowWidth() - heading_size.x) * 0.5f));
         ImGui::TextDisabled("%s", heading);
         return;
     }
 
-    const ImVec4 workspace_background = g_dark_mode
-        ? ImVec4{0.065f, 0.085f, 0.095f, 1.0f}
-        : ImVec4{0.91f, 0.965f, 0.985f, 1.0f};
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, workspace_background);
-    if (ImGui::BeginChild("screen-wall", {0, 0}, false)) {
-        const float minimum_card_width = scaled(205.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,
+        nstu::ui::interim_color(nstu::ui::ColorRole::canvas, g_dark_mode));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+        {scaled(nstu::ui::geometry::grid_gap), scaled(nstu::ui::geometry::grid_gap)});
+    // The workspace supplies the handoff's24/16 inset, shared with filters.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
+    if (ImGui::BeginChild("screen-wall", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding,
+                         ImGuiWindowFlags_HorizontalScrollbar)) {
+        const float minimum_card_width = scaled(nstu::ui::geometry::card_min_width);
         const float gap = ImGui::GetStyle().ItemSpacing.x;
-        const float available = ImGui::GetContentRegionAvail().x;
+        const float available = std::max(1.0f, ImGui::GetContentRegionAvail().x);
         const int columns = std::clamp(
             static_cast<int>((available + gap) / (minimum_card_width + gap)),
             1, 6);
-        const float card_width =
+        const float card_width = std::max(minimum_card_width,
             (available - gap * static_cast<float>(columns - 1)) /
-            static_cast<float>(columns);
+            static_cast<float>(columns));
         for (std::size_t index = 0; index < visible_clients.size(); ++index) {
             draw_client_card(*visible_clients[index], card_width, state);
             if ((index + 1) % static_cast<std::size_t>(columns) != 0) {
@@ -1867,6 +1951,7 @@ void draw_room_screen_wall(
         }
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 }
 
