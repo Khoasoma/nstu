@@ -1,0 +1,11 @@
+# Studio04B: shared semantic light/dark appearance
+
+Root is sole writer/build owner. Four-file allowlist: Studio CSS, HTML, JS and this plan. STUDIO_04B_SOURCE_ADMISSION_R1.json pins exact hashes before edits; cap300 changed lines. The supplied UI_DESIGN_TOKENS.json is the palette specification, not a new design request. Native Focus source remains frozen for separate review.
+
+Map existing CSS roles onto the supplied light/dark semantic colors, flat component states and focus token. Default Light matches the interim default. Add one local appearance button; best-effort theme storage never blocks authoring. Changing themes must not rerender or mutate metadata/questions/preview answers or invoke Save/Export. Retain existing supported controls, status text and all schema/validation/ZIP/template/digest/backend/candidate contracts. Leave actual document/media content independent of host appearance.
+
+Verify actual Chrome light/dark role values, readable primary/status text and focus, metadata/questions/Preview retention, both appearance persistence and denied-storage fallback, exact real downloaded assets/package, JS syntax and original recovery cases, fast/strict gates and independent review before committing. Full Studio composition, unsupported-control reasons, native WebView2/peer, media completeness and modal keyboard behavior remain separate acceptance.
+
+Browser checks reproduced the original palette mismatch and a transient contrast failure from inherited color interpolation. Theme colors now change together; transform/opacity motion remains. Keyboard focus checks wait for the existing focus transition after actual Tab navigation. Source handler comparison excludes only the new theme binding and confirms every existing authoring/Preview/Save/Export handler unchanged. Recorded appearance persistence covers only the preference, not draft persistence across reload.
+
+Independent R1 review found three selected backgrounds still used the accent fill as text. The expanded browser test reproduced1.70:1 dark contrast. Active question numbers, reading badges and Preview paragraph markers now use the provided selected-text role; both themes are checked against their actual ancestor/own backgrounds. R1 evidence and rejection are preserved, and R2 requires fresh hashes, checks and independent acceptance.

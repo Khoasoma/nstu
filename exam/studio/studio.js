@@ -1059,6 +1059,21 @@
      ======================================================================== */
 
   function init() {
+    const themeButton = el("btn-studio-theme");
+    const applyTheme = (theme) => {
+      const dark = theme === "dark";
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      themeButton.textContent = dark ? "Light appearance" : "Dark appearance";
+      themeButton.setAttribute("aria-label", `Switch to ${dark ? "light" : "dark"} appearance`);
+    };
+    let storedTheme = "light";
+    try { storedTheme = localStorage.getItem("nstu-studio-theme") || "light"; } catch { /* Appearance stays local when storage is unavailable. */ }
+    applyTheme(storedTheme);
+    themeButton.addEventListener("click", () => {
+      const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      applyTheme(theme);
+      try { localStorage.setItem("nstu-studio-theme", theme); } catch { /* Preserve authoring when preference storage fails. */ }
+    });
     // Mode toggles
     el("btn-mode-editor").addEventListener("click", () => setMode("editor"));
     el("btn-mode-preview").addEventListener("click", () => setMode("preview"));
