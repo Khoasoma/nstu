@@ -34,6 +34,7 @@
 
 #include "imgui.h"
 #include "interim_presentation.hpp"
+#include "brand_image.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -75,6 +76,7 @@ Microsoft::WRL::ComPtr<ID3D11Device> g_device;
 Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_context;
 Microsoft::WRL::ComPtr<IDXGISwapChain> g_swap_chain;
 Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
+nstu::ui::BrandImage g_brand_image;
 ImFont* g_heading_font = nullptr;
 ImFont* g_page_title_font = nullptr;
 ImFont* g_caption_font = nullptr;
@@ -757,6 +759,7 @@ void create_render_target() {
 
 bool create_device(HWND window) {
     g_graphics_device_lost = true;
+    g_brand_image.reset();
     invalidate_snapshot_textures();
     DXGI_SWAP_CHAIN_DESC description{};
     description.BufferCount = 2;
@@ -837,6 +840,11 @@ bool create_device(HWND window) {
     create_render_target();
     if (!g_render_target) return false;
     g_graphics_device_lost = false;
+    const HRESULT brand_result = g_brand_image.load(g_device.Get());
+    if (FAILED(brand_result)) {
+        record_diagnostic("warning", "Brand", "Bundled logo unavailable " +
+            hresult_text(brand_result));
+    }
     refresh_graphics_report();
     return true;
 }
@@ -4780,9 +4788,18 @@ void draw_navigation_rail(
                                                  ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleColor();
     if (sidebar_visible) {
-        if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
-        ImGui::TextUnformatted("NSTU");
-        if (g_heading_font != nullptr) ImGui::PopFont();
+        if (g_brand_image.view() != nullptr && !g_graphics_device_lost) {
+            const float brand_width = ImGui::GetContentRegionAvail().x;
+            const float aspect = static_cast<float>(g_brand_image.width()) /
+                                 static_cast<float>(g_brand_image.height());
+            ImGui::Image(reinterpret_cast<ImTextureID>(g_brand_image.view()),
+                         {brand_width, brand_width / aspect});
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("NSTU");
+        } else {
+            if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
+            ImGui::TextUnformatted("NSTU");
+            if (g_heading_font != nullptr) ImGui::PopFont();
+        }
         ImGui::TextDisabled("%s", tr(state, "Classroom tools", "Công cụ lớp học"));
         ImGui::Spacing();
         draw_shell_navigation_button("nav-room", tr(state, "Classroom", "Lớp học"),
@@ -6069,6 +6086,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);
     g_snapshot_textures.clear();
+    g_brand_image.reset();
     g_imgui_ready = false;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
