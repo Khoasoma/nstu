@@ -16,6 +16,8 @@ for (const [key, filename] of Object.entries(assets)) {
   }
   runner[key] = value;
 }
+const brandPng = await readFile(new URL('../exam/web/assets/nstu-brand.png', import.meta.url));
+runner.brandPngBase64 = brandPng.toString('base64');
 const output = '// Generated from exam/web by scripts/sync-exam-runner-template.mjs.\n' +
   `window.NSTU_RUNNER_TEMPLATE = ${JSON.stringify(runner)};\n`;
 const target = new URL('../exam/studio/template.js', import.meta.url);
