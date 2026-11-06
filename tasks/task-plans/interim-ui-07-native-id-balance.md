@@ -1,0 +1,5 @@
+# Interim UI07: native row ID balance
+
+Root is sole source/build owner. Exact two-file scope: this plan and main.cpp's exam/Fleet row-exit calls. Replace one ImGui::PopID per row with existing pop_client_id, which balances the existing two64-bit target-ID pushes. All helpers, handlers, roles, selections, metadata and backend behavior remain unchanged. Baseline bd417c3b4d5642f30774dbf263a650b2c1bdfe92. Source pins and nonauthor PLAN_ACCEPT df1f8130eac5e547ce419b3ab14b085e19de44ff1aeaada80021ddaAAF3a5774 are bound in SLICE_07_NATIVE_ID_SOURCE_ADMISSION_R1.json.
+
+The actual exam renderer in a CPU-only ImGui test harness failed with Mismatching PushID/PopID at EndTable before the correction. The probe uses immutable synthetic offline records with distinct high64-bit ID halves, a nonstarted control plane, no window/backend/network activation and no button input. After correction both actual owning renderers must return to the initial ID depth. This evidence does not qualify native desktop/input/peer operations. Build the app, run relevant tests and fast/strict gates, then obtain independent nonauthor code review before commit. No main merge.

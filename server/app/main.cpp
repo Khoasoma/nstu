@@ -4467,7 +4467,7 @@ void draw_exam_panel(
                 }
             }
 
-            ImGui::PopID();
+            pop_client_id();
         }
         ImGui::EndTable();
     }
@@ -5569,7 +5569,7 @@ void draw_technician_fleet_health(
                 ImGui::SetTooltip("%s", tr(state, "Already protected.", "Đã được bảo vệ."));
             }
 
-            ImGui::PopID();
+            pop_client_id();
         }
         ImGui::EndTable();
     }
