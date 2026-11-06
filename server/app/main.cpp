@@ -2271,28 +2271,40 @@ void draw_selected_client(
         return;
     }
 
+    if (ImGui::Button(tr(state, "Back to Classroom###focus-back", "Về lớp học###focus-back")))
+        state.view = DashboardView::room_screens;
     if (g_heading_font != nullptr) {
         ImGui::PushFont(g_heading_font);
     }
-    ImGui::TextUnformatted(selected_client->hostname.c_str());
+    ImGui::TextWrapped("%s", selected_client->hostname.c_str());
     if (g_heading_font != nullptr) {
         ImGui::PopFont();
     }
-    ImGui::SameLine();
-    draw_status_badge(selected_client->status, state);
+    const char* connection_symbol = selected_client->status == nstu::server::ClientStatus::online ? "●"
+        : selected_client->status == nstu::server::ClientStatus::locked ? "■"
+        : selected_client->status == nstu::server::ClientStatus::degraded ? "▲" : "○";
+    ImGui::TextColored(status_text_color(selected_client->status), "%s %s", connection_symbol,
+                       client_status_label(selected_client->status, state));
     if (selected_client->help_requested) {
         ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.32f, 0.20f, 0.05f, 1.0f});
-        if (ImGui::BeginChild("help-banner", {0, scaled(34.0f)}, true, ImGuiWindowFlags_NoScrollbar)) {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(ImVec4{1.0f, 0.75f, 0.15f, 1.0f}, "[!] %s",
+        const float inset = scaled(nstu::ui::spacing::md);
+        const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - inset * 2.0f);
+        const float gap = ImGui::GetStyle().ItemSpacing.y;
+        const float message_height = selected_client->help_message.empty() ? 0.0f :
+            ImGui::CalcTextSize(selected_client->help_message.c_str(), nullptr, false, text_width).y + gap;
+        const float height = inset * 2.0f + ImGui::GetTextLineHeight() + gap + message_height + ImGui::GetFrameHeight();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {inset, inset});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg,
+            nstu::ui::interim_color(nstu::ui::ColorRole::warning_bg, g_dark_mode));
+        const bool help_visible = ImGui::BeginChild("help-banner", {0, height},
+            ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+        ImGui::PopStyleVar();
+        if (help_visible) {
+            ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::warning, g_dark_mode), "▲ %s",
                                tr(state, "Help Requested", "Yêu cầu trợ giúp"));
             if (!selected_client->help_message.empty()) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("— %s", selected_client->help_message.c_str());
+                ImGui::TextWrapped("%s", selected_client->help_message.c_str());
             }
-            ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
-                                     ImGui::GetContentRegionMax().x - scaled(150.0f)));
             if (ImGui::SmallButton(tr(state, "Acknowledge Help", "Giải quyết trợ giúp"))) {
                 std::string error;
                 (void)control_plane.resolve_help_request(selected_client->id, &error);
@@ -2302,36 +2314,32 @@ void draw_selected_client(
         ImGui::PopStyleColor();
         ImGui::Spacing();
     }
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("%s", selected_client->address.c_str());
-    ImGui::SameLine();
-    ImGui::TextDisabled("•");
-    ImGui::SameLine();
     if (!selected_client->mac_address.empty()) {
         ImGui::TextDisabled("MAC: %s", selected_client->mac_address.c_str());
     } else {
         ImGui::TextDisabled("MAC: %s", tr(state, "Unknown", "Chưa rõ"));
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("•");
-    ImGui::SameLine();
     switch (selected_client->wol_support) {
     case nstu::net::WolSupportState::supported:
-        ImGui::TextColored(ImVec4{0.3f, 0.85f, 0.4f, 1.0f}, "[●] WOL: %s",
+        ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::success, g_dark_mode), "● WOL: %s",
                            tr(state, "Supported", "Được hỗ trợ"));
         break;
     case nstu::net::WolSupportState::unsupported:
-        ImGui::TextColored(ImVec4{0.9f, 0.4f, 0.4f, 1.0f}, "[▲] WOL: %s",
+        ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::danger, g_dark_mode), "▲ WOL: %s",
                            tr(state, "Unsupported", "Không hỗ trợ"));
         break;
     case nstu::net::WolSupportState::missing_mac:
-        ImGui::TextColored(ImVec4{0.7f, 0.7f, 0.7f, 1.0f}, "[○] WOL: %s",
+        ImGui::TextDisabled("○ WOL: %s",
                            tr(state, "Missing MAC", "Thiếu MAC"));
         break;
     case nstu::net::WolSupportState::unknown:
-        ImGui::TextColored(ImVec4{0.7f, 0.7f, 0.7f, 1.0f}, "[○] WOL: %s",
+        ImGui::TextDisabled("○ WOL: %s",
                            tr(state, "Unknown", "Chưa rõ"));
         break;
     }
+    ImGui::PopTextWrapPos();
     bool managed = selected_client->frozen;
     if (ImGui::Checkbox(
             tr(state, "Managed mode", "Chế độ được quản lý"),
@@ -2358,7 +2366,6 @@ void draw_selected_client(
             "Blocks service stop and uninstall until disabled here or by a local administrator.",
             "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
     }
-    ImGui::SameLine();
     // Requirement check before activation: if the client has already reported
     // that its Windows edition/feature set cannot support reboot-to-restore,
     // do not let the operator arm it - the attempt would only fail on the box.
@@ -2391,26 +2398,22 @@ void draw_selected_client(
             nstu::control::UwfFleetPhase::idle) {
         const bool proven =
             selected_client->uwf.proves_current_protection();
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(
-            proven ? (g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
-                                  : ImVec4{0.10f, 0.55f, 0.24f, 1.0f})
-                   : (g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
-                                  : ImVec4{0.63f, 0.36f, 0.02f, 1.0f}),
-            "%s", nstu::server::to_string(selected_client->uwf.phase));
+            nstu::ui::interim_color(proven ? nstu::ui::ColorRole::success : nstu::ui::ColorRole::warning, g_dark_mode),
+            "%s %s", proven ? "●" : "▲", nstu::server::to_string(selected_client->uwf.phase));
         if (!selected_client->uwf.detail.empty()) {
             ImGui::TextWrapped("%s", selected_client->uwf.detail.c_str());
         }
         if (proven) {
             ImGui::TextColored(
-                g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
-                            : ImVec4{0.10f, 0.55f, 0.24f, 1.0f},
+                nstu::ui::interim_color(nstu::ui::ColorRole::success, g_dark_mode),
                 "%s",
                 tr(state,
-                   "Reboot-to-restore protected in this session. Exam mode is "
-                   "permitted.",
-                   "Đã bảo vệ khôi phục sau reboot trong phiên này. Cho phép "
-                   "chế độ thi."));
+                   "Current-session reboot-to-restore protection reported. Other exam checks still apply.",
+                   "Đã báo bảo vệ khôi phục sau reboot trong phiên này. Vẫn kiểm tra các điều kiện thi khác."));
         }
+        ImGui::PopTextWrapPos();
     }
     draw_uwf_confirmation_popup(state, control_plane);
 
@@ -2426,17 +2429,20 @@ void draw_selected_client(
     } else {
         strcpy_s(refresh, tr(state, "Paused", "Đã dừng"));
     }
-    const float telemetry_gap = ImGui::GetStyle().ItemSpacing.x;
-    const float telemetry_width =
-        (ImGui::GetContentRegionAvail().x - telemetry_gap * 2.0f) / 3.0f;
-    draw_telemetry_card(tr(state, "Latency", "Độ trễ"), latency,
-                        telemetry_width);
-    ImGui::SameLine();
-    draw_telemetry_card(tr(state, "Packet loss", "Mất gói"), packet_loss,
-                        telemetry_width);
-    ImGui::SameLine();
-    draw_telemetry_card(tr(state, "Snapshot refresh", "Chu kỳ chụp"),
-                        refresh, telemetry_width);
+    if (ImGui::BeginTable("focus-telemetry", 3, ImGuiTableFlags_SizingStretchSame)) {
+        const std::array<const char*, 3> labels{tr(state, "Latency", "Độ trễ"),
+            tr(state, "Packet loss", "Mất gói"), tr(state, "Snapshot refresh", "Chu kỳ chụp")};
+        const std::array<const char*, 3> values{latency, packet_loss, refresh};
+        ImGui::TableNextRow();
+        for (int column = 0; column < 3; ++column) {
+            ImGui::TableSetColumnIndex(column);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", labels[static_cast<std::size_t>(column)]);
+            ImGui::TextUnformatted(values[static_cast<std::size_t>(column)]);
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::EndTable();
+    }
 
     ImGui::TextUnformatted(tr(state, "Focus stream · requested target 15 FPS",
                               "Luồng xem máy · mục tiêu yêu cầu 15 FPS"));
