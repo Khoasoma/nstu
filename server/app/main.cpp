@@ -3092,15 +3092,31 @@ void draw_selected_client(
         ImGui::SliderInt(tr(state, "Thickness", "Độ dày"),
                          &state.annotation_thickness, 2, 12);
     }
-    if (ImGui::BeginPopup("control-status")) {
-        ImGui::TextUnformatted(state.control_status.c_str());
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginChild("chat-panel", {0, scaled(112.0f)}, true)) {
-        ImGui::TextUnformatted(tr(state, "Chat", "Trò chuyện"));
+    bool chat_status_requested = false;
+    const char* send_label = tr(state, "Send", "Gửi");
+    const char* chat_label = tr(state, "Chat", "Trò chuyện");
+    const auto& chat_style = ImGui::GetStyle();
+    const float send_text_width = ImGui::CalcTextSize(send_label).x;
+    const float send_padding_x = std::min(chat_style.FramePadding.x,
+        std::max(0.0f, (ImGui::GetContentRegionAvail().x - send_text_width) * 0.5f));
+    const float send_width = send_text_width + send_padding_x * 2.0f;
+    const float chat_padding_x = std::min(chat_style.WindowPadding.x,
+        std::max(0.0f, (ImGui::GetContentRegionAvail().x - send_width) * 0.5f));
+    const float chat_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - chat_padding_x * 2.0f);
+    const bool send_inline = chat_width >= send_width + chat_style.ItemSpacing.x + ImGui::GetFrameHeight();
+    const float chat_log_height = scaled(52.0f);
+    const float chat_height = chat_style.WindowPadding.y * 2.0f + ImGui::CalcTextSize(chat_label, nullptr, false, chat_width).y +
+        chat_log_height + ImGui::GetFrameHeight() * (send_inline ? 1.0f : 2.0f) +
+        chat_style.ItemSpacing.y * (send_inline ? 2.0f : 3.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {chat_padding_x, chat_style.WindowPadding.y});
+    const bool chat_visible = ImGui::BeginChild("chat-panel", {0, chat_height},
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    if (chat_visible) {
+        ImGui::TextWrapped("%s", chat_label);
         const auto chat_log = control_plane.chat_history(selected_client->id);
-        if (ImGui::BeginChild("chat-log", {0, scaled(52.0f)}, true)) {
+        if (ImGui::BeginChild("chat-log", {0, chat_log_height}, true)) {
             if (chat_log.empty()) {
                 ImGui::TextDisabled(
                     "%s", tr(state, "No messages in this session.",
@@ -3119,13 +3135,15 @@ void draw_selected_client(
             }
         }
         ImGui::EndChild();
-        ImGui::SetNextItemWidth(scaled(-78.0f));
+        ImGui::SetNextItemWidth(send_inline
+            ? std::max(1.0f, ImGui::GetContentRegionAvail().x - send_width - chat_style.ItemSpacing.x)
+            : ImGui::GetContentRegionAvail().x);
         const bool submit = ImGui::InputText(
             "##chat-input", state.chat_input.data(), state.chat_input.size(),
             ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::SameLine();
-        if ((submit || ImGui::Button(tr(state, "Send", "Gửi"),
-                                     {scaled(68.0f), 0.0f})) &&
+        if (send_inline) ImGui::SameLine();
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {send_padding_x, chat_style.FramePadding.y});
+        if ((submit || ImGui::Button(send_label, {send_width, 0.0f})) &&
             state.chat_input[0] != '\0') {
             std::string error;
             if (control_plane.send_chat(selected_client->id,
@@ -3137,10 +3155,16 @@ void draw_selected_client(
                 state.control_status = error;
                 record_operation_failure("Chat", "Chat command failed", error);
             }
-            ImGui::OpenPopup("control-status");
+            chat_status_requested = true;
         }
+        ImGui::PopStyleVar();
     }
     ImGui::EndChild();
+    if (chat_status_requested) ImGui::OpenPopup("control-status");
+    if (ImGui::BeginPopup("control-status")) {
+        ImGui::TextWrapped("%s", state.control_status.c_str());
+        ImGui::EndPopup();
+    }
     ImGui::EndChild();
 }
 
