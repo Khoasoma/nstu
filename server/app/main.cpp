@@ -33,6 +33,7 @@
 #include <wrl/client.h>
 
 #include "imgui.h"
+#include "interim_presentation.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -75,6 +76,8 @@ Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_context;
 Microsoft::WRL::ComPtr<IDXGISwapChain> g_swap_chain;
 Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
 ImFont* g_heading_font = nullptr;
+ImFont* g_page_title_font = nullptr;
+ImFont* g_caption_font = nullptr;
 bool g_dark_mode = false;
 // Display-DPI scale factor (1.0 == 96 DPI). All style metrics and font sizes
 // are authored at 96 DPI and multiplied by this so the UI stays crisp and
@@ -1300,8 +1303,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         if (g_imgui_ready) {
             apply_dashboard_style(g_dark_mode);
             auto& atlas = ImGui::GetIO().Fonts;
+            ImGui::GetIO().FontDefault = nullptr;
             atlas->Clear();
             g_heading_font = nullptr;
+            g_page_title_font = nullptr;
+            g_caption_font = nullptr;
             load_dashboard_fonts();
             ImGui_ImplDX11_InvalidateDeviceObjects();
             (void)ImGui_ImplDX11_CreateDeviceObjects();
@@ -1363,92 +1369,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 
 void apply_dashboard_style(bool dark_mode) {
     g_dark_mode = dark_mode;
-    // Rebuild from the ImGui defaults every time. Theme switches may happen
-    // repeatedly; scaling the existing style would multiply untouched metrics
-    // (scrollbars, indentation, grab sizes) on every Light/Dark click.
-    auto& style = ImGui::GetStyle();
-    style = ImGuiStyle{};
-    style.WindowPadding = {8.0f, 6.0f};
-    style.FramePadding = {8.0f, 5.0f};
-    style.CellPadding = {7.0f, 6.0f};
-    style.ItemSpacing = {6.0f, 5.0f};
-    style.ItemInnerSpacing = {5.0f, 4.0f};
-    style.WindowRounding = 0.0f;
-    style.ChildRounding = 3.0f;
-    style.FrameRounding = 3.0f;
-    style.PopupRounding = 3.0f;
-    style.ScrollbarRounding = 3.0f;
-    style.GrabRounding = 3.0f;
-    style.WindowBorderSize = 0.0f;
-    style.ChildBorderSize = 1.0f;
-    style.FrameBorderSize = 1.0f;
-
-    auto* colors = style.Colors;
-    colors[ImGuiCol_Text] = dark_mode
-        ? ImVec4{0.878f, 0.895f, 0.918f, 1.0f}
-        : ImVec4{0.135f, 0.145f, 0.160f, 1.0f};
-    colors[ImGuiCol_TextDisabled] = dark_mode
-        ? ImVec4{0.520f, 0.552f, 0.600f, 1.0f}
-        : ImVec4{0.480f, 0.495f, 0.520f, 1.0f};
-    colors[ImGuiCol_WindowBg] = dark_mode
-        ? ImVec4{0.098f, 0.110f, 0.130f, 1.0f}
-        : ImVec4{0.902f, 0.906f, 0.914f, 1.0f};
-    colors[ImGuiCol_ChildBg] = dark_mode
-        ? ImVec4{0.130f, 0.146f, 0.170f, 1.0f}
-        : ImVec4{0.962f, 0.964f, 0.970f, 1.0f};
-    colors[ImGuiCol_PopupBg] = dark_mode
-        ? ImVec4{0.140f, 0.157f, 0.183f, 1.0f}
-        : ImVec4{0.968f, 0.970f, 0.976f, 1.0f};
-    colors[ImGuiCol_Border] = dark_mode
-        ? ImVec4{0.235f, 0.260f, 0.300f, 1.0f}
-        : ImVec4{0.820f, 0.828f, 0.845f, 1.0f};
-    colors[ImGuiCol_BorderShadow] = {0.0f, 0.0f, 0.0f, 0.0f};
-    colors[ImGuiCol_FrameBg] = dark_mode
-        ? ImVec4{0.155f, 0.173f, 0.200f, 1.0f}
-        : ImVec4{0.940f, 0.943f, 0.950f, 1.0f};
-    colors[ImGuiCol_FrameBgHovered] = dark_mode
-        ? ImVec4{0.195f, 0.216f, 0.248f, 1.0f}
-        : ImVec4{0.910f, 0.914f, 0.924f, 1.0f};
-    colors[ImGuiCol_FrameBgActive] = dark_mode
-        ? ImVec4{0.230f, 0.254f, 0.290f, 1.0f}
-        : ImVec4{0.878f, 0.884f, 0.898f, 1.0f};
-    colors[ImGuiCol_TitleBg] = colors[ImGuiCol_WindowBg];
-    colors[ImGuiCol_TitleBgActive] = colors[ImGuiCol_WindowBg];
-    colors[ImGuiCol_Button] = dark_mode
-        ? ImVec4{0.165f, 0.184f, 0.214f, 1.0f}
-        : ImVec4{0.902f, 0.908f, 0.920f, 1.0f};
-    colors[ImGuiCol_ButtonHovered] = dark_mode
-        ? ImVec4{0.210f, 0.233f, 0.268f, 1.0f}
-        : ImVec4{0.860f, 0.868f, 0.882f, 1.0f};
-    colors[ImGuiCol_ButtonActive] = dark_mode
-        ? ImVec4{0.250f, 0.277f, 0.318f, 1.0f}
-        : ImVec4{0.818f, 0.828f, 0.845f, 1.0f};
-    colors[ImGuiCol_Header] = dark_mode
-        ? ImVec4{0.150f, 0.235f, 0.290f, 1.0f}
-        : ImVec4{0.820f, 0.872f, 0.910f, 1.0f};
-    colors[ImGuiCol_HeaderHovered] = dark_mode
-        ? ImVec4{0.185f, 0.285f, 0.345f, 1.0f}
-        : ImVec4{0.772f, 0.842f, 0.892f, 1.0f};
-    colors[ImGuiCol_HeaderActive] = dark_mode
-        ? ImVec4{0.215f, 0.330f, 0.400f, 1.0f}
-        : ImVec4{0.720f, 0.812f, 0.872f, 1.0f};
-    colors[ImGuiCol_Separator] = colors[ImGuiCol_Border];
-    colors[ImGuiCol_CheckMark] = dark_mode
-        ? ImVec4{0.380f, 0.640f, 0.780f, 1.0f}
-        : ImVec4{0.160f, 0.360f, 0.470f, 1.0f};
-    colors[ImGuiCol_SliderGrab] = dark_mode
-        ? ImVec4{0.680f, 0.705f, 0.745f, 1.0f}
-        : ImVec4{0.18f, 0.18f, 0.17f, 1.0f};
-    colors[ImGuiCol_SliderGrabActive] = dark_mode
-        ? ImVec4{0.850f, 0.870f, 0.900f, 1.0f}
-        : ImVec4{0.30f, 0.30f, 0.29f, 1.0f};
-
-    // Metrics above are authored at 96 DPI; scale them to the display so the
-    // whole UI (padding, rounding, borders, scrollbars) tracks the font size.
-    style.ScaleAllSizes(g_ui_scale);
+    nstu::ui::apply_interim_style(ImGui::GetStyle(), dark_mode, g_ui_scale);
 }
 
 void load_dashboard_fonts() {
+    g_heading_font = nullptr;
+    g_page_title_font = nullptr;
+    g_caption_font = nullptr;
+    ImGui::GetIO().FontDefault = nullptr;
     std::array<char, MAX_PATH> windows_directory{};
     const UINT length = GetWindowsDirectoryA(
         windows_directory.data(), static_cast<UINT>(windows_directory.size()));
@@ -1458,57 +1386,69 @@ void load_dashboard_fonts() {
     const std::string fonts_directory =
         std::string(windows_directory.data()) + "\\Fonts\\";
     const auto regular = fonts_directory + "segoeui.ttf";
+    const auto semibold = fonts_directory + "seguisb.ttf";
     const auto bold = fonts_directory + "segoeuib.ttf";
     auto& atlas = ImGui::GetIO().Fonts;
     const ImWchar* glyph_ranges = atlas->GetGlyphRangesVietnamese();
     if (GetFileAttributesA(regular.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        atlas->AddFontFromFileTTF(regular.c_str(), 15.0f * g_ui_scale, nullptr,
-                                  glyph_ranges);
+        ImGui::GetIO().FontDefault = atlas->AddFontFromFileTTF(
+            regular.c_str(), nstu::ui::typography::body * g_ui_scale,
+            nullptr, glyph_ranges);
+        g_caption_font = atlas->AddFontFromFileTTF(
+            regular.c_str(), nstu::ui::typography::caption * g_ui_scale,
+            nullptr, glyph_ranges);
     }
-    if (GetFileAttributesA(bold.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    const auto& heading_file =
+        GetFileAttributesA(semibold.c_str()) != INVALID_FILE_ATTRIBUTES
+            ? semibold : bold;
+    if (GetFileAttributesA(heading_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
         g_heading_font = atlas->AddFontFromFileTTF(
-            bold.c_str(), 17.0f * g_ui_scale, nullptr, glyph_ranges);
+            heading_file.c_str(), nstu::ui::typography::section_title * g_ui_scale,
+            nullptr, glyph_ranges);
+        g_page_title_font = atlas->AddFontFromFileTTF(
+            heading_file.c_str(), nstu::ui::typography::page_title * g_ui_scale,
+            nullptr, glyph_ranges);
     }
 }
 
 ImVec4 status_text_color(nstu::server::ClientStatus status) {
+    using nstu::ui::ColorRole;
+    ColorRole role = ColorRole::offline;
     switch (status) {
     case nstu::server::ClientStatus::online:
-        return g_dark_mode ? ImVec4{0.56f, 0.78f, 0.58f, 1.0f}
-                           : ImVec4{0.20f, 0.40f, 0.23f, 1.0f};
+        role = ColorRole::success;
+        break;
     case nstu::server::ClientStatus::degraded:
     case nstu::server::ClientStatus::connecting:
-        return g_dark_mode ? ImVec4{0.90f, 0.73f, 0.38f, 1.0f}
-                           : ImVec4{0.58f, 0.39f, 0.06f, 1.0f};
+        role = ColorRole::warning;
+        break;
     case nstu::server::ClientStatus::locked:
-        return g_dark_mode ? ImVec4{0.94f, 0.56f, 0.55f, 1.0f}
-                           : ImVec4{0.62f, 0.18f, 0.17f, 1.0f};
+        role = ColorRole::danger;
+        break;
     case nstu::server::ClientStatus::offline:
-        return g_dark_mode ? ImVec4{0.67f, 0.66f, 0.63f, 1.0f}
-                           : ImVec4{0.40f, 0.39f, 0.37f, 1.0f};
+        break;
     }
-    return g_dark_mode ? ImVec4{0.67f, 0.66f, 0.63f, 1.0f}
-                       : ImVec4{0.40f, 0.39f, 0.37f, 1.0f};
+    return nstu::ui::interim_color(role, g_dark_mode);
 }
 
 ImVec4 status_background_color(nstu::server::ClientStatus status) {
+    using nstu::ui::ColorRole;
+    ColorRole role = ColorRole::offline_bg;
     switch (status) {
     case nstu::server::ClientStatus::online:
-        return g_dark_mode ? ImVec4{0.13f, 0.23f, 0.14f, 1.0f}
-                           : ImVec4{0.93f, 0.96f, 0.92f, 1.0f};
+        role = ColorRole::success_bg;
+        break;
     case nstu::server::ClientStatus::degraded:
     case nstu::server::ClientStatus::connecting:
-        return g_dark_mode ? ImVec4{0.25f, 0.20f, 0.10f, 1.0f}
-                           : ImVec4{0.985f, 0.95f, 0.86f, 1.0f};
+        role = ColorRole::warning_bg;
+        break;
     case nstu::server::ClientStatus::locked:
-        return g_dark_mode ? ImVec4{0.27f, 0.13f, 0.13f, 1.0f}
-                           : ImVec4{0.99f, 0.92f, 0.92f, 1.0f};
+        role = ColorRole::danger_bg;
+        break;
     case nstu::server::ClientStatus::offline:
-        return g_dark_mode ? ImVec4{0.18f, 0.18f, 0.17f, 1.0f}
-                           : ImVec4{0.94f, 0.935f, 0.925f, 1.0f};
+        break;
     }
-    return g_dark_mode ? ImVec4{0.18f, 0.18f, 0.17f, 1.0f}
-                       : ImVec4{0.94f, 0.935f, 0.925f, 1.0f};
+    return nstu::ui::interim_color(role, g_dark_mode);
 }
 
 const char* client_status_label(nstu::server::ClientStatus status,
