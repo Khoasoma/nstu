@@ -25,6 +25,24 @@ cd "$ROOT" || exit 2
 
 # UCRT64 must precede /mingw64/bin or the test exes die with 0xc0000139.
 export PATH="/c/msys64/ucrt64/bin:$PATH"
+# Keep every invocation's diagnostics under the repository build root.
+LOG_PARENT="$ROOT/build/verify-gate-logs"
+if ! mkdir -p "$LOG_PARENT"; then
+    printf 'FAIL: cannot create gate log parent: %s\n' "$LOG_PARENT" >&2
+    exit 2
+fi
+LOG_RUN="$(mktemp -d "$LOG_PARENT/run.XXXXXXXX")" || {
+    printf 'FAIL: cannot allocate gate log run under: %s\n' "$LOG_PARENT" >&2
+    exit 2
+}
+CONFIGURE_LOG="$LOG_RUN/configure.log"
+BUILD_LOG="$LOG_RUN/build.log"
+TEST_LOG="$LOG_RUN/ctest.log"
+if ! { : >"$CONFIGURE_LOG" && : >"$BUILD_LOG" && : >"$TEST_LOG"; }; then
+    printf 'FAIL: cannot allocate gate log files in: %s\n' "$LOG_RUN" >&2
+    exit 2
+fi
+printf 'Gate logs: %s\n' "$LOG_RUN"
 
 FAILED=0
 step()  { printf '\n=== %s ===\n' "$1"; }
@@ -113,9 +131,9 @@ if [ "$STRICT" -eq 1 ]; then
     # manual deallocation. MSVC /WX -- the authoritative gate -- is clean on it.
     # Suppressed deliberately so a spurious diagnostic cannot pressure anyone
     # into changing correct code.
-    if ! cmake -S . -B "$BUILD_DIR" -G "MinGW Makefiles"               -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON               -DCMAKE_CXX_FLAGS="-Wno-free-nonheap-object" >/tmp/nstu-cfg.log 2>&1; then
+    if ! cmake -S . -B "$BUILD_DIR" -G "MinGW Makefiles"               -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON               -DCMAKE_CXX_FLAGS="-Wno-free-nonheap-object" >"$CONFIGURE_LOG" 2>&1; then
         fail "configure failed:"
-        tail -20 /tmp/nstu-cfg.log | sed 's/^/        /'
+        tail -20 "$CONFIGURE_LOG" | sed 's/^/        /'
         BUILD_OK=0
     fi
 else
@@ -127,7 +145,6 @@ else
     fi
 fi
 
-BUILD_LOG="$(mktemp)"
 if [ "$BUILD_OK" -eq 1 ]; then
     if cmake --build "$BUILD_DIR" -j 8 >"$BUILD_LOG" 2>&1; then
         pass "build succeeded"
@@ -160,16 +177,13 @@ step "Tests"
 if [ "$BUILD_OK" -eq 0 ]; then
     note "skipped -- build did not complete (running them would report 44 bogus failures)"
 else
-    TEST_LOG="$(mktemp)"
     if ctest --test-dir "$BUILD_DIR" --output-on-failure -j4 >"$TEST_LOG" 2>&1; then
         pass "$(grep -E 'tests passed' "$TEST_LOG" | tail -1)"
     else
         fail "ctest failed:"
         grep -E 'Failed|tests passed' "$TEST_LOG" | head -15 | sed 's/^/        /'
     fi
-    rm -f "$TEST_LOG"
 fi
-rm -f "$BUILD_LOG"
 
 # ---------------------------------------------------------------- verdict
 printf '\n========================================\n'
