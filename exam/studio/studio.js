@@ -417,6 +417,13 @@
 
   let previewIndex = 0;
 
+  function resetPreviewState() {
+    previewIndex = 0;
+    previewAnswers = {};
+    selectedTokenForPlacement = null;
+    if (el("preview-view").style.display === "flex") renderPreview();
+  }
+
   function renderPreview() {
     el("preview-exam-title").textContent = currentExam.title || "IELTS Assessment Preview";
     const minutes = Math.round((currentExam.durationSeconds || 3600) / 60);
@@ -1030,6 +1037,7 @@
         if (!data.id || !data.questions) throw new Error("Invalid manifest JSON structure.");
         currentExam = data;
         activeQuestionIndex = 0;
+        resetPreviewState();
         renderEditor();
         showToast("Manifest imported successfully", "success");
       } else if (file.name.endsWith(".nstuexam") || file.name.endsWith(".zip")) {
@@ -1042,6 +1050,7 @@
         const data = JSON.parse(text);
         currentExam = data;
         activeQuestionIndex = 0;
+        resetPreviewState();
         renderEditor();
         showToast(`Imported .nstuexam package (${entries.length} files)`, "success");
       } else {
@@ -1101,6 +1110,7 @@
     el("btn-load-sample").addEventListener("click", () => {
       currentExam = JSON.parse(JSON.stringify(DEFAULT_EXAM));
       activeQuestionIndex = 0;
+      resetPreviewState();
       renderEditor();
       showToast("Loaded IELTS Academic Sample Assessment", "info");
     });

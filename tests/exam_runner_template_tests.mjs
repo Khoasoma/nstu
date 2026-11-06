@@ -271,3 +271,80 @@ for (const [type, suffix] of Object.entries(generatedSuffixes)) {
   assert.equal(defaultQuestion.type, type === 'matching' ? 'reading' : type);
 }
 console.log('Studio generated IDs across live and retained Preview collisions: 18 scenarios passed');
+
+const importStart = studioSource.indexOf('  async function handleImportFile(file) {');
+const importEnd = studioSource.indexOf('  function saveDraft()', importStart);
+const previewStateStart = studioSource.indexOf('  let previewIndex = 0;');
+const previewStateEnd = studioSource.indexOf('  function renderPreview()', previewStateStart);
+assert.ok(importStart >= 0 && importEnd > importStart && previewStateStart >= 0 && previewStateEnd > previewStateStart);
+const replacementNodes = new Map();
+function replacementNode(id) {
+  if (!replacementNodes.has(id)) replacementNodes.set(id, {
+    listeners: {}, style: { display: 'none' }, setAttribute() {}, classList: { add() {}, remove() {} },
+    addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
+  });
+  return replacementNodes.get(id);
+}
+let zipManifest = { id: 'zip-new', questions: [{ id: 'shared', type: 'short_answer', prompt: 'ZIP prompt' }] };
+const replacements = vm.runInNewContext(`(() => {
+  const DEFAULT_EXAM = { id: 'sample', questions: [{ id: 'shared', type: 'short_answer', prompt: 'Sample prompt' }] };
+  let currentExam = { id: 'original', questions: [{ id: 'shared' }, { id: 'last' }] };
+  let activeQuestionIndex = 1, previewAnswers = {}, selectedTokenForPlacement = null;
+  let renderCount = 0, previewRenders = 0;
+  const el = getNode, renderEditor = () => { ++renderCount; }, showToast = () => {};
+  const setMode = () => {}, saveDraft = () => {}, exportPackage = () => {},
+    addQuestion = () => {}, renderPreview = () => { ++previewRenders; }, initSplitter = () => {};
+  ${studioSource.slice(previewStateStart, previewStateEnd)}
+  ${studioSource.slice(importStart, importEnd)}
+  ${studioSource.slice(initStart, initEnd)}
+  init();
+  return { importFile: handleImportFile,
+    seedPreview() { previewIndex = 3; previewAnswers = { shared: 'Old answer' }; selectedTokenForPlacement = 2; activeQuestionIndex = 1; },
+    inspect() { return { currentExam, previewIndex, previewAnswers, selectedTokenForPlacement, activeQuestionIndex, renderCount, previewRenders }; },
+    sample() { el('btn-load-sample').listeners.click[0](); } };
+})()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} } },
+  localStorage: { getItem() { return null; }, setItem() {} },
+  NstuZip: { Reader: class { async readEntries() {
+    return [{ path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(zipManifest)) }];
+  } } } });
+function assertFreshPreview(expectedId) {
+  const state = replacements.inspect();
+  assert.equal(state.currentExam.id, expectedId);
+  assert.equal(state.activeQuestionIndex, 0);
+  assert.equal(state.previewIndex, 0, 'replacement resets the old Preview cursor');
+  assert.equal(Object.keys(state.previewAnswers).length, 0, 'replacement cannot reuse old answers by question ID');
+  assert.equal(state.selectedTokenForPlacement, null);
+}
+replacements.seedPreview();
+await replacements.importFile({ name: 'fixture.json', text: async () => JSON.stringify({ id: 'json-new', questions: [{ id: 'shared', type: 'short_answer', prompt: 'JSON prompt' }] }) });
+assertFreshPreview('json-new');
+replacements.seedPreview();
+await replacements.importFile({ name: 'fixture.nstuexam', arrayBuffer: async () => new ArrayBuffer(0) });
+assertFreshPreview('zip-new');
+replacements.seedPreview(); replacements.sample(); assertFreshPreview('sample');
+assert.equal(replacements.inspect().currentExam.questions[0].prompt, 'Sample prompt');
+for (const file of [
+  { name: 'broken.json', text: async () => '{not valid' },
+  { name: 'invalid.json', text: async () => JSON.stringify({ questions: [] }) },
+  { name: 'not-supported.txt' }
+]) {
+  replacements.seedPreview(); const before = replacements.inspect();
+  await replacements.importFile(file);
+  const after = replacements.inspect();
+  assert.equal(after.currentExam, before.currentExam);
+  assert.equal(after.previewAnswers, before.previewAnswers);
+  assert.equal(after.previewIndex, 3);
+  assert.equal(after.selectedTokenForPlacement, 2);
+  assert.equal(after.activeQuestionIndex, 1);
+  assert.equal(after.renderCount, before.renderCount);
+}
+replacementNode('preview-view').style.display = 'flex';
+replacements.seedPreview(); const previewRendersBefore = replacements.inspect().previewRenders;
+await replacements.importFile({ name: 'active.json', text: async () => JSON.stringify({ id: 'active-replacement', questions: [{ id: 'shared', prompt: 'New active Preview' }] }) });
+assertFreshPreview('active-replacement');
+assert.equal(replacements.inspect().previewRenders, previewRendersBefore + 1);
+const unchangedPreview = replacements.inspect();
+await replacements.importFile({ name: 'broken.json', text: async () => '{broken' });
+assert.equal(replacements.inspect().previewRenders, unchangedPreview.previewRenders);
+assert.equal(replacements.inspect().currentExam, unchangedPreview.currentExam);
+console.log('Studio Preview reset/refresh on model replacement: 8 scenarios passed');
