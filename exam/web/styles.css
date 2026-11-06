@@ -116,7 +116,8 @@ textarea:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 }
 
 .identity { min-width: 0; flex-wrap: wrap; gap: 12px; }
-.wordmark { font-weight: 800; letter-spacing: .08em; }
+.nstu-brand-image { display: block; width: 5rem; max-width: 100%; height: auto; flex-shrink: 0; }
+.waiting-brand-image { width: 8rem; }
 .product-label { color: var(--muted); font-size: .82rem; }
 .exam-heading { min-width: 0; }
 .exam-heading h1 { margin: 2px 0 0; font: 600 1.375rem/1.5 "Segoe UI", Arial, sans-serif; }
@@ -229,4 +230,11 @@ button.primary-button, button.secondary-button, button.quiet-button, button.text
   .workspace { grid-template-columns: 190px minmax(0, 1fr); grid-template-rows: max-content max-content; align-content: start; }
   .question-rail, .question-column, .reference-column { overflow-y: visible; }
   .reference-column { grid-column: 1 / -1; border-left: 0; border-top: 1px solid var(--border); }
+}
+
+@media (max-width: 600px) {
+  .topbar { grid-template-columns: minmax(0, 1fr); gap: 16px; }
+  .identity { grid-column: 1; grid-row: 1; }
+  .exam-heading { grid-column: 1; grid-row: 2; }
+  .top-actions { grid-column: 1; grid-row: 3; justify-content: flex-start; }
 }
