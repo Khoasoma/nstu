@@ -2700,6 +2700,43 @@ void draw_selected_client(
 
     const auto session_snapshot = g_remote_session ? g_remote_session->snapshot()
                                                    : nstu::server::RemoteSessionSnapshot{};
+    ImGui::TextWrapped("%s", tr(state, "Remote Control · separate window", "Điều khiển từ xa · cửa sổ riêng"));
+    ImGui::TextWrapped("%s", tr(state,
+        "Focus displays frames and annotations. Keyboard and mouse control belong to the separate Remote workflow.",
+        "Focus hiển thị khung hình và nét vẽ. Điều khiển bàn phím và chuột thuộc quy trình từ xa riêng."));
+    using RemoteState = nstu::server::RemoteSessionState;
+    const char* lifecycle = tr(state, "○ Viewer idle", "○ Trình xem đang chờ");
+    switch (session_snapshot.state) {
+    case RemoteState::preflighting: lifecycle = tr(state, "○ Viewer preflight", "○ Kiểm tra trình xem"); break;
+    case RemoteState::launching: lifecycle = tr(state, "○ Launching viewer", "○ Đang mở trình xem"); break;
+    case RemoteState::running: lifecycle = tr(state, "● Viewer process running", "● Tiến trình xem đang chạy"); break;
+    case RemoteState::stopping: lifecycle = tr(state, "○ Stopping viewer", "○ Đang dừng trình xem"); break;
+    case RemoteState::exited: lifecycle = tr(state, "○ Viewer process exited", "○ Tiến trình xem đã thoát"); break;
+    case RemoteState::failed: lifecycle = tr(state, "▲ Viewer process failed", "▲ Tiến trình xem thất bại"); break;
+    case RemoteState::idle: break;
+    }
+    ImGui::TextWrapped("%s", lifecycle);
+    if (session_snapshot.client_id != 0) {
+        const auto target = std::find_if(clients.begin(), clients.end(), [&](const auto& client) {
+            return client.id == session_snapshot.client_id;
+        });
+        if (target != clients.end())
+            ImGui::TextWrapped("%s: %s · %s · %llu", tr(state, "Viewer target", "Máy của trình xem"),
+                target->hostname.c_str(), target->address.c_str(), static_cast<unsigned long long>(target->id));
+        else ImGui::TextWrapped("%s: %llu · %s", tr(state, "Viewer target", "Máy của trình xem"),
+            static_cast<unsigned long long>(session_snapshot.client_id), tr(state, "record unavailable", "không có bản ghi"));
+    }
+    if (session_snapshot.state != RemoteState::idle) {
+        ImGui::TextWrapped("%s", tr(state, "Process state does not confirm media delivery or input readiness.",
+                                            "Trạng thái tiến trình không xác nhận truyền hình ảnh hoặc sẵn sàng nhận thao tác."));
+        if (session_snapshot.exit_code)
+            ImGui::Text("%s: %u", tr(state, "Exit code", "Mã thoát"), *session_snapshot.exit_code);
+        if (!session_snapshot.bounded_diagnostic.empty())
+            ImGui::TextWrapped("%s", session_snapshot.bounded_diagnostic.c_str());
+    }
+    if (g_remote_window != nullptr)
+        ImGui::TextWrapped("%s · %llu", tr(state, "Legacy remote window open for target", "Cửa sổ từ xa cũ đang mở cho máy"),
+                           static_cast<unsigned long long>(g_remote_target_client));
     const bool session_active_here = session_snapshot.client_id == selected_client->id &&
         (session_snapshot.state == nstu::server::RemoteSessionState::preflighting ||
          session_snapshot.state == nstu::server::RemoteSessionState::launching ||
@@ -2789,15 +2826,17 @@ void draw_selected_client(
         }
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
-    ImGui::Checkbox(tr(state, "Legacy remote", "Điều khiển cũ"),
+    ImGui::Checkbox(tr(state, "Legacy###legacy-remote", "Cửa sổ cũ###legacy-remote"),
                     &g_use_legacy_remote);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s", tr(
             state,
-            "Use legacy built-in D3D remote window instead of Moonlight.",
-            "Dùng cửa sổ D3D cũ thay vì Moonlight."));
+            "Choose the built-in D3D window for the next launch. The current viewer process or window keeps its existing lifecycle.",
+            "Chọn cửa sổ D3D tích hợp cho lần mở tiếp. Tiến trình hoặc cửa sổ hiện tại giữ nguyên vòng đời."));
     }
+    ImGui::TextWrapped("%s", tr(state,
+        "Use the built-in D3D window for the next start. The current viewer keeps its existing lifecycle.",
+        "Dùng cửa sổ D3D tích hợp cho lần mở tiếp. Trình xem hiện tại giữ nguyên vòng đời."));
     // Keyboard entry and the offline auto-stop now belong to the separate
     // remote-control window: it forwards real key events and the main loop
     // closes it when the controlled client drops offline.
@@ -6175,7 +6214,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             for (const auto& ev : g_remote_session->drain_events()) {
                 if (ev.state == nstu::server::RemoteSessionState::running) {
                     dashboard.control_status = tr(dashboard,
-                        "Remote session connected.", "Đã kết nối điều khiển từ xa.");
+                        "Viewer process running; media and input readiness are unconfirmed.",
+                        "Tiến trình xem đang chạy; chưa xác nhận hình ảnh và sẵn sàng nhận thao tác.");
                 } else if (ev.state == nstu::server::RemoteSessionState::failed) {
                     dashboard.control_status = tr(dashboard,
                         "Remote session failed: ", "Điều khiển từ xa thất bại: ") +
