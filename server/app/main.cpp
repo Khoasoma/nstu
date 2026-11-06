@@ -4331,8 +4331,8 @@ void generate_sealed_cohort_export(
     if (nstu::server::sealed_export::export_to_file(
             export_path, grade, answers, audit_events, server_seal_key, &error)) {
         state.last_export_path = export_path.string();
-        state.control_status = tr(state, "Sealed export created successfully: ",
-                                  "Đã tạo file niêm phong thành công: ") + filename;
+        state.control_status = tr(state, "Demonstration sealed export created: ",
+                                  "Đã tạo file niêm phong minh họa: ") + filename;
     } else {
         state.control_status = tr(state, "Export failed: ", "Xuất thất bại: ") + error;
     }
@@ -4343,12 +4343,12 @@ void draw_exam_panel(
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
     if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
-    ImGui::TextUnformatted(tr(state, "Teacher Exam Operator Console", "Bảng điều khiển kỳ thi"));
+    ImGui::TextWrapped("%s", tr(state, "Teacher Exam Operator Console", "Bảng điều khiển kỳ thi"));
     if (g_heading_font != nullptr) ImGui::PopFont();
     ImGui::TextWrapped("%s", tr(
         state,
-        "Orchestrate cohort assessments, track live candidate progress, and export tamper-evident sealed grades.",
-        "Điều phối kỳ thi, theo dõi tiến độ thí sinh theo thời gian thực và xuất kết quả niêm phong số."));
+        "Prepare staged packages and inspect loading, ready and begun server states. Begin and Stop report queued requests, not candidate acknowledgements.",
+        "Chuẩn bị gói thi đã triển khai và xem trạng thái tải, sẵn sàng, đã bắt đầu trên server. Bắt đầu và Dừng báo yêu cầu đã xếp hàng, không phải xác nhận từ thí sinh."));
 
     ImGui::Separator();
     ImGui::Spacing();
@@ -4386,11 +4386,14 @@ void draw_exam_panel(
     ImGui::InputTextWithHint("##exam-package-id", "Package ID",
                              state.exam_package_id.data(), state.exam_package_id.size());
     ImGui::SetNextItemWidth(std::min(scaled(420.0f), ImGui::GetContentRegionAvail().x));
-    ImGui::InputTextWithHint("##exam-candidate-id", "Candidate ID (or cohort prefix)",
+    ImGui::InputTextWithHint("##exam-candidate-id", tr(state, "Candidate ID for selected computer", "Mã thí sinh cho máy được chọn"),
                              state.exam_candidate_id.data(), state.exam_candidate_id.size());
     ImGui::SetNextItemWidth(std::min(scaled(720.0f), ImGui::GetContentRegionAvail().x));
     ImGui::InputTextWithHint("##exam-digest", "Content SHA-256",
                              state.exam_digest_hex.data(), state.exam_digest_hex.size());
+    ImGui::TextWrapped("%s", tr(state,
+        "Selected load uses the entered candidate ID. All-online load uses each computer's hostname. Scanning/selecting a package does not calculate its digest or stage files on clients.",
+        "Mở trên máy chọn dùng mã thí sinh đã nhập. Mở trên tất cả máy online dùng tên từng máy. Quét/chọn gói không tính digest hoặc triển khai file lên máy client."));
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -4401,9 +4404,11 @@ void draw_exam_panel(
     const auto ready_clients = control_plane.ready_exam_clients();
 
     ImGui::TextUnformatted(tr(state, "2. Cohort Launch & Synchronized Barrier", "2. Điều phối & Bắt đầu đồng bộ"));
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("%s: %zu | %s: %zu",
-                        tr(state, "Active exams", "Kỳ thi đang chạy"), active_states.size(),
-                        tr(state, "Ready to begin", "Sẵn sàng bắt đầu"), ready_clients.size());
+                        tr(state, "Server exam contexts", "Phiên thi trên server"), active_states.size(),
+                        tr(state, "Ready reports (including begun)", "Báo sẵn sàng (gồm đã bắt đầu)"), ready_clients.size());
+    ImGui::PopTextWrapPos();
 
     const auto active_for_selected = std::find_if(
         active_states.begin(), active_states.end(), [selected_client](const auto& exam) {
@@ -4478,7 +4483,7 @@ void draw_exam_panel(
                 ++begun_count;
             }
         }
-        state.control_status = tr(state, "Released exam barrier for ", "Đã mở rào chắn kỳ thi cho ") +
+        state.control_status = tr(state, "Begin requests queued for ", "Đã xếp hàng yêu cầu bắt đầu cho ") +
                               std::to_string(begun_count) + tr(state, " candidates.", " thí sinh.");
     }
     ImGui::EndDisabled();
@@ -4494,7 +4499,7 @@ void draw_exam_panel(
                 ++stopped_count;
             }
         }
-        state.control_status = tr(state, "Stopped exam on ", "Đã dừng bài thi trên ") +
+        state.control_status = tr(state, "Stop requests queued for ", "Đã xếp hàng yêu cầu dừng cho ") +
                               std::to_string(stopped_count) + tr(state, " computers.", " máy tính.");
     }
     ImGui::EndDisabled();
@@ -4504,7 +4509,7 @@ void draw_exam_panel(
     ImGui::Spacing();
 
     // 3. Live Cohort Monitoring Table
-    ImGui::TextUnformatted(tr(state, "3. Live Cohort Telemetry", "3. Theo dõi phòng thi trực tiếp"));
+    ImGui::TextWrapped("%s", tr(state, "3. Cohort Server State", "3. Trạng thái phòng thi trên server"));
     if (clients.empty()) {
         ImGui::TextDisabled("%s", tr(state, "No student computers connected to server.", "Chưa có máy sinh viên kết nối."));
     } else if (ImGui::BeginTable("exam-cohort-table", 6,
@@ -4551,7 +4556,7 @@ void draw_exam_panel(
                     ImGui::TextDisabled("%s", tr(state, "Idle", "Sẵn sàng nhận đề"));
                 }
             } else if (it_exam->begun) {
-                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s", tr(state, "In Progress", "Đang thi"));
+                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s", tr(state, "Begun", "Đã bắt đầu"));
             } else if (it_exam->ready) {
                 ImGui::TextColored(ImVec4{0.9f, 0.8f, 0.1f, 1.0f}, "%s", tr(state, "Ready to Begin", "Đã sẵn sàng"));
             } else {
@@ -4578,7 +4583,7 @@ void draw_exam_panel(
                 if (ImGui::SmallButton(tr(state, "Begin", "Bắt đầu"))) {
                     std::string err;
                     state.control_status = control_plane.begin_exam(client.id, 0, &err)
-                        ? tr(state, "Exam begun.", "Đã bắt đầu bài thi.")
+                        ? tr(state, "Begin request queued.", "Đã xếp hàng yêu cầu bắt đầu.")
                         : err;
                 }
             }
@@ -4587,7 +4592,7 @@ void draw_exam_panel(
                 if (ImGui::SmallButton(tr(state, "Stop", "Dừng"))) {
                     std::string err;
                     state.control_status = control_plane.stop_exam(client.id, &err)
-                        ? tr(state, "Exam stopped.", "Đã dừng bài thi.")
+                        ? tr(state, "Stop request queued.", "Đã xếp hàng yêu cầu dừng.")
                         : err;
                 }
             }
@@ -4602,7 +4607,10 @@ void draw_exam_panel(
     ImGui::Spacing();
 
     // 4. Sealed Export Container
-    ImGui::TextUnformatted(tr(state, "4. Tamper-Evident Sealed Export", "4. Xuất kết quả niêm phong số"));
+    ImGui::TextWrapped("%s", tr(state, "4. Demonstration Sealed Export", "4. File niêm phong minh họa"));
+    ImGui::TextWrapped("%s", tr(state,
+        "Demonstration export uses sample grades, empty responses, sample audit events and a test sealing key. It does not export candidate results.",
+        "File minh họa dùng điểm mẫu, câu trả lời trống, sự kiện kiểm toán mẫu và khóa niêm phong thử nghiệm. File không xuất kết quả của thí sinh."));
     if (ImGui::Button(tr(state, "Generate Sealed Export (.nstugrade)", "Tạo file niêm phong (.nstugrade)"), {scaled(260.0f), 0})) {
         generate_sealed_cohort_export(state, control_plane);
     }
