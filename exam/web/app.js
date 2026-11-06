@@ -77,6 +77,7 @@
       assetUnavailable: "This exam asset is not available in the local package.",
       notesPlaceholder: "Private notes for this session", sessionSettings: "Session settings",
       displayAndLanguage: "Display and language", language: "Language", textSize: "Text size",
+      appearance: "Appearance", light: "Light", dark: "Dark",
       highContrast: "High contrast", reduceMotion: "Reduce motion", done: "Done",
       submitAssessment: "Submit assessment", submitPrompt: "Submit your answers now?",
       keepWorking: "Keep working", multipleChoice: "Multiple choice", shortAnswer: "Short answer",
@@ -98,6 +99,7 @@
       assetUnavailable: "Tài nguyên này không có trong gói bài thi cục bộ.",
       notesPlaceholder: "Ghi chú riêng cho phiên này", sessionSettings: "Cài đặt phiên",
       displayAndLanguage: "Hiển thị và ngôn ngữ", language: "Ngôn ngữ", textSize: "Cỡ chữ",
+      appearance: "Giao diện", light: "Sáng", dark: "Tối",
       highContrast: "Tương phản cao", reduceMotion: "Giảm chuyển động", done: "Xong",
       submitAssessment: "Nộp bài đánh giá", submitPrompt: "Nộp câu trả lời ngay?",
       keepWorking: "Tiếp tục làm", multipleChoice: "Trắc nghiệm", shortAnswer: "Trả lời ngắn",
@@ -3168,6 +3170,12 @@
     });
     el("text-size-setting").addEventListener("change", (event) => {
       document.documentElement.style.setProperty("--scale", event.target.value);
+    });
+    document.querySelectorAll("[data-appearance]").forEach((select) => {
+      select.addEventListener("change", (event) => {
+        document.documentElement.setAttribute("data-appearance",
+          event.target.value === "dark" ? "dark" : "light");
+      });
     });
     el("contrast-setting").addEventListener("change", (event) => document.body.classList.toggle("high-contrast", event.target.checked));
     el("motion-setting").addEventListener("change", (event) => document.body.classList.toggle("reduce-motion", event.target.checked));
