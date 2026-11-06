@@ -1137,6 +1137,11 @@
       if (q) q.instruction = e.target.value;
     });
 
+    el("q-sa-placeholder").addEventListener("input", (e) => {
+      const q = currentExam.questions[activeQuestionIndex];
+      if (q && q.type === "short_answer") q.answerPlaceholder = e.target.value;
+    });
+
     el("q-passage").addEventListener("input", (e) => {
       const q = currentExam.questions[activeQuestionIndex];
       if (q) q.passage = e.target.value;

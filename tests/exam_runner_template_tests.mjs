@@ -92,3 +92,57 @@ const undefinedRead = await readerScenario({ readFails: true, readError: undefin
 assert.equal(undefinedRead.failed, true);
 assert.equal(undefinedRead.error, undefined, 'undefined is still an original thrown failure');
 console.log('Studio asset-reader cleanup and failure precedence: 8 scenarios passed');
+
+// Execute the actual init event bindings with inert renderer dependencies.
+const initStart = studioSource.indexOf('  function init() {');
+const initEnd = studioSource.indexOf('  // Start application on DOM ready', initStart);
+const compileStart = studioSource.indexOf('  function compileManifest(exam) {');
+const compileEnd = studioSource.indexOf('  async function readRunnerAsset(', compileStart);
+assert.ok(initStart >= 0 && initEnd > initStart && compileStart >= 0 && compileEnd > compileStart);
+const fieldNodes = new Map();
+function fieldNode(id) {
+  if (!fieldNodes.has(id)) fieldNodes.set(id, {
+    value: '', children: [], listeners: {},
+    classList: { add() {}, remove() {} }, setAttribute() {},
+    addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+  });
+  return fieldNodes.get(id);
+}
+const fields = vm.runInNewContext(`(() => {
+  let currentExam = { id: 'placeholder-test', title: 'Test', durationSeconds: 600, questions: [
+    { id: 'short-a', type: 'short_answer', prompt: 'A', points: 1, answerPlaceholder: 'Original A' },
+    { id: 'short-b', type: 'short_answer', prompt: 'B', points: 1, answerPlaceholder: 'Original B' },
+    { id: 'essay-c', type: 'essay', prompt: 'C', points: 1, answerPlaceholder: 'Original C' }
+  ] };
+  let activeQuestionIndex = 0, previewIndex = 0;
+  const el = getNode;
+  const setMode = () => {}, renderEditor = () => {}, initSplitter = () => {},
+    renderPreview = () => {}, showToast = () => {}, handleImportFile = () => {},
+    saveDraft = () => {}, exportPackage = () => {}, addQuestion = () => {};
+  ${studioSource.slice(compileStart, compileEnd)}
+  ${studioSource.slice(initStart, initEnd)}
+  init();
+  return { exam: currentExam, setIndex(index) { activeQuestionIndex = index; },
+    manifest() { return compileManifest(currentExam); } };
+})()`, { getNode: fieldNode, document: { documentElement: { dataset: {} } },
+  localStorage: { getItem() { return null; }, setItem() {} } });
+function placeholderInput(value) {
+  const node = fieldNode('q-sa-placeholder'); node.value = value;
+  for (const callback of node.listeners.input || []) callback({ target: node });
+}
+const authoredPlaceholder = 'Nhập từ chính xác <b>literal</b> & one number';
+placeholderInput(authoredPlaceholder);
+assert.equal(fields.exam.questions[0].answerPlaceholder, authoredPlaceholder);
+assert.equal(fields.exam.questions[1].answerPlaceholder, 'Original B');
+assert.equal(fields.manifest().questions[0].answerPlaceholder, authoredPlaceholder);
+fields.setIndex(1); placeholderInput('Independent B');
+assert.equal(fields.exam.questions[0].answerPlaceholder, authoredPlaceholder);
+assert.equal(fields.exam.questions[1].answerPlaceholder, 'Independent B');
+fields.setIndex(0); placeholderInput('');
+assert.equal(fields.exam.questions[0].answerPlaceholder, '');
+assert.equal(fields.manifest().questions[0].answerPlaceholder, undefined);
+fields.setIndex(2); placeholderInput('Must not change essay data');
+assert.equal(fields.exam.questions[2].answerPlaceholder, 'Original C');
+fields.setIndex(999); placeholderInput('Missing target event');
+assert.equal(fields.exam.questions.length, 3);
+console.log('Studio short-answer placeholder binding and manifest: 6 scenarios passed');
