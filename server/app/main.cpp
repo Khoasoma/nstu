@@ -36,6 +36,7 @@
 #include "interim_presentation.hpp"
 #include "brand_image.hpp"
 #include "focus_stream_observer.hpp"
+#include "exam_fleet_presentation.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -484,6 +485,8 @@ struct DashboardState {
     bool annotation_enabled = false;
     bool uwf_confirmation_open = false;
     std::uint64_t uwf_confirmation_client_id = 0;
+    bool uwf_checkpoint_acknowledged = false;
+    std::uint64_t uwf_checkpoint_client_id = 0;
     bool annotation_dragging = false;
     ImVec2 previous_annotation_point{};
     AnnotationTool annotation_tool = AnnotationTool::pen;
@@ -2199,21 +2202,55 @@ void draw_telemetry_card(const char* label, const char* value, float width) {
 }
 
 void draw_uwf_confirmation_popup(
+    const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    if (state.uwf_confirmation_open &&
-        ImGui::BeginPopupModal("uwf-confirmation", nullptr,
+    if (!state.uwf_confirmation_open) return;
+    if (state.uwf_checkpoint_client_id != state.uwf_confirmation_client_id) {
+        state.uwf_checkpoint_acknowledged = false;
+        state.uwf_checkpoint_client_id = state.uwf_confirmation_client_id;
+    }
+    const auto decision = [&] {
+        return nstu::ui::evaluate_uwf_arm(state.uwf_confirmation_client_id, clients,
+            state.current_role, state.uwf_checkpoint_acknowledged);
+    };
+    const auto reason_text = [&](nstu::ui::UwfArmRejection reason) {
+        using Reason = nstu::ui::UwfArmRejection;
+        switch (reason) {
+        case Reason::role: return tr(state, "Requires Technician or Developer role.", "Yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển.");
+        case Reason::no_target: return tr(state, "No target was chosen.", "Chưa chọn máy đích.");
+        case Reason::missing_target: return tr(state, "The target is no longer in the current roster.", "Máy đích không còn trong danh sách hiện tại.");
+        case Reason::offline: return tr(state, "The target is offline.", "Máy đích đang ngoại tuyến.");
+        case Reason::unsupported: return tr(state, "The target reports that UWF is unsupported.", "Máy đích báo không hỗ trợ UWF.");
+        case Reason::already_protected: return tr(state, "Current protection is already proven; no arm request is needed.", "Đã xác minh bảo vệ hiện tại; không cần yêu cầu bật lại.");
+        case Reason::checkpoint: return tr(state, "Verify a recovery checkpoint before enabling.", "Xác minh điểm khôi phục trước khi bật.");
+        case Reason::none: return tr(state, "A readiness request does not prove current protection.", "Yêu cầu kiểm tra sẵn sàng không chứng minh bảo vệ hiện tại.");
+        }
+        return "";
+    };
+    const float width = std::min(scaled(nstu::ui::geometry::dialog_width),
+        std::max(1.0f, ImGui::GetMainViewport()->WorkSize.x - scaled(nstu::ui::spacing::xxl)));
+    ImGui::SetNextWindowSize({width, 0}, ImGuiCond_Always);
+    if (ImGui::BeginPopupModal("uwf-confirmation", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        const auto target = decision();
+        ImGui::TextWrapped("%s: %llu", tr(state, "Target", "Máy đích"),
+            static_cast<unsigned long long>(target.target_id));
+        if (target.target)
+            ImGui::TextWrapped("%s · %s", target.target->hostname.c_str(), target.target->address.c_str());
         ImGui::TextWrapped("%s", tr(
             state,
             "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing. A successful setup shows a 60-second countdown and restarts the client automatically.",
             "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục. Khi thiết lập thành công, máy client sẽ hiển thị đếm ngược 60 giây rồi tự khởi động lại."));
-        if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
-                             "Đã xác minh điểm khôi phục; bật"))) {
-            if (!is_action_permitted(state.current_role, OperatorAction::configure_uwf)) {
-                state.control_status = tr(state,
-                    "Reboot-to-restore configuration requires Technician or Developer role.",
-                    "Cấu hình khôi phục sau reboot yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển.");
+        ImGui::Checkbox(tr(state, "Checkpoint verified###uwf-checkpoint", "Đã xác minh điểm khôi phục###uwf-checkpoint"),
+            &state.uwf_checkpoint_acknowledged);
+        const auto current = decision();
+        ImGui::TextWrapped("%s", reason_text(current.rejection));
+        ImGui::BeginDisabled(!current.allowed());
+        if (ImGui::Button(tr(state, "Enable reboot-to-restore", "Bật khôi phục sau reboot"))) {
+            const auto fresh = decision();
+            if (!fresh.allowed()) {
+                state.control_status = reason_text(fresh.rejection);
             } else {
                 std::string error;
                 // Fleet path: arm UWF and request the visible client restart, so a
@@ -2229,11 +2266,14 @@ void draw_uwf_confirmation_popup(
                 }
             }
             state.uwf_confirmation_open = false;
+            state.uwf_checkpoint_acknowledged = false;
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button(tr(state, "Cancel", "Hủy"))) {
             state.uwf_confirmation_open = false;
+            state.uwf_checkpoint_acknowledged = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -2253,10 +2293,12 @@ void draw_selected_client(
     const bool detail_visible = ImGui::BeginChild("focus-detail", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleVar(2);
     if (!detail_visible) {
+        draw_uwf_confirmation_popup(clients, state, control_plane);
         ImGui::EndChild();
         return;
     }
     if (selected_client == nullptr) {
+        draw_uwf_confirmation_popup(clients, state, control_plane);
         const char* empty = clients.empty()
             ? tr(state, "No clients connected", "Chưa có máy nào kết nối")
             : tr(state, "Select a client", "Chọn một máy học sinh");
@@ -2377,6 +2419,8 @@ void draw_selected_client(
     if (ImGui::Button(tr(state, "Enable reboot-to-restore",
                          "Bật khôi phục sau reboot"))) {
         state.uwf_confirmation_client_id = selected_client->id;
+        state.uwf_checkpoint_acknowledged = false;
+        state.uwf_checkpoint_client_id = selected_client->id;
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
     }
@@ -2415,7 +2459,7 @@ void draw_selected_client(
         }
         ImGui::PopTextWrapPos();
     }
-    draw_uwf_confirmation_popup(state, control_plane);
+    draw_uwf_confirmation_popup(clients, state, control_plane);
 
     char latency[32]{};
     char packet_loss[32]{};
@@ -5338,6 +5382,7 @@ void draw_technician_fleet_health(
         ImGui::SetCursorPosY(scaled(80.0f));
         ImGui::TextDisabled("%s", tr(state, "No computers enrolled or discovered in fleet.",
                                      "Chưa có máy tính nào trong hệ thống."));
+        draw_uwf_confirmation_popup(clients, state, control_plane);
         return;
     }
 
@@ -5681,10 +5726,12 @@ void draw_technician_fleet_health(
 
     if (target_uwf_arm_client_id != 0) {
         state.uwf_confirmation_client_id = target_uwf_arm_client_id;
+        state.uwf_checkpoint_acknowledged = false;
+        state.uwf_checkpoint_client_id = target_uwf_arm_client_id;
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
     }
-    draw_uwf_confirmation_popup(state, control_plane);
+    draw_uwf_confirmation_popup(clients, state, control_plane);
 }
 
 
