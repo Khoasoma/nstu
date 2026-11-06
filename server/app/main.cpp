@@ -2134,45 +2134,54 @@ void draw_room_client_table(
 void draw_focus_client_list(
     const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state) {
-    if (ImGui::BeginChild("focus-client-list", {scaled(280.0f), 0}, true)) {
+    const float width = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
+        nstu::ui::geometry::shell_compact_breakpoint
+        ? nstu::ui::geometry::focus_targets_compact : nstu::ui::geometry::focus_targets);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                       {scaled(nstu::ui::spacing::md), scaled(nstu::ui::spacing::md)});
+    const bool visible = ImGui::BeginChild("focus-client-list", {width, 0},
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
+    if (visible) {
         ImGui::TextUnformatted(tr(state, "Clients", "Máy học sinh"));
         ImGui::Separator();
-        if (ImGui::BeginTable("focus-clients", 2,
-                              ImGuiTableFlags_RowBg |
-                                  ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn(tr(state, "Client", "Máy"),
-                                    ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"),
-                                    ImGuiTableColumnFlags_WidthFixed,
-                                    scaled(94.0f));
-            for (const auto& client : clients) {
-                if (!client_matches_filter(client, state)) {
-                    continue;
-                }
-                push_client_id(client.id);
-                ImGui::TableNextRow(0, scaled(40.0f));
-                ImGui::TableSetColumnIndex(0);
-                const bool selected = state.selected_client_id == client.id;
-                if (ImGui::Selectable(client.hostname.c_str(), selected,
-                                      ImGuiSelectableFlags_None,
-                                      {0.0f, scaled(36.0f)})) {
-                    state.selected_client_id = client.id;
-                    state.annotation_enabled = false;
-                }
-                if (client_has_unread_chat(state, client.id)) {
-                    const ImVec2 rect_min = ImGui::GetItemRectMin();
-                    const ImVec2 rect_max = ImGui::GetItemRectMax();
-                    ImGui::GetWindowDrawList()->AddCircleFilled(
-                        {rect_max.x - scaled(9.0f),
-                         (rect_min.y + rect_max.y) * 0.5f},
-                        scaled(4.0f), IM_COL32(229, 72, 77, 255));
-                }
-                ImGui::TableSetColumnIndex(1);
-                ImGui::TextColored(status_text_color(client.status), "%s",
-                                   client_status_label(client.status, state));
-                pop_client_id();
+        for (const auto& client : clients) {
+            if (!client_matches_filter(client, state)) continue;
+            push_client_id(client.id);
+            const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+            const float gap = scaled(nstu::ui::spacing::xs);
+            const float name_height = ImGui::CalcTextSize(client.hostname.c_str(), nullptr,
+                                                         false, text_width).y;
+            const char* symbol = client.status == nstu::server::ClientStatus::online ? "● "
+                : client.status == nstu::server::ClientStatus::locked ? "■ "
+                : client.status == nstu::server::ClientStatus::degraded ? "▲ " : "○ ";
+            const std::string status = std::string(symbol) + client_status_label(client.status, state);
+            const float status_height = ImGui::CalcTextSize(status.c_str(), nullptr, false, text_width).y;
+            const bool unread = client_has_unread_chat(state, client.id);
+            const char* unread_label = tr(state, "● Unread chat", "● Tin nhắn chưa đọc");
+            const float unread_height = unread
+                ? ImGui::CalcTextSize(unread_label, nullptr, false, text_width).y + gap : 0.0f;
+            const ImVec2 text_position = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##focus-target", state.selected_client_id == client.id,
+                    ImGuiSelectableFlags_None, {0, name_height + gap + status_height + unread_height})) {
+                state.selected_client_id = client.id;
+                state.annotation_enabled = false;
             }
-            ImGui::EndTable();
+            ImVec2 position{text_position.x, ImGui::GetItemRectMin().y +
+                std::trunc(ImGui::GetStyle().ItemSpacing.y * 0.5f)};
+            auto* draw = ImGui::GetWindowDrawList();
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+                ImGui::GetColorU32(ImGuiCol_Text), client.hostname.c_str(), nullptr, text_width);
+            position.y += name_height + gap;
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+                ImGui::ColorConvertFloat4ToU32(status_text_color(client.status)), status.c_str(), nullptr, text_width);
+            if (unread) {
+                position.y += status_height + gap;
+                draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+                    ImGui::ColorConvertFloat4ToU32(nstu::ui::interim_color(nstu::ui::ColorRole::info, g_dark_mode)),
+                    unread_label, nullptr, text_width);
+            }
+            pop_client_id();
         }
     }
     ImGui::EndChild();
@@ -2235,9 +2244,15 @@ void draw_selected_client(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+        {scaled(nstu::ui::spacing::lg), ImGui::GetStyle().ItemSpacing.y});
     draw_focus_client_list(clients, state);
     ImGui::SameLine();
-    if (!ImGui::BeginChild("focus-detail", {0, 0}, false)) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+        {scaled(nstu::ui::spacing::lg), scaled(nstu::ui::spacing::lg)});
+    const bool detail_visible = ImGui::BeginChild("focus-detail", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar(2);
+    if (!detail_visible) {
         ImGui::EndChild();
         return;
     }
@@ -2427,8 +2442,8 @@ void draw_selected_client(
                               "Luồng xem máy · mục tiêu yêu cầu 15 FPS"));
     const float preview_width = ImGui::GetContentRegionAvail().x;
     const float preview_height = std::clamp(
-        preview_width * 0.5625f, scaled(220.0f),
-        std::max(scaled(220.0f), ImGui::GetContentRegionAvail().y - scaled(210.0f)));
+        preview_width / nstu::ui::geometry::snapshot_aspect, scaled(nstu::ui::geometry::focus_viewport_min),
+        std::max(scaled(nstu::ui::geometry::focus_viewport_min), ImGui::GetContentRegionAvail().y - scaled(210.0f)));
     const auto surface = draw_screen_surface(
         *selected_client, preview_height, "##focus-screen", state);
     // Remote input no longer rides on this embedded Focus surface: it lives in a

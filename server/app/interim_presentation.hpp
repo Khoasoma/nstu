@@ -86,6 +86,7 @@ inline constexpr float grid_gap = 12.0f;
 inline constexpr float snapshot_aspect = 16.0f / 9.0f;
 inline constexpr float focus_targets = 220.0f;
 inline constexpr float focus_targets_compact = 180.0f;
+inline constexpr float focus_viewport_min = 250.0f;
 inline constexpr float dialog_width = 640.0f;
 inline constexpr float dialog_max_width = 860.0f;
 inline constexpr float dialog_inset = 24.0f;
