@@ -860,6 +860,7 @@
     const reader = response.body.getReader();
     const chunks = [];
     let length = 0;
+    let readFailed = false;
     try {
       for (;;) {
         const { value, done } = await reader.read();
@@ -868,9 +869,18 @@
         if (length > maximumBytes) throw new Error(`Runner asset exceeds limit: ${relativePath}`);
         chunks.push(value);
       }
+    } catch (error) {
+      readFailed = true;
+      throw error;
     } finally {
-      await reader.cancel();
-      reader.releaseLock();
+      let cleanupFailed = false, cleanupError;
+      try { await reader.cancel(); }
+      catch (error) { cleanupFailed = true; cleanupError = error; }
+      try { reader.releaseLock(); }
+      catch (error) {
+        if (!cleanupFailed) { cleanupFailed = true; cleanupError = error; }
+      }
+      if (cleanupFailed && !readFailed) throw cleanupError;
     }
     const bytes = new Uint8Array(length);
     let offset = 0;
