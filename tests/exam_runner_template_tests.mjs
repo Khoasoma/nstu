@@ -169,6 +169,7 @@ const transitions = vm.runInNewContext(`(() => {
   let currentExam = { id: 'old-id', title: 'Old title', subject: 'Old subject', durationSeconds: 600,
     questions: [{ id: 'a', type: 'short_answer', prompt: 'A' }, { id: 'b', type: 'short_answer', prompt: 'B' }] };
   let activeQuestionIndex = 0;
+  const previewAnswers = {}; // Existing addQuestion now reads retained Preview identities.
   const el = getNode, escapeHtml = value => value;
   const renderActiveQuestionForm = () => {}, showToast = () => {};
   ${studioSource.slice(renderStart, renderEnd)}
@@ -239,3 +240,34 @@ assert.equal(Object.hasOwn(fields.exam.questions[0], 'wordLimit'), false);
 fields.setIndex(999); essayLimitInput('100'); assert.equal(fields.exam.questions.length, 3);
 assert.equal(fields.exam.questions[2].answerPlaceholder, 'Original C');
 console.log('Studio suggested essay limit binding/optional/invalid/type cases: 12 scenarios passed');
+
+function generatedIdScenario(type, existingIds, retiredAnswers = {}) {
+  const model = existingIds.map((id, index) => ({ id, type: 'short_answer', prompt: `Existing ${index}`, answerPlaceholder: `Data ${index}` }));
+  const before = JSON.stringify(model);
+  const result = vm.runInNewContext(`(() => {
+    let currentExam = { questions: model }, activeQuestionIndex = 0;
+    const previewAnswers = retiredAnswers;
+    const syncExamMetadata = () => {}, renderEditor = () => {}, showToast = () => {};
+    ${studioSource.slice(addStart, addEnd)}
+    addQuestion(type);
+    return { questions: currentExam.questions, activeQuestionIndex };
+  })()`, { model, retiredAnswers, type });
+  assert.equal(JSON.stringify(result.questions.slice(0, -1)), before, 'existing question IDs/data must remain unchanged');
+  assert.equal(result.activeQuestionIndex, existingIds.length);
+  assert.equal(new Set(result.questions.map(q => q.id)).size, result.questions.length);
+  assert.equal(Object.hasOwn(retiredAnswers, result.questions.at(-1).id), false,
+    'a new identity cannot bind to retained Preview answers');
+  return result.questions.at(-1);
+}
+const generatedSuffixes = { matching: 'matching', reading: 'reading', multiple_choice: 'mc',
+  short_answer: 'short-answer', essay: 'essay', listening: 'listening' };
+for (const [type, suffix] of Object.entries(generatedSuffixes)) {
+  const defaultQuestion = generatedIdScenario(type, ['old-a', 'old-b']);
+  assert.equal(defaultQuestion.id, `q3-${suffix}`, 'non-collision IDs keep their existing form');
+  const liveCollisions = generatedIdScenario(type, [`q3-${suffix}`, `q4-${suffix}`], { [`q5-${suffix}`]: 'Retired data' });
+  assert.equal(liveCollisions.id, `q6-${suffix}`);
+  const retiredOnly = generatedIdScenario(type, ['old-a', 'old-b'], { [`q3-${suffix}`]: '' });
+  assert.equal(retiredOnly.id, `q4-${suffix}`, 'even an empty retained Preview value reserves its ID');
+  assert.equal(defaultQuestion.type, type === 'matching' ? 'reading' : type);
+}
+console.log('Studio generated IDs across live and retained Preview collisions: 18 scenarios passed');

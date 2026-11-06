@@ -386,6 +386,12 @@
       };
     }
 
+    const idSuffix = newQ.id.slice(newQ.id.indexOf("-"));
+    let idNumber = nextNum;
+    while (currentExam.questions.some(q => q.id === newQ.id) ||
+           Object.prototype.hasOwnProperty.call(previewAnswers, newQ.id)) {
+      newQ.id = `q${++idNumber}${idSuffix}`;
+    }
     currentExam.questions.push(newQ);
     activeQuestionIndex = currentExam.questions.length - 1;
     renderEditor();
