@@ -5023,6 +5023,12 @@ void draw_bulk_action_confirmation_popup(
     if (state.bulk_confirmation_open) {
         ImGui::OpenPopup("bulk-action-confirmation");
     }
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    const float inset = scaled(nstu::ui::geometry::dialog_inset);
+    const ImVec2 maximum{std::max(1.0f, work.x - inset * 2.0f),
+                         std::max(1.0f, work.y - inset * 2.0f)};
+    ImGui::SetNextWindowSizeConstraints(
+        {std::min(scaled(nstu::ui::geometry::dialog_width), maximum.x), 0}, maximum);
     if (!ImGui::BeginPopupModal("bulk-action-confirmation", nullptr,
                                 ImGuiWindowFlags_AlwaysAutoResize)) {
         return;
@@ -5040,15 +5046,50 @@ void draw_bulk_action_confirmation_popup(
     const std::string room_name = state.room_name_input.data();
     const bool is_wol = (state.pending_bulk_action == BulkActionKind::wake_on_lan);
     const std::size_t effective_target_count = is_wol ? target_summary.skipped_offline : target_summary.eligible_online;
-    ImGui::TextWrapped("%s",
-        nstu::server::format_bulk_confirmation_message(
-            state.pending_bulk_action, effective_target_count,
-            room_name, is_vietnamese).c_str());
+    std::size_t visible_checked = 0;
+    for (const auto& client : clients)
+        if (state.checked_client_ids.contains(client.id) && client_matches_filter(client, state))
+            ++visible_checked;
+    const auto checked_count = state.checked_client_ids.size();
+    const auto missing_count = checked_count - target_summary.total_selected;
+    ImGui::TextWrapped("%s: %zu · %s: %zu · %s: %zu", tr(state, "Checked", "Đã chọn"),
+        checked_count, tr(state, "Hidden or unavailable", "Ẩn hoặc không khả dụng"),
+        checked_count - visible_checked, tr(state, "Unavailable records", "Bản ghi không khả dụng"), missing_count);
+    ImGui::TextWrapped("%zu %s. %s", effective_target_count,
+        is_wol ? tr(state, "preliminary offline candidates", "máy ngoại tuyến sơ bộ")
+               : tr(state, "preliminary non-offline candidates", "máy không ngoại tuyến sơ bộ"),
+        tr(state, "Authentication, exam and capability guards still apply; dispatch does not confirm completion.",
+                  "Vẫn kiểm tra xác thực, kỳ thi và khả năng; gửi yêu cầu không xác nhận hoàn tất."));
+    if (!room_name.empty()) ImGui::TextWrapped("%s: %s", tr(state, "Room", "Phòng"), room_name.c_str());
+    std::vector<std::uint64_t> targets(state.checked_client_ids.begin(), state.checked_client_ids.end());
+    std::sort(targets.begin(), targets.end());
+    if (ImGui::BeginChild("confirmed-target-list",
+            {0, std::min(scaled(nstu::ui::geometry::table_row_min * 4.0f), maximum.y * 0.25f)},
+            ImGuiChildFlags_Borders)) {
+        for (const auto id : targets) {
+            const auto found = std::find_if(clients.begin(), clients.end(),
+                [id](const auto& client) { return client.id == id; });
+            if (found == clients.end()) {
+                ImGui::TextWrapped("%llu · %s", static_cast<unsigned long long>(id),
+                    tr(state, "Unavailable · not attempted", "Không khả dụng · không thử gửi"));
+            } else {
+                const bool visible = client_matches_filter(*found, state);
+                const bool eligible = is_wol ? found->status == nstu::server::ClientStatus::offline
+                                             : found->status != nstu::server::ClientStatus::offline;
+                ImGui::TextWrapped("%s · %s · %llu · %s%s", found->hostname.c_str(), found->address.c_str(),
+                    static_cast<unsigned long long>(id),
+                    eligible ? tr(state, "Preliminary candidate", "Máy sơ bộ")
+                             : tr(state, "Connection skipped", "Bỏ qua theo kết nối"),
+                    visible ? "" : tr(state, " · hidden", " · ẩn"));
+            }
+        }
+    }
+    ImGui::EndChild();
 
     if (!is_wol && target_summary.skipped_offline > 0) {
         ImGui::Spacing();
         ImGui::TextColored(
-            ImVec4{0.9f, 0.7f, 0.1f, 1.0f},
+            nstu::ui::interim_color(nstu::ui::ColorRole::warning, g_dark_mode),
             "%s: %zu %s",
             tr(state, "Notice", "Lưu ý"),
             target_summary.skipped_offline,
@@ -5056,7 +5097,7 @@ void draw_bulk_action_confirmation_popup(
     } else if (is_wol && target_summary.eligible_online > 0) {
         ImGui::Spacing();
         ImGui::TextColored(
-            ImVec4{0.4f, 0.7f, 1.0f, 1.0f},
+            nstu::ui::interim_color(nstu::ui::ColorRole::info, g_dark_mode),
             "%s: %zu %s",
             tr(state, "Notice", "Lưu ý"),
             target_summary.eligible_online,
@@ -5199,9 +5240,16 @@ void draw_bulk_action_confirmation_popup(
                     ? std::string_view{state.file_dist_path_input.data()}
                     : std::string_view{}),
             state.current_role);
-        state.control_status =
-            nstu::server::format_bulk_action_result_status(
-                state.pending_bulk_action, result, is_vietnamese);
+        const auto not_attempted = checked_count >= result.attempted ? checked_count - result.attempted : 0;
+        state.control_status = std::string(is_wol
+            ? tr(state, "Wake-request attempts: ", "Lần thử gửi yêu cầu đánh thức: ")
+            : tr(state, "Command dispatch attempts: ", "Lần thử gửi lệnh: ")) +
+            std::to_string(result.attempted) + tr(state, "; dispatched ", "; đã gửi ") +
+            std::to_string(result.succeeded) + tr(state, "; failed ", "; thất bại ") +
+            std::to_string(result.failed) + tr(state, "; not attempted ", "; không thử gửi ") +
+            std::to_string(not_attempted) + tr(state, ". Device completion is not acknowledged.",
+                                                    ". Chưa có xác nhận hoàn tất từ máy.");
+        if (!result.error_messages.empty()) state.control_status += " " + result.error_messages.front();
         state.bulk_confirmation_open = false;
         ImGui::CloseCurrentPopup();
     }
@@ -5591,11 +5639,15 @@ void draw_dashboard_shell(
         state.view == DashboardView::fleet_health) {
         state.view = DashboardView::room_screens;
     }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+        {scaled(nstu::ui::geometry::dialog_inset), scaled(nstu::ui::geometry::dialog_inset)});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, scaled(nstu::ui::radius::dialog));
     draw_software_updates_modal(clients, state);
     draw_telemetry_report_popup(state, clients.size());
     draw_support_bundle_modal(state);
     draw_room_profile_modal(state, control_plane);
     draw_bulk_action_confirmation_popup(clients, state, control_plane);
+    ImGui::PopStyleVar(2);
     const float height = std::max(1.0f, ImGui::GetContentRegionAvail().y -
                                   scaled(nstu::ui::geometry::statusbar));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
