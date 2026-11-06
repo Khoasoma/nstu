@@ -3033,9 +3033,15 @@
   }
 
   function markSaved() {
-    el("save-status").textContent = text("saved");
     window.clearTimeout(markSaved.timeout);
-    markSaved.timeout = window.setTimeout(() => { el("save-status").textContent = text("ready"); }, 1600);
+    if (state.submitted) {
+      el("save-status").textContent = text("submitted");
+      return;
+    }
+    el("save-status").textContent = text("saved");
+    markSaved.timeout = window.setTimeout(() => {
+      el("save-status").textContent = text(state.submitted ? "submitted" : "ready");
+    }, 1600);
   }
 
   function updateTimer() {
@@ -3113,6 +3119,7 @@
       notes: state.notes
     };
     window.NSTU_EXAM_RESPONSE = response;
+    window.clearTimeout(markSaved.timeout);
     el("save-status").textContent = text("submitted");
     document.querySelectorAll("button, input, textarea, select").forEach((node) => { node.disabled = true; });
     if (telemetry.enabled) {

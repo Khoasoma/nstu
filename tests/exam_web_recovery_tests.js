@@ -2210,3 +2210,59 @@ function testFirstOptionLanguageNavigationAndReload() {
 testFirstOptionAnsweredMarker();
 testFirstOptionLanguageNavigationAndReload();
 console.log("exam first-option presentation regressions: 2 passed");
+
+function submitFromForm(harness) {
+  harness.document.getElementById("submit-form").dispatchEvent({
+    type: "submit", submitter: { value: "submit" }
+  });
+}
+function savedTimer(harness) {
+  return [...harness.timers.values()].find(timer => timer.delay === 1600);
+}
+function testLocalSubmissionCancelsSavedStatusTimer() {
+  const context = contextFor("local-submit-status-precedence");
+  const h = createHarness(context, null, new FakeStorage(), { hosted: false });
+  const input = latestAnswerInput(h.document);
+  input.value = "Retained answer";
+  input.dispatchEvent({ type: "input" });
+  const queuedSaveCallback = savedTimer(h);
+  assert.ok(queuedSaveCallback);
+  submitFromForm(h);
+  const durableBefore = h.localStorage.getItem(`${storageKey(context)}:durable-v1`);
+  assert.equal(JSON.parse(durableBefore).finalizeRequested, true);
+  assert.equal(JSON.parse(durableBefore).serverFinalized, false);
+  assert.equal(savedTimer(h), undefined, "local submission must cancel the generic save-status timer");
+  queuedSaveCallback.callback();
+  assert.equal(h.document.getElementById("save-status").textContent, "Response package prepared.",
+    "an already captured save callback must not overwrite local submission status");
+  assert.equal(h.localStorage.getItem(`${storageKey(context)}:durable-v1`), durableBefore);
+  assert.equal(h.window.NSTU_EXAM_RESPONSE.answers.q1, "Retained answer");
+  assert.ok(h.document.querySelectorAll("button, input, textarea, select").every(node => node.disabled));
+  const timerBefore = h.document.getElementById("timer").textContent;
+  h.intervalCallbacks.filter(timer => timer.delay === 1000).forEach(timer => timer.callback());
+  assert.equal(h.document.getElementById("timer").textContent, timerBefore);
+}
+function testMatchingFinalAckPreservesSubmissionFeedback() {
+  const context = contextFor("matching-final-ack-status-precedence");
+  const h = createHarness(context);
+  h.webview.emit(stateResponse(context, 0, "", ""));
+  submitFromForm(h);
+  const message = h.webview.messages.filter(item => item.type === "exam_answer_event").at(-1);
+  assert.equal(message.event.kind, "finalize");
+  const event = message.event;
+  h.webview.emit({ type: "exam_answer_ack", ack: {
+    status: "accepted", sessionIdHex: context.sessionIdHex, sequence: event.sequence,
+    eventHashHex: event.eventHashHex, highestContiguousSequence: event.sequence, stateHashHex: HEX32_C
+  }});
+  const durable = JSON.parse(h.localStorage.getItem(`${storageKey(context)}:durable-v1`));
+  assert.equal(durable.serverFinalized, true);
+  assert.equal(durable.finalizeRequested, false);
+  assert.equal(durable.pending.length, 0);
+  assert.equal(h.document.getElementById("save-status").textContent, "Response package prepared.",
+    "a matching final ACK must retain existing submission feedback rather than generic Saved");
+  assert.equal(savedTimer(h), undefined);
+  assert.ok(h.document.querySelectorAll("button, input, textarea, select").every(node => node.disabled));
+}
+testLocalSubmissionCancelsSavedStatusTimer();
+testMatchingFinalAckPreservesSubmissionFeedback();
+console.log("exam save/finalization precedence regressions: 2 passed");
