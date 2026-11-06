@@ -245,3 +245,22 @@ Deferral still advances memory before persistence, and other transitions still
 ignore save failures. Post-close races, existing mapped views, crash/power-loss
 recovery, signed updater transport/apply, real VM/UWF/Deep Freeze behavior and
 production or exam acceptance are not established by these increments or CI.
+
+
+## Verification Gate Diagnostic Logs — November 6, 2026
+
+The verification gate retains each invocation's configure, build and CTest logs
+in a unique directory under `build/verify-gate-logs/`. Log allocation failure
+returns exit code 2. Earlier run logs are preserved instead of sharing an ambient
+temporary file. The source change is `c1fbaf92809aa99dabdafbc419893298002832c3`.
+
+The Windows regression `tests/verify_gate_output_tests.ps1` checks real CMake
+configure refusals, distinct diagnostic paths, preservation of earlier logs and
+allocation refusal without a fallback file. Independent non-author review
+accepted the source change and regression. Fresh local fast and strict gates each
+passed all 71 C++ tests and 63 Node cases with zero compiler warnings.
+
+This increment remains **INDEV**. Required Windows CI is verified separately for
+each pushed revision. These diagnostic checks do not qualify service/peer/VM
+behavior, WFP containment, update publication or exam safety; the existing
+acceptance requirements remain open.
