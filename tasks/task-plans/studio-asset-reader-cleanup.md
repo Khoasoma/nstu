@@ -1,0 +1,7 @@
+# Studio asset-reader cleanup
+
+Visual implementation remains paused. Root owns this engineering-only slice: Studio's readRunnerAsset failure/cleanup logic, append-only tests/exam_runner_template_tests.mjs fault scenarios and this plan. STUDIO_ASSET_READER_CLEANUP_SOURCE_ADMISSION_R1.json records exact hashes and preserved dirty annotation paths before edits; cap180 changed lines. No new presentation, authoring, manifest, template, backend or packaging behavior is admitted.
+
+The existing finally awaits cancel before releaseLock, so a cancellation rejection skips release and masks the primary read/size error. Always attempt both cleanup operations, preserve any original read failure, and retain cleanup failure rejection after a successful read. First cleanup error retains precedence if both cancel and release fail. Arbitrary thrown values must retain identity, including undefined. Successful bytes and original origin/redirect/size guards stay unchanged.
+
+Append eight injected-reader scenarios before implementation, retain existing canonical template/PNG tests, capture RED/GREEN, JS syntax and source-preservation evidence, then fast/strict gates and independent engineering review before committing. Tests evaluate the actual source helper without adding a production inspection API. No real browser, WebView2/peer or arbitrary media qualification is claimed. Hold unrelated uncommitted visual edits intact and unstaged.

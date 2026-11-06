@@ -39,7 +39,11 @@ if(NSTU_SERVER_USE_IMGUI)
         d3d11 dxgi d3dcompiler dwmapi user32 imm32
     )
 
-    add_executable(nstu-server WIN32 app/main.cpp)
+    set(NSTU_BRAND_ASSET "${CMAKE_CURRENT_SOURCE_DIR}/../exam/web/assets/nstu-brand.png")
+    configure_file(app/brand.rc.in "${CMAKE_CURRENT_BINARY_DIR}/brand.rc" @ONLY)
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/brand.rc"
+        PROPERTIES OBJECT_DEPENDS "${NSTU_BRAND_ASSET}")
+    add_executable(nstu-server WIN32 app/main.cpp "${CMAKE_CURRENT_BINARY_DIR}/brand.rc")
     target_compile_definitions(nstu-server PRIVATE
         NSTU_PROJECT_VERSION="${PROJECT_VERSION}"
         NSTU_BUILD_CHANNEL="${NSTU_INSTALLER_CHANNEL}")

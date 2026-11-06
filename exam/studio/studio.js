@@ -108,6 +108,7 @@
     const btnPreview = el("btn-mode-preview");
 
     if (mode === "preview") {
+      syncExamMetadata();
       editorView.style.display = "none";
       previewView.style.display = "flex";
       btnEditor.classList.remove("active");
@@ -174,6 +175,7 @@
       `;
 
       item.addEventListener("click", (e) => {
+        syncExamMetadata();
         if (e.target.closest("[data-delete]")) {
           deleteQuestion(idx);
           return;
@@ -234,7 +236,7 @@
     } else if (q.type === "short_answer") {
       el("q-sa-placeholder").value = q.answerPlaceholder || "";
     } else if (q.type === "essay") {
-      el("q-essay-limit").value = q.wordLimit || 250;
+      el("q-essay-limit").value = q.wordLimit ?? "";
     }
   }
 
@@ -310,6 +312,7 @@
   }
 
   function addQuestion(type) {
+    syncExamMetadata();
     const nextNum = currentExam.questions.length + 1;
     let newQ;
 
@@ -383,6 +386,12 @@
       };
     }
 
+    const idSuffix = newQ.id.slice(newQ.id.indexOf("-"));
+    let idNumber = nextNum;
+    while (currentExam.questions.some(q => q.id === newQ.id) ||
+           Object.prototype.hasOwnProperty.call(previewAnswers, newQ.id)) {
+      newQ.id = `q${++idNumber}${idSuffix}`;
+    }
     currentExam.questions.push(newQ);
     activeQuestionIndex = currentExam.questions.length - 1;
     renderEditor();
@@ -407,6 +416,13 @@
      ======================================================================== */
 
   let previewIndex = 0;
+
+  function resetPreviewState() {
+    previewIndex = 0;
+    previewAnswers = {};
+    selectedTokenForPlacement = null;
+    if (el("preview-view").style.display === "flex") renderPreview();
+  }
 
   function renderPreview() {
     el("preview-exam-title").textContent = currentExam.title || "IELTS Assessment Preview";
@@ -851,8 +867,62 @@
     return manifest;
   }
 
-  async function exportPackage() {
-    // Sync current values from editor inputs
+  async function readRunnerAsset(relativePath, maximumBytes) {
+    const response = await fetch(relativePath, { redirect: "error" });
+    if (!response.ok || new URL(response.url).origin !== location.origin || !response.body) {
+      throw new Error(`Runner asset unavailable: ${relativePath}`);
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    let readFailed = false;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > maximumBytes) throw new Error(`Runner asset exceeds limit: ${relativePath}`);
+        chunks.push(value);
+      }
+    } catch (error) {
+      readFailed = true;
+      throw error;
+    } finally {
+      let cleanupFailed = false, cleanupError;
+      try { await reader.cancel(); }
+      catch (error) { cleanupFailed = true; cleanupError = error; }
+      try { reader.releaseLock(); }
+      catch (error) {
+        if (!cleanupFailed) { cleanupFailed = true; cleanupError = error; }
+      }
+      if (cleanupFailed && !readFailed) throw cleanupError;
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+  }
+
+  async function verifiedBrandPng(bytes) {
+    if (bytes.byteLength !== 171569) throw new Error("Bundled NSTU image has an invalid length.");
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const hex = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
+    if (hex !== "0b3cf7023212288d978bd898d0fa9ec1dcb7e82c92b678fa2bd1d42e18272486") {
+      throw new Error("Bundled NSTU image does not match the supplied artwork.");
+    }
+    return bytes;
+  }
+
+  function losslessRunnerText(bytes) {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    const encoded = new TextEncoder().encode(text);
+    if (!text || encoded.length !== bytes.length || encoded.some((value, index) => value !== bytes[index])) {
+      throw new Error("Runner text cannot be preserved as UTF8.");
+    }
+    return text;
+  }
+
+  function syncExamMetadata() {
     currentExam.id = el("exam-id").value.trim();
     currentExam.title = el("exam-title").value.trim();
     currentExam.subject = el("exam-subject").value.trim();
@@ -863,6 +933,12 @@
     } else {
       delete currentExam.allowedOrigins;
     }
+  }
+
+  let exportGeneration = 0;
+  async function exportPackage() {
+    const generation = ++exportGeneration;
+    syncExamMetadata();
 
     const modal = el("export-modal");
     const statusBox = el("export-validation-status");
@@ -885,29 +961,45 @@
     try {
       const manifestObj = compileManifest(currentExam);
       const manifestJson = JSON.stringify(manifestObj, null, 2);
+      const packageId = manifestObj.id;
 
       const zip = new NstuZip.Writer();
       zip.add("manifest.json", manifestJson);
 
       // Add web runner files from template.js or relative fetch
-      const runner = window.NSTU_RUNNER_TEMPLATE || {};
-      if (runner.indexHtml && runner.stylesCss && runner.appJs) {
+      const runner = window.NSTU_RUNNER_TEMPLATE;
+      let brand;
+      if (runner !== undefined) {
+        if (!runner || ["indexHtml", "stylesCss", "appJs"].some(key => typeof runner[key] !== "string" || !runner[key])) {
+          throw new Error("Bundled runner text is incomplete.");
+        }
+        const base64 = runner.brandPngBase64;
+        if (typeof base64 !== "string" || base64.length !== 228760 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+          throw new Error("Bundled NSTU image encoding is invalid.");
+        }
+        const binary = atob(base64);
+        if (btoa(binary) !== base64) throw new Error("Bundled NSTU image encoding is not canonical.");
+        brand = await verifiedBrandPng(Uint8Array.from(binary, value => value.charCodeAt(0)));
         zip.add("exam/web/index.html", runner.indexHtml);
         zip.add("exam/web/styles.css", runner.stylesCss);
         zip.add("exam/web/app.js", runner.appJs);
       } else {
         // Fallback fetch
-        const [hRes, cRes, jRes] = await Promise.all([
-          fetch("../web/index.html").then(r => r.text()),
-          fetch("../web/styles.css").then(r => r.text()),
-          fetch("../web/app.js").then(r => r.text())
+        const [hRes, cRes, jRes, png] = await Promise.all([
+          readRunnerAsset("../web/index.html", 1024 * 1024),
+          readRunnerAsset("../web/styles.css", 1024 * 1024),
+          readRunnerAsset("../web/app.js", 1024 * 1024),
+          readRunnerAsset("../web/assets/nstu-brand.png", 171569)
         ]);
-        zip.add("exam/web/index.html", hRes);
-        zip.add("exam/web/styles.css", cRes);
-        zip.add("exam/web/app.js", jRes);
+        brand = await verifiedBrandPng(png);
+        zip.add("exam/web/index.html", losslessRunnerText(hRes));
+        zip.add("exam/web/styles.css", losslessRunnerText(cRes));
+        zip.add("exam/web/app.js", losslessRunnerText(jRes));
       }
+      zip.add("exam/web/assets/nstu-brand.png", brand);
 
       const result = await zip.build();
+      if (generation !== exportGeneration) return;
 
       statusBox.style.color = "var(--success)";
       statusBox.innerHTML = `✓ <strong>Exam Package Validated & Compiled Successfully!</strong><br><span style="font-size: 12px; color: var(--text-muted);">${result.fileCount} files · ${Math.round(result.totalBytes / 1024)} KiB</span>`;
@@ -915,7 +1007,7 @@
       el("lbl-archive-hash").textContent = result.archiveSha256;
       el("lbl-content-hash").textContent = result.contentSha256;
 
-      const stageCmd = `& stage-exam-package.ps1 -ArchivePath "$env:TEMP\\${currentExam.id}.nstuexam" -PublishRoot "$env:ProgramData\\NSTU\\exams\\packages" -ExpectedArchiveSha256 "${result.archiveSha256}" -ExpectedContentSha256 "${result.contentSha256}" -AllowUnsigned`;
+      const stageCmd = `& stage-exam-package.ps1 -ArchivePath "$env:TEMP\\${packageId}.nstuexam" -PublishRoot "$env:ProgramData\\NSTU\\exams\\packages" -ExpectedArchiveSha256 "${result.archiveSha256}" -ExpectedContentSha256 "${result.contentSha256}" -AllowUnsigned`;
       el("lbl-stage-command").textContent = stageCmd;
 
       hashesBox.style.display = "flex";
@@ -925,13 +1017,14 @@
         const url = URL.createObjectURL(result.blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${currentExam.id}.nstuexam`;
+        a.download = `${packageId}.nstuexam`;
         a.click();
         URL.revokeObjectURL(url);
         showToast("Package downloaded successfully", "success");
       };
 
     } catch (err) {
+      if (generation !== exportGeneration) return;
       statusBox.style.color = "var(--danger)";
       statusBox.innerHTML = `<strong>Build Error:</strong> ${escapeHtml(err.message)}`;
     }
@@ -949,6 +1042,7 @@
         if (!data.id || !data.questions) throw new Error("Invalid manifest JSON structure.");
         currentExam = data;
         activeQuestionIndex = 0;
+        resetPreviewState();
         renderEditor();
         showToast("Manifest imported successfully", "success");
       } else if (file.name.endsWith(".nstuexam") || file.name.endsWith(".zip")) {
@@ -961,6 +1055,7 @@
         const data = JSON.parse(text);
         currentExam = data;
         activeQuestionIndex = 0;
+        resetPreviewState();
         renderEditor();
         showToast(`Imported .nstuexam package (${entries.length} files)`, "success");
       } else {
@@ -972,16 +1067,7 @@
   }
 
   function saveDraft() {
-    currentExam.id = el("exam-id").value.trim();
-    currentExam.title = el("exam-title").value.trim();
-    currentExam.subject = el("exam-subject").value.trim();
-    currentExam.durationSeconds = Math.max(60, parseInt(el("exam-duration").value, 10) * 60 || 3600);
-    const origins = parseOriginsInput(el("exam-allowed-origins").value);
-    if (origins.length > 0) {
-      currentExam.allowedOrigins = origins;
-    } else {
-      delete currentExam.allowedOrigins;
-    }
+    syncExamMetadata();
 
     const manifestObj = compileManifest(currentExam);
     const jsonStr = JSON.stringify(manifestObj, null, 2);
@@ -1005,6 +1091,21 @@
      ======================================================================== */
 
   function init() {
+    const themeButton = el("btn-studio-theme");
+    const applyTheme = (theme) => {
+      const dark = theme === "dark";
+      document.documentElement.dataset.theme = dark ? "dark" : "light";
+      themeButton.textContent = dark ? "Light appearance" : "Dark appearance";
+      themeButton.setAttribute("aria-label", `Switch to ${dark ? "light" : "dark"} appearance`);
+    };
+    let storedTheme = "light";
+    try { storedTheme = localStorage.getItem("nstu-studio-theme") || "light"; } catch { /* Appearance stays local when storage is unavailable. */ }
+    applyTheme(storedTheme);
+    themeButton.addEventListener("click", () => {
+      const theme = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+      applyTheme(theme);
+      try { localStorage.setItem("nstu-studio-theme", theme); } catch { /* Preserve authoring when preference storage fails. */ }
+    });
     // Mode toggles
     el("btn-mode-editor").addEventListener("click", () => setMode("editor"));
     el("btn-mode-preview").addEventListener("click", () => setMode("preview"));
@@ -1014,6 +1115,7 @@
     el("btn-load-sample").addEventListener("click", () => {
       currentExam = JSON.parse(JSON.stringify(DEFAULT_EXAM));
       activeQuestionIndex = 0;
+      resetPreviewState();
       renderEditor();
       showToast("Loaded IELTS Academic Sample Assessment", "info");
     });
@@ -1056,6 +1158,20 @@
     el("q-instruction").addEventListener("input", (e) => {
       const q = currentExam.questions[activeQuestionIndex];
       if (q) q.instruction = e.target.value;
+    });
+
+    el("q-sa-placeholder").addEventListener("input", (e) => {
+      const q = currentExam.questions[activeQuestionIndex];
+      if (q && q.type === "short_answer") q.answerPlaceholder = e.target.value;
+    });
+
+    el("q-essay-limit").addEventListener("input", (e) => {
+      const q = currentExam.questions[activeQuestionIndex];
+      if (!q || q.type !== "essay") return;
+      if (!e.target.validity.valid) return;
+      if (e.target.value === "") delete q.wordLimit;
+      else if (Number.isInteger(e.target.valueAsNumber))
+        q.wordLimit = e.target.valueAsNumber;
     });
 
     el("q-passage").addEventListener("input", (e) => {

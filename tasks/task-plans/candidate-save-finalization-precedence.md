@@ -1,0 +1,7 @@
+# Candidate save/finalization precedence
+
+Visual implementation is paused. Root owns this independent engineering slice: exam/web/app.js's existing markSaved/submit-success status lifecycle, append-only tests/exam_web_recovery_tests.js regressions, generated exam/studio/template.js and this plan. Exact source hashes and preserved dirty annotation files precede edits in CANDIDATE_SAVE_PRECEDENCE_SOURCE_ADMISSION_R1.json. Cap140 handwritten additions/deletions; template is generated. No CSS, HTML, typography, labels, layout or revised design decisions are admitted.
+
+The actual read-only VM audit reproduced Saved's1600ms callback replacing submitted feedback with Ready; a matching final ACK correctly sets serverFinalized but also invokes generic Saved/Ready. Clear the save timer after successful local finalization and retain the existing submitted string whenever existing state.submitted is true, including a callback already captured. Preserve all durable/answer/ACK/lock/timer/host contracts and markUnsaved failure precedence. This does not add distinct local-versus-ACK copy; that future source-grounded wording remains separate.
+
+Append behavioral regressions before production edits, run original65 cases plus the new cases, rebuild canonical template and verify asset parity, run fast/strict gates and obtain independent nonauthor review before an engineering-only commit. Keep uncommitted Focus annotation layout intact and unstaged. Actual WebView2/peer qualification remains pending; no exam-safety claim.

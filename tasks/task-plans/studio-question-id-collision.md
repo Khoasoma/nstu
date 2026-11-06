@@ -1,0 +1,9 @@
+# Studio generated question-ID collision avoidance
+
+Visual implementation remains paused. Root owns this engineering-only slice: generated newQ identity collision checks in Studio addQuestion, append-only actual-source regressions and this plan. Exact source and held-annotation hashes precede edits in STUDIO_QUESTION_ID_SOURCE_ADMISSION_R1.json; cap180 handwritten changed lines. No new visuals, labels, controls, schema, export format or backend changes are admitted.
+
+Current generated IDs use current question count plus one, so deleting an earlier question and adding the same type can duplicate a remaining ID. A deleted ID that still owns Preview answers can also be reused, making old answers appear on a new question. Assign only the newly created question the next unused ordinal with its existing type suffix, skipping current question IDs and keys of the existing Preview answer map. Preserve existing/imported question IDs, data/order, default no-collision IDs, copy, metadata and all handlers. Do not normalize imported duplicates or modify the Preview answer lifecycle.
+
+Record real browser exported-ID collision RED/GREEN and actual addQuestion source VM tests across all six types/current IDs/retired Preview IDs/default identities. Preserve prior assertions and runtime/PNG parity, full fast/strict gates and independent engineering review before an isolated three-file commit. Held visual annotation edits stay unchanged/unstaged. No human visual or real WebView2/peer/exam-safety acceptance is inferred.
+
+One existing isolated metadata-transition fixture gains an inert Preview answer map to supply addQuestion's new read-only dependency. Every existing assertion remains unchanged; new tests use actual source and check current-ID collisions, retained Preview keys and all six existing type suffixes. This fixture-only dependency declaration is explicitly included in the allowlist and diff, not an assertion relaxation.

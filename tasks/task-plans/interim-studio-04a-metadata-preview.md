@@ -1,0 +1,5 @@
+# Studio04A: preserve metadata through Preview
+
+Root owns writing/builds. Two-file scope: this plan and exam/studio/studio.js's existing metadata synchronization in Save/Export, a shared helper and Preview entry. Exact hashes were recorded before editing in STUDIO_04A_SOURCE_ADMISSION_R1.json; cap70 added plus deleted lines. Independent audit STUDIO_METADATA_PREVIEW_DISCREPANCY_R1.json records the real loss: Preview uses stale metadata and returning to Editor resets unsaved fields.
+
+Reuse exactly the existing trimming, duration conversion and origins parsing for Save/Export; call the same helper before entering Preview. No schema, validation, serialization, download, template, candidate, backend or question-handling change. Preview does not write a file. Actual isolated Chrome must reproduce the original title/duration/field loss, then verify edited metadata/preview/question state and actual draft/export values with the canonical PNG. Run syntax/original recovery tests and fast/strict gates; independent nonauthor code acceptance is required before commit. General Studio appearance/modal and unrelated question-navigation behavior remain separate slices.

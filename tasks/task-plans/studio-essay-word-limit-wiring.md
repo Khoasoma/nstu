@@ -1,0 +1,7 @@
+# Studio suggested essay word-limit wiring
+
+Visual implementation remains paused. Root owns this engineering-only slice: an input handler for existing q-essay-limit and its model-to-existing-field assignment in Studio JS, append-only source-handler/model/compile tests and this plan. Exact hashes and held visual edits precede edits in STUDIO_WORD_LIMIT_SOURCE_ADMISSION_R1.json; cap140 handwritten additions/deletions. No new controls, labels, typography, layout, styles, schema or export format are admitted.
+
+The existing optional suggested-limit input reads wordLimit but has no edit binding. Store valid integers according to its existing DOM range10-2000 on the current existing essay question. Empty input removes the optional model field and renders empty rather than restoring a fabricated250 default. Invalid/intermediate input retains last valid model value; no clamping or altered manifest validation. Wrong-type or missing target events do nothing. Existing Preview word count/compileManifest already consume this field and remain unchanged. New-question defaults and imported data remain intact.
+
+Record actual browser and source-handler RED/GREEN, numeric range/optional/invalid/current-target regression cases, real Preview/Save/Export and canonical asset parity. Preserve every prior test/assertion; syntax and fast/strict gates plus independent engineering review precede an isolated three-file commit. Held annotation edits remain unchanged/unstaged. Native WebView2/peer/exam-safety and human visual approval are not inferred.

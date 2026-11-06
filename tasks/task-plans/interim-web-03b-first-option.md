@@ -1,0 +1,7 @@
+# Interim web03b: first-option answer presentation
+
+Root is sole writer/build owner. Four-file allowlist: this plan, app.js's hasAnswer and renderOptions.checked expressions only, regenerated Studio template, append-only recovery regression tests. Base991c2327284d0e7613eaaac0caf8c5009d0c13e7; exact hashes are in WEB_03B_FIRST_OPTION_SOURCE_ADMISSION_R1.json. Independent PLAN_ACCEPT2b4448bd5a44b96d2a0c6cf299da456dd8f3391c555ac437aa51a4609c45d106 supports reuse of canonical answerIsEmpty and a nullish radio fallback.
+
+Real Chrome RED stored and submitted q1:0, but the answered marker was absent and the first radio unchecked after language/navigation/reload. Fix only display truthiness, preserving numeric0 storage/serialization and existing draft/submit/ACK/timer/telemetry/host contracts. New regressions exercise the actual produced DOM nodes and persistence with the existing harness; no duplicated state machine or assertion changes. Hard cap100 implementation/test lines.
+
+Acceptance and verification: marker/checked state survives actual language/question/reload; stored/submitted answers remain numeric0; existing63 recovery cases plus added regressions, templatecheck/byteparity, actual Download independentZIP comparison, fast/strict gates and independent nonauthor code review. Synthetic identity/host proves UI test behavior only; no native peer/exam safety qualification. Main is untouched.

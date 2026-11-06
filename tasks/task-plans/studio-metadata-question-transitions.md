@@ -1,0 +1,7 @@
+# Studio metadata during question transitions
+
+Visual implementation remains paused. Root owns this independent engineering slice: two calls to existing syncExamMetadata in Studio JS's question navigation/delete click and addQuestion paths, append-only source-handler regression tests and this plan. Exact source/held-annotation hashes precede edits in STUDIO_METADATA_TRANSITIONS_SOURCE_ADMISSION_R1.json; cap180 handwritten changed lines. No colors, typography, spacing, layout, labels or new controls are admitted.
+
+renderEditor rewrites exam fields from currentExam, so existing question selection/add/delete loses unsaved metadata. Sync the exact existing Save/Preview/Export metadata conversion before those user transitions. Keep question identities, order, selection/delete-last guard and all question-handler behavior unchanged. Explicit Sample/Open imports must continue replacing their model without copying old metadata into the replacement. No new draft persistence, serialization/schema or backend behavior.
+
+Record actual browser RED/GREEN for selecting, adding and deleting with edited metadata, existing Preview and real downloaded Save/Export; append actual-source transition tests with inert DOM dependencies. Preserve prior template/PNG/reader/placeholder assertions. Run syntax and fast/strict gates and independent engineering review before committing only these three files. Held visual annotation changes stay untouched/unstaged; no visual approval or actual WebView2/peer/exam-safety qualification is inferred.

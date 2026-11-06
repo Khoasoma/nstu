@@ -33,6 +33,10 @@
 #include <wrl/client.h>
 
 #include "imgui.h"
+#include "interim_presentation.hpp"
+#include "brand_image.hpp"
+#include "focus_stream_observer.hpp"
+#include "exam_fleet_presentation.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -74,7 +78,10 @@ Microsoft::WRL::ComPtr<ID3D11Device> g_device;
 Microsoft::WRL::ComPtr<ID3D11DeviceContext> g_context;
 Microsoft::WRL::ComPtr<IDXGISwapChain> g_swap_chain;
 Microsoft::WRL::ComPtr<ID3D11RenderTargetView> g_render_target;
+nstu::ui::BrandImage g_brand_image;
 ImFont* g_heading_font = nullptr;
+ImFont* g_page_title_font = nullptr;
+ImFont* g_caption_font = nullptr;
 bool g_dark_mode = false;
 // Display-DPI scale factor (1.0 == 96 DPI). All style metrics and font sizes
 // are authored at 96 DPI and multiplied by this so the UI stays crisp and
@@ -469,13 +476,7 @@ struct DashboardState {
     // The client currently receiving a live Focus stream (~15fps). Distinct
     // from the slow class-view snapshots; zero when no client is focused.
     std::uint64_t streaming_client_id = 0;
-    // Measured delivered-frame rate for the focused stream (from
-    // ClientRecord::snapshot_generation deltas) — Epic B diagnostic so the
-    // Focus label shows real fps instead of a fixed "~15fps".
-    std::uint64_t fps_sample_client_id = 0;
-    std::uint64_t fps_sample_generation = 0;
-    std::chrono::steady_clock::time_point fps_sample_time{};
-    double measured_stream_fps = 0.0;
+    nstu::ui::FocusStreamObserver focus_stream;
     // Self-heals a stalled Focus/remote stream. Arming above is edge-triggered
     // on the streamed client id, so a start_stream lost across a client/agent
     // reconnect leaves the server believing a client streams while its agent
@@ -484,6 +485,8 @@ struct DashboardState {
     bool annotation_enabled = false;
     bool uwf_confirmation_open = false;
     std::uint64_t uwf_confirmation_client_id = 0;
+    bool uwf_checkpoint_acknowledged = false;
+    std::uint64_t uwf_checkpoint_client_id = 0;
     bool annotation_dragging = false;
     ImVec2 previous_annotation_point{};
     AnnotationTool annotation_tool = AnnotationTool::pen;
@@ -754,6 +757,7 @@ void create_render_target() {
 
 bool create_device(HWND window) {
     g_graphics_device_lost = true;
+    g_brand_image.reset();
     invalidate_snapshot_textures();
     DXGI_SWAP_CHAIN_DESC description{};
     description.BufferCount = 2;
@@ -834,6 +838,11 @@ bool create_device(HWND window) {
     create_render_target();
     if (!g_render_target) return false;
     g_graphics_device_lost = false;
+    const HRESULT brand_result = g_brand_image.load(g_device.Get());
+    if (FAILED(brand_result)) {
+        record_diagnostic("warning", "Brand", "Bundled logo unavailable " +
+            hresult_text(brand_result));
+    }
     refresh_graphics_report();
     return true;
 }
@@ -1300,8 +1309,11 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         if (g_imgui_ready) {
             apply_dashboard_style(g_dark_mode);
             auto& atlas = ImGui::GetIO().Fonts;
+            ImGui::GetIO().FontDefault = nullptr;
             atlas->Clear();
             g_heading_font = nullptr;
+            g_page_title_font = nullptr;
+            g_caption_font = nullptr;
             load_dashboard_fonts();
             ImGui_ImplDX11_InvalidateDeviceObjects();
             (void)ImGui_ImplDX11_CreateDeviceObjects();
@@ -1363,92 +1375,14 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 
 void apply_dashboard_style(bool dark_mode) {
     g_dark_mode = dark_mode;
-    // Rebuild from the ImGui defaults every time. Theme switches may happen
-    // repeatedly; scaling the existing style would multiply untouched metrics
-    // (scrollbars, indentation, grab sizes) on every Light/Dark click.
-    auto& style = ImGui::GetStyle();
-    style = ImGuiStyle{};
-    style.WindowPadding = {8.0f, 6.0f};
-    style.FramePadding = {8.0f, 5.0f};
-    style.CellPadding = {7.0f, 6.0f};
-    style.ItemSpacing = {6.0f, 5.0f};
-    style.ItemInnerSpacing = {5.0f, 4.0f};
-    style.WindowRounding = 0.0f;
-    style.ChildRounding = 3.0f;
-    style.FrameRounding = 3.0f;
-    style.PopupRounding = 3.0f;
-    style.ScrollbarRounding = 3.0f;
-    style.GrabRounding = 3.0f;
-    style.WindowBorderSize = 0.0f;
-    style.ChildBorderSize = 1.0f;
-    style.FrameBorderSize = 1.0f;
-
-    auto* colors = style.Colors;
-    colors[ImGuiCol_Text] = dark_mode
-        ? ImVec4{0.878f, 0.895f, 0.918f, 1.0f}
-        : ImVec4{0.135f, 0.145f, 0.160f, 1.0f};
-    colors[ImGuiCol_TextDisabled] = dark_mode
-        ? ImVec4{0.520f, 0.552f, 0.600f, 1.0f}
-        : ImVec4{0.480f, 0.495f, 0.520f, 1.0f};
-    colors[ImGuiCol_WindowBg] = dark_mode
-        ? ImVec4{0.098f, 0.110f, 0.130f, 1.0f}
-        : ImVec4{0.902f, 0.906f, 0.914f, 1.0f};
-    colors[ImGuiCol_ChildBg] = dark_mode
-        ? ImVec4{0.130f, 0.146f, 0.170f, 1.0f}
-        : ImVec4{0.962f, 0.964f, 0.970f, 1.0f};
-    colors[ImGuiCol_PopupBg] = dark_mode
-        ? ImVec4{0.140f, 0.157f, 0.183f, 1.0f}
-        : ImVec4{0.968f, 0.970f, 0.976f, 1.0f};
-    colors[ImGuiCol_Border] = dark_mode
-        ? ImVec4{0.235f, 0.260f, 0.300f, 1.0f}
-        : ImVec4{0.820f, 0.828f, 0.845f, 1.0f};
-    colors[ImGuiCol_BorderShadow] = {0.0f, 0.0f, 0.0f, 0.0f};
-    colors[ImGuiCol_FrameBg] = dark_mode
-        ? ImVec4{0.155f, 0.173f, 0.200f, 1.0f}
-        : ImVec4{0.940f, 0.943f, 0.950f, 1.0f};
-    colors[ImGuiCol_FrameBgHovered] = dark_mode
-        ? ImVec4{0.195f, 0.216f, 0.248f, 1.0f}
-        : ImVec4{0.910f, 0.914f, 0.924f, 1.0f};
-    colors[ImGuiCol_FrameBgActive] = dark_mode
-        ? ImVec4{0.230f, 0.254f, 0.290f, 1.0f}
-        : ImVec4{0.878f, 0.884f, 0.898f, 1.0f};
-    colors[ImGuiCol_TitleBg] = colors[ImGuiCol_WindowBg];
-    colors[ImGuiCol_TitleBgActive] = colors[ImGuiCol_WindowBg];
-    colors[ImGuiCol_Button] = dark_mode
-        ? ImVec4{0.165f, 0.184f, 0.214f, 1.0f}
-        : ImVec4{0.902f, 0.908f, 0.920f, 1.0f};
-    colors[ImGuiCol_ButtonHovered] = dark_mode
-        ? ImVec4{0.210f, 0.233f, 0.268f, 1.0f}
-        : ImVec4{0.860f, 0.868f, 0.882f, 1.0f};
-    colors[ImGuiCol_ButtonActive] = dark_mode
-        ? ImVec4{0.250f, 0.277f, 0.318f, 1.0f}
-        : ImVec4{0.818f, 0.828f, 0.845f, 1.0f};
-    colors[ImGuiCol_Header] = dark_mode
-        ? ImVec4{0.150f, 0.235f, 0.290f, 1.0f}
-        : ImVec4{0.820f, 0.872f, 0.910f, 1.0f};
-    colors[ImGuiCol_HeaderHovered] = dark_mode
-        ? ImVec4{0.185f, 0.285f, 0.345f, 1.0f}
-        : ImVec4{0.772f, 0.842f, 0.892f, 1.0f};
-    colors[ImGuiCol_HeaderActive] = dark_mode
-        ? ImVec4{0.215f, 0.330f, 0.400f, 1.0f}
-        : ImVec4{0.720f, 0.812f, 0.872f, 1.0f};
-    colors[ImGuiCol_Separator] = colors[ImGuiCol_Border];
-    colors[ImGuiCol_CheckMark] = dark_mode
-        ? ImVec4{0.380f, 0.640f, 0.780f, 1.0f}
-        : ImVec4{0.160f, 0.360f, 0.470f, 1.0f};
-    colors[ImGuiCol_SliderGrab] = dark_mode
-        ? ImVec4{0.680f, 0.705f, 0.745f, 1.0f}
-        : ImVec4{0.18f, 0.18f, 0.17f, 1.0f};
-    colors[ImGuiCol_SliderGrabActive] = dark_mode
-        ? ImVec4{0.850f, 0.870f, 0.900f, 1.0f}
-        : ImVec4{0.30f, 0.30f, 0.29f, 1.0f};
-
-    // Metrics above are authored at 96 DPI; scale them to the display so the
-    // whole UI (padding, rounding, borders, scrollbars) tracks the font size.
-    style.ScaleAllSizes(g_ui_scale);
+    nstu::ui::apply_interim_style(ImGui::GetStyle(), dark_mode, g_ui_scale);
 }
 
 void load_dashboard_fonts() {
+    g_heading_font = nullptr;
+    g_page_title_font = nullptr;
+    g_caption_font = nullptr;
+    ImGui::GetIO().FontDefault = nullptr;
     std::array<char, MAX_PATH> windows_directory{};
     const UINT length = GetWindowsDirectoryA(
         windows_directory.data(), static_cast<UINT>(windows_directory.size()));
@@ -1458,57 +1392,69 @@ void load_dashboard_fonts() {
     const std::string fonts_directory =
         std::string(windows_directory.data()) + "\\Fonts\\";
     const auto regular = fonts_directory + "segoeui.ttf";
+    const auto semibold = fonts_directory + "seguisb.ttf";
     const auto bold = fonts_directory + "segoeuib.ttf";
     auto& atlas = ImGui::GetIO().Fonts;
     const ImWchar* glyph_ranges = atlas->GetGlyphRangesVietnamese();
     if (GetFileAttributesA(regular.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        atlas->AddFontFromFileTTF(regular.c_str(), 15.0f * g_ui_scale, nullptr,
-                                  glyph_ranges);
+        ImGui::GetIO().FontDefault = atlas->AddFontFromFileTTF(
+            regular.c_str(), nstu::ui::typography::body * g_ui_scale,
+            nullptr, glyph_ranges);
+        g_caption_font = atlas->AddFontFromFileTTF(
+            regular.c_str(), nstu::ui::typography::caption * g_ui_scale,
+            nullptr, glyph_ranges);
     }
-    if (GetFileAttributesA(bold.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    const auto& heading_file =
+        GetFileAttributesA(semibold.c_str()) != INVALID_FILE_ATTRIBUTES
+            ? semibold : bold;
+    if (GetFileAttributesA(heading_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
         g_heading_font = atlas->AddFontFromFileTTF(
-            bold.c_str(), 17.0f * g_ui_scale, nullptr, glyph_ranges);
+            heading_file.c_str(), nstu::ui::typography::section_title * g_ui_scale,
+            nullptr, glyph_ranges);
+        g_page_title_font = atlas->AddFontFromFileTTF(
+            heading_file.c_str(), nstu::ui::typography::page_title * g_ui_scale,
+            nullptr, glyph_ranges);
     }
 }
 
 ImVec4 status_text_color(nstu::server::ClientStatus status) {
+    using nstu::ui::ColorRole;
+    ColorRole role = ColorRole::offline;
     switch (status) {
     case nstu::server::ClientStatus::online:
-        return g_dark_mode ? ImVec4{0.56f, 0.78f, 0.58f, 1.0f}
-                           : ImVec4{0.20f, 0.40f, 0.23f, 1.0f};
+        role = ColorRole::success;
+        break;
     case nstu::server::ClientStatus::degraded:
     case nstu::server::ClientStatus::connecting:
-        return g_dark_mode ? ImVec4{0.90f, 0.73f, 0.38f, 1.0f}
-                           : ImVec4{0.58f, 0.39f, 0.06f, 1.0f};
+        role = ColorRole::warning;
+        break;
     case nstu::server::ClientStatus::locked:
-        return g_dark_mode ? ImVec4{0.94f, 0.56f, 0.55f, 1.0f}
-                           : ImVec4{0.62f, 0.18f, 0.17f, 1.0f};
+        role = ColorRole::danger;
+        break;
     case nstu::server::ClientStatus::offline:
-        return g_dark_mode ? ImVec4{0.67f, 0.66f, 0.63f, 1.0f}
-                           : ImVec4{0.40f, 0.39f, 0.37f, 1.0f};
+        break;
     }
-    return g_dark_mode ? ImVec4{0.67f, 0.66f, 0.63f, 1.0f}
-                       : ImVec4{0.40f, 0.39f, 0.37f, 1.0f};
+    return nstu::ui::interim_color(role, g_dark_mode);
 }
 
 ImVec4 status_background_color(nstu::server::ClientStatus status) {
+    using nstu::ui::ColorRole;
+    ColorRole role = ColorRole::offline_bg;
     switch (status) {
     case nstu::server::ClientStatus::online:
-        return g_dark_mode ? ImVec4{0.13f, 0.23f, 0.14f, 1.0f}
-                           : ImVec4{0.93f, 0.96f, 0.92f, 1.0f};
+        role = ColorRole::success_bg;
+        break;
     case nstu::server::ClientStatus::degraded:
     case nstu::server::ClientStatus::connecting:
-        return g_dark_mode ? ImVec4{0.25f, 0.20f, 0.10f, 1.0f}
-                           : ImVec4{0.985f, 0.95f, 0.86f, 1.0f};
+        role = ColorRole::warning_bg;
+        break;
     case nstu::server::ClientStatus::locked:
-        return g_dark_mode ? ImVec4{0.27f, 0.13f, 0.13f, 1.0f}
-                           : ImVec4{0.99f, 0.92f, 0.92f, 1.0f};
+        role = ColorRole::danger_bg;
+        break;
     case nstu::server::ClientStatus::offline:
-        return g_dark_mode ? ImVec4{0.18f, 0.18f, 0.17f, 1.0f}
-                           : ImVec4{0.94f, 0.935f, 0.925f, 1.0f};
+        break;
     }
-    return g_dark_mode ? ImVec4{0.18f, 0.18f, 0.17f, 1.0f}
-                       : ImVec4{0.94f, 0.935f, 0.925f, 1.0f};
+    return nstu::ui::interim_color(role, g_dark_mode);
 }
 
 const char* client_status_label(nstu::server::ClientStatus status,
@@ -1664,58 +1610,6 @@ void draw_icon(ImDrawList* draw_list, IconKind icon, ImVec2 center,
                                    scaled(1.5f), color);
         break;
     }
-}
-
-bool draw_icon_button(const char* id, const char* label, IconKind icon,
-                      ImVec2 size, bool selected = false,
-                      bool enabled = true, bool show_label = true,
-                      bool badge = false) {
-    ImGui::PushID(id);
-    if (!enabled) {
-        ImGui::BeginDisabled();
-    }
-    ImGui::InvisibleButton("##icon-button", size);
-    const bool pressed = enabled && ImGui::IsItemClicked();
-    const bool hovered = enabled && ImGui::IsItemHovered();
-    const ImVec2 minimum = ImGui::GetItemRectMin();
-    const ImVec2 maximum = ImGui::GetItemRectMax();
-    auto* draw_list = ImGui::GetWindowDrawList();
-    if (selected || hovered) {
-        const ImU32 background = ImGui::GetColorU32(
-            selected ? ImGuiCol_Header : ImGuiCol_FrameBgHovered);
-        draw_list->AddRectFilled(minimum, maximum, background, scaled(4.0f));
-    }
-    const ImU32 foreground = ImGui::GetColorU32(
-        enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled);
-    const float label_height = show_label ? scaled(20.0f) : 0.0f;
-    draw_icon(draw_list, icon,
-              {minimum.x + size.x * 0.5f,
-               minimum.y + (size.y - label_height) * 0.43f},
-              show_label ? 22.0f : 20.0f, foreground);
-    if (show_label) {
-        const ImVec2 text_size = ImGui::CalcTextSize(label);
-        draw_list->AddText(
-            {minimum.x + std::max(scaled(3.0f), (size.x - text_size.x) * 0.5f),
-             maximum.y - text_size.y - scaled(5.0f)},
-            foreground, label);
-    }
-    if (hovered && !show_label) {
-        ImGui::SetTooltip("%s", label);
-    }
-    if (badge) {
-        // Small attention dot at the top-right corner; draws over the icon so it
-        // reads as an unread marker regardless of label state.
-        const ImVec2 center{maximum.x - scaled(6.0f), minimum.y + scaled(6.0f)};
-        draw_list->AddCircleFilled(center, scaled(4.5f),
-                                   IM_COL32(229, 72, 77, 255));
-        draw_list->AddCircle(center, scaled(4.5f), IM_COL32(255, 255, 255, 235),
-                             12, scaled(1.4f));
-    }
-    if (!enabled) {
-        ImGui::EndDisabled();
-    }
-    ImGui::PopID();
-    return pressed;
 }
 
 void draw_status_badge(nstu::server::ClientStatus status,
@@ -1878,26 +1772,94 @@ ScreenSurfaceResult draw_screen_surface(
     return result;
 }
 
+[[nodiscard]] std::string card_snapshot_age(const nstu::server::ClientRecord& client,
+                              const DashboardState& state) {
+    const auto captured = client.snapshot_captured_at_unix_milliseconds;
+    const auto signed_now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    if (client.snapshot_generation == 0 || captured == 0 || signed_now <= 0)
+        return tr(state, "Snapshot time unavailable", "Chưa có thời gian chụp");
+    const auto now = static_cast<std::uint64_t>(signed_now);
+    if (captured > now)
+        return tr(state, "Snapshot: client clock differs", "Ảnh chụp: lệch giờ máy học sinh");
+    const auto age = std::chrono::seconds{static_cast<std::chrono::seconds::rep>(
+        (now - captured) / 1000u)};
+    return std::string(tr(state, "Snapshot ", "Ảnh chụp ")) +
+        nstu::server::format_relative_age(age, state.language == Language::vietnamese);
+}
+
 void draw_client_card(const nstu::server::ClientRecord& client, float width,
                       DashboardState& state) {
+    using nstu::ui::ColorRole;
+    const float inset = scaled(nstu::ui::spacing::md);
+    const float inner_width = std::max(1.0f, width - inset * 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {inset, inset});
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, scaled(nstu::ui::radius::card));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                       {scaled(nstu::ui::spacing::sm), scaled(nstu::ui::spacing::sm)});
+    const float gap = ImGui::GetStyle().ItemSpacing.y;
+    const float checkbox_width = ImGui::GetFrameHeight();
+    const float name_width = std::max(1.0f, inner_width - checkbox_width - gap);
+    const float header_height = std::max(ImGui::GetFrameHeight(),
+        ImGui::CalcTextSize(client.hostname.c_str(), nullptr, false, name_width).y);
+    const float media_height = inner_width / nstu::ui::geometry::snapshot_aspect;
+    const auto now = std::chrono::steady_clock::now();
+    const bool stale = nstu::server::is_client_stale(client, now);
+    char network[64]{};
+    sprintf_s(network, "%u ms  %.1f%%", client.latency_ms,
+              client.packet_loss_per_mille / 10.0f);
+    const std::array<std::string, 4> captions{
+        client.address,
+        std::string(stale ? "▲ " : "○ ") + tr(state, "Last contact ", "Liên hệ cuối ") +
+            nstu::server::format_relative_age(nstu::server::client_age_seconds(client, now),
+                                              state.language == Language::vietnamese),
+        card_snapshot_age(client, state), network};
+    float caption_height = 0.0f;
+    if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+    for (const auto& caption : captions)
+        caption_height += ImGui::CalcTextSize(caption.c_str(), nullptr, false, inner_width).y;
+    if (g_caption_font != nullptr) ImGui::PopFont();
+    const char* symbol = client.status == nstu::server::ClientStatus::locked ? "■ "
+        : client.status == nstu::server::ClientStatus::online ? "● "
+        : client.status == nstu::server::ClientStatus::degraded ? "▲ " : "○ ";
+    const std::string status = std::string(symbol) + client_status_label(client.status, state);
+    const std::string help = std::string("▲ ") + tr(state, "Help requested", "Yêu cầu trợ giúp");
+    const float status_height = ImGui::CalcTextSize(status.c_str(), nullptr, false, inner_width).y;
+    const float help_height = client.help_requested
+        ? ImGui::CalcTextSize(help.c_str(), nullptr, false, inner_width).y + gap : 0.0f;
+    const float height = inset * 2.0f + header_height + media_height + status_height +
+        caption_height + ImGui::GetFrameHeight() + help_height +
+        gap * static_cast<float>(captions.size() + 3u);
     push_client_id(client.id);
-    const bool selected = state.selected_client_id == client.id;
-    ImGui::PushStyleColor(ImGuiCol_Border,
-        selected ? (g_dark_mode ? ImVec4{0.42f, 0.68f, 0.78f, 1.0f}
-                                : ImVec4{0.31f, 0.56f, 0.68f, 1.0f})
-                 : ImGui::GetStyleColorVec4(ImGuiCol_Border));
-    if (ImGui::BeginChild("client-card", {width, width * 0.5625f + scaled(58.0f)},
-                          true, ImGuiWindowFlags_NoScrollbar)) {
-        if (draw_screen_surface(client, width * 0.5625f, "##screen", state)
-                .clicked) {
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, nstu::ui::interim_color(ColorRole::surface, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_Border, nstu::ui::interim_color(
+        state.selected_client_id == client.id ? ColorRole::focus : ColorRole::border, g_dark_mode));
+    if (ImGui::BeginChild("client-card", {width, height},
+            ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoScrollbar)) {
+        const ImVec2 start = ImGui::GetCursorPos();
+        ImGui::PushTextWrapPos(start.x + name_width);
+        ImGui::TextUnformatted(client.hostname.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::SetCursorPos({start.x + inner_width - checkbox_width, start.y});
+        bool checked = nstu::server::is_selected(state.checked_client_ids, client.id);
+        if (ImGui::Checkbox("##check", &checked))
+            nstu::server::set_selected(state.checked_client_ids, client.id, checked);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(
+            state, "Select this computer for checked-target actions", "Chọn máy này cho thao tác đã chọn"));
+        ImGui::SetCursorPos({start.x, start.y + header_height + gap});
+        ImGui::PushTextWrapPos(0.0f);
+        if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+        ImGui::TextDisabled("%s", captions[0].c_str());
+        if (g_caption_font != nullptr) ImGui::PopFont();
+        if (draw_screen_surface(client, media_height, "##screen", state).clicked) {
             state.selected_client_id = client.id;
             state.view = DashboardView::selected_client;
             state.annotation_enabled = false;
         }
-        ImGui::TextUnformatted(client.hostname.c_str());
+        ImGui::TextColored(status_text_color(client.status), "%s", status.c_str());
         if (client.help_requested) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4{1.0f, 0.65f, 0.0f, 1.0f}, "[?]");
+            ImGui::TextColored(nstu::ui::interim_color(ColorRole::warning, g_dark_mode), "%s", help.c_str());
             if (ImGui::IsItemHovered()) {
                 ImGui::BeginTooltip();
                 ImGui::TextUnformatted(tr(state, "Help Requested", "Yêu cầu trợ giúp"));
@@ -1908,19 +1870,31 @@ void draw_client_card(const nstu::server::ClientRecord& client, float width,
                 ImGui::EndTooltip();
             }
         }
-        const float status_width =
-            ImGui::CalcTextSize(client_status_label(client.status, state)).x;
-        ImGui::SameLine(ImGui::GetContentRegionMax().x - status_width);
-        ImGui::TextColored(status_text_color(client.status), "%s",
-                           client_status_label(client.status, state));
-        ImGui::TextDisabled("%s", client.address.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%u ms  %.1f%%", client.latency_ms,
-                            client.packet_loss_per_mille / 10.0f);
+        if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+        for (std::size_t index = 1; index < captions.size(); ++index) {
+            if (index == 1 && stale)
+                ImGui::TextColored(nstu::ui::interim_color(ColorRole::warning, g_dark_mode), "%s", captions[index].c_str());
+            else ImGui::TextDisabled("%s", captions[index].c_str());
+            if (index == 2 && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tr(
+                state, "Capture time is reported by the client clock", "Giờ chụp do đồng hồ máy học sinh báo"));
+        }
+        if (g_caption_font != nullptr) ImGui::PopFont();
+        ImGui::PopTextWrapPos();
+        const char* focus = tr(state, "Focus###focus", "Xem máy###focus");
+        const float focus_width = ImGui::CalcTextSize(focus, nullptr, true).x +
+                                  ImGui::GetStyle().FramePadding.x * 2.0f;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+            std::max(0.0f, ImGui::GetContentRegionAvail().x - focus_width));
+        if (ImGui::Button(focus, {focus_width, 0})) {
+            state.selected_client_id = client.id;
+            state.view = DashboardView::selected_client;
+            state.annotation_enabled = false;
+        }
     }
     ImGui::EndChild();
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(2);
     pop_client_id();
+    ImGui::PopStyleVar(3);
 }
 
 void draw_room_screen_wall(
@@ -1935,7 +1909,7 @@ void draw_room_screen_wall(
     }
 
     if (visible_clients.empty()) {
-        const float offset = std::max(36.0f,
+        const float offset = std::max(scaled(nstu::ui::spacing::xxl),
                                       ImGui::GetContentRegionAvail().y * 0.34f);
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + offset);
         const char* heading = clients.empty()
@@ -1944,25 +1918,29 @@ void draw_room_screen_wall(
                  "Không có máy phù hợp với bộ lọc");
         const ImVec2 heading_size = ImGui::CalcTextSize(heading);
         ImGui::SetCursorPosX(
-            std::max(20.0f, (ImGui::GetWindowWidth() - heading_size.x) * 0.5f));
+            std::max(scaled(nstu::ui::spacing::xl),
+                     (ImGui::GetWindowWidth() - heading_size.x) * 0.5f));
         ImGui::TextDisabled("%s", heading);
         return;
     }
 
-    const ImVec4 workspace_background = g_dark_mode
-        ? ImVec4{0.065f, 0.085f, 0.095f, 1.0f}
-        : ImVec4{0.91f, 0.965f, 0.985f, 1.0f};
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, workspace_background);
-    if (ImGui::BeginChild("screen-wall", {0, 0}, false)) {
-        const float minimum_card_width = scaled(205.0f);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,
+        nstu::ui::interim_color(nstu::ui::ColorRole::canvas, g_dark_mode));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+        {scaled(nstu::ui::geometry::grid_gap), scaled(nstu::ui::geometry::grid_gap)});
+    // The workspace supplies the handoff's24/16 inset, shared with filters.
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
+    if (ImGui::BeginChild("screen-wall", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding,
+                         ImGuiWindowFlags_HorizontalScrollbar)) {
+        const float minimum_card_width = scaled(nstu::ui::geometry::card_min_width);
         const float gap = ImGui::GetStyle().ItemSpacing.x;
-        const float available = ImGui::GetContentRegionAvail().x;
+        const float available = std::max(1.0f, ImGui::GetContentRegionAvail().x);
         const int columns = std::clamp(
             static_cast<int>((available + gap) / (minimum_card_width + gap)),
             1, 6);
-        const float card_width =
+        const float card_width = std::max(minimum_card_width,
             (available - gap * static_cast<float>(columns - 1)) /
-            static_cast<float>(columns);
+            static_cast<float>(columns));
         for (std::size_t index = 0; index < visible_clients.size(); ++index) {
             draw_client_card(*visible_clients[index], card_width, state);
             if ((index + 1) % static_cast<std::size_t>(columns) != 0) {
@@ -1971,6 +1949,7 @@ void draw_room_screen_wall(
         }
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 }
 
@@ -2009,9 +1988,11 @@ void draw_room_client_table(
     constexpr int kColumns = 7;
     const ImGuiTableFlags table_flags =
         ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
-        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX;
 
-    if (ImGui::BeginTable("room-client-table", kColumns, table_flags)) {
+    if (ImGui::BeginTable("room-client-table", kColumns, table_flags, {0, 0},
+                         std::max(scaled(nstu::ui::geometry::classroom_table_min),
+                                  ImGui::GetContentRegionAvail().x))) {
         ImGui::TableSetupScrollFreeze(0, 1);
         ImGui::TableSetupColumn("##select", ImGuiTableColumnFlags_WidthFixed, scaled(32.0f));
         ImGui::TableSetupColumn(tr(state, "Hostname", "Tên máy"), ImGuiTableColumnFlags_WidthStretch, 2.0f);
@@ -2020,11 +2001,15 @@ void draw_room_client_table(
         ImGui::TableSetupColumn(tr(state, "Latency / Loss", "Độ trễ / Mất gói"), ImGuiTableColumnFlags_WidthFixed, scaled(120.0f));
         ImGui::TableSetupColumn(tr(state, "UWF Protection", "Bảo vệ UWF"), ImGuiTableColumnFlags_WidthFixed, scaled(130.0f));
         ImGui::TableSetupColumn(tr(state, "Action", "Thao tác"), ImGuiTableColumnFlags_WidthFixed, scaled(110.0f));
-        ImGui::TableHeadersRow();
+        ImGui::TableNextRow(ImGuiTableRowFlags_Headers, scaled(nstu::ui::geometry::table_header));
+        for (int column = 0; column < kColumns; ++column) {
+            ImGui::TableSetColumnIndex(column);
+            ImGui::TableHeader(ImGui::TableGetColumnName(column));
+        }
 
         for (const auto* client : visible_clients) {
             push_client_id(client->id);
-            ImGui::TableNextRow(0, scaled(28.0f));
+            ImGui::TableNextRow(0, scaled(nstu::ui::geometry::table_row_min));
 
             // Column 0: Selection Checkbox
             ImGui::TableSetColumnIndex(0);
@@ -2040,16 +2025,26 @@ void draw_room_client_table(
             // Column 1: Hostname + chat badge
             ImGui::TableSetColumnIndex(1);
             const bool is_focused = (state.selected_client_id == client->id);
-            if (ImGui::Selectable(client->hostname.c_str(), is_focused, ImGuiSelectableFlags_SpanAllColumns)) {
+            ImVec2 name_position = ImGui::GetCursorScreenPos();
+            const float name_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+            const float name_height = ImGui::CalcTextSize(client->hostname.c_str(), nullptr,
+                                                         false, name_width).y;
+            if (ImGui::Selectable("##hostname", is_focused, ImGuiSelectableFlags_SpanAllColumns,
+                                   {0, name_height})) {
                 state.selected_client_id = client->id;
             }
+            name_position.y = ImGui::GetItemRectMin().y +
+                              std::trunc(ImGui::GetStyle().ItemSpacing.y * 0.5f);
+            ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(),
+                name_position, ImGui::GetColorU32(ImGuiCol_Text), client->hostname.c_str(),
+                nullptr, name_width);
             if (client_has_unread_chat(state, client->id)) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4{0.9f, 0.28f, 0.3f, 1.0f}, "●");
+                ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::info, g_dark_mode),
+                                   "● %s", tr(state, "Unread chat", "Tin nhắn chưa đọc"));
             }
             if (client->help_requested) {
-                ImGui::SameLine();
-                ImGui::TextColored(ImVec4{1.0f, 0.65f, 0.0f, 1.0f}, "[?]");
+                ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::warning, g_dark_mode),
+                                   "▲ %s", tr(state, "Help", "Trợ giúp"));
                 if (ImGui::IsItemHovered()) {
                     ImGui::BeginTooltip();
                     ImGui::TextUnformatted(tr(state, "Help Requested", "Yêu cầu trợ giúp"));
@@ -2063,11 +2058,16 @@ void draw_room_client_table(
 
             // Column 2: IP Address
             ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(client->address.c_str());
+            ImGui::TextWrapped("%s", client->address.c_str());
 
             // Column 3: Status
             ImGui::TableSetColumnIndex(3);
-            draw_status_badge(client->status, state);
+            const char* status_symbol = client->status == nstu::server::ClientStatus::online ? "●"
+                : client->status == nstu::server::ClientStatus::locked ? "■"
+                : client->status == nstu::server::ClientStatus::degraded ? "▲" : "○";
+            ImGui::PushStyleColor(ImGuiCol_Text, status_text_color(client->status));
+            ImGui::TextWrapped("%s %s", status_symbol, client_status_label(client->status, state));
+            ImGui::PopStyleColor();
 
             // Column 4: Latency & Loss
             ImGui::TableSetColumnIndex(4);
@@ -2080,37 +2080,48 @@ void draw_room_client_table(
 
             // Column 5: UWF Status
             ImGui::TableSetColumnIndex(5);
+            ImGui::PushTextWrapPos(0.0f);
             if (client->uwf.proves_current_protection()) {
-                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s",
+                ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::success, g_dark_mode), "● %s",
                                    tr(state, "Protected", "Đã bảo vệ"));
             } else if (client->uwf.phase == nstu::control::UwfFleetPhase::configuring ||
                        client->uwf.phase == nstu::control::UwfFleetPhase::awaiting_restart) {
-                ImGui::TextColored(ImVec4{0.9f, 0.7f, 0.1f, 1.0f}, "%s",
+                ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::warning, g_dark_mode), "▲ %s",
                                    tr(state, "Arming...", "Đang chuẩn bị"));
             } else if (client->uwf.phase == nstu::control::UwfFleetPhase::unsupported) {
-                ImGui::TextDisabled("%s", tr(state, "Unsupported", "Không hỗ trợ"));
+                ImGui::TextDisabled("○ %s", tr(state, "Unsupported", "Không hỗ trợ"));
             } else {
-                ImGui::TextDisabled("%s", tr(state, "Inactive", "Chưa kích hoạt"));
+                ImGui::TextDisabled("○ %s", tr(state, "Inactive", "Chưa kích hoạt"));
             }
+            ImGui::PopTextWrapPos();
 
             // Column 6: Action
             ImGui::TableSetColumnIndex(6);
-            if (ImGui::SmallButton(tr(state, "Focus", "Tiêu điểm"))) {
+            float action_used = 0.0f;
+            const float action_available = ImGui::GetContentRegionAvail().x;
+            const auto action = [&](const char* label) {
+                const float width = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+                const float gap = ImGui::GetStyle().ItemSpacing.x;
+                if (action_used > 0.0f && action_used + gap + width <= action_available) {
+                    ImGui::SameLine(); action_used += gap;
+                } else action_used = 0.0f;
+                action_used += width;
+                return ImGui::SmallButton(label);
+            };
+            if (action(tr(state, "Focus", "Tiêu điểm"))) {
                 state.selected_client_id = client->id;
                 state.view = DashboardView::selected_client;
                 state.annotation_enabled = false;
             }
-            ImGui::SameLine();
             if (client->status != nstu::server::ClientStatus::offline) {
                 const bool locked = (client->status == nstu::server::ClientStatus::locked);
                 const char* btn_label = locked ? tr(state, "Unlock", "Mở") : tr(state, "Lock", "Khóa");
-                if (ImGui::SmallButton(btn_label)) {
+                if (action(btn_label)) {
                     (void)control_plane.set_locked(client->id, !locked, nullptr);
                 }
             }
             if (client->help_requested) {
-                ImGui::SameLine();
-                if (ImGui::SmallButton(tr(state, "Ack Help", "Giải quyết"))) {
+                if (action(tr(state, "Ack Help", "Giải quyết"))) {
                     std::string err;
                     (void)control_plane.resolve_help_request(client->id, &err);
                 }
@@ -2126,45 +2137,54 @@ void draw_room_client_table(
 void draw_focus_client_list(
     const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state) {
-    if (ImGui::BeginChild("focus-client-list", {scaled(280.0f), 0}, true)) {
+    const float width = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
+        nstu::ui::geometry::shell_compact_breakpoint
+        ? nstu::ui::geometry::focus_targets_compact : nstu::ui::geometry::focus_targets);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                       {scaled(nstu::ui::spacing::md), scaled(nstu::ui::spacing::md)});
+    const bool visible = ImGui::BeginChild("focus-client-list", {width, 0},
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar();
+    if (visible) {
         ImGui::TextUnformatted(tr(state, "Clients", "Máy học sinh"));
         ImGui::Separator();
-        if (ImGui::BeginTable("focus-clients", 2,
-                              ImGuiTableFlags_RowBg |
-                                  ImGuiTableFlags_SizingStretchProp)) {
-            ImGui::TableSetupColumn(tr(state, "Client", "Máy"),
-                                    ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn(tr(state, "Status", "Trạng thái"),
-                                    ImGuiTableColumnFlags_WidthFixed,
-                                    scaled(94.0f));
-            for (const auto& client : clients) {
-                if (!client_matches_filter(client, state)) {
-                    continue;
-                }
-                push_client_id(client.id);
-                ImGui::TableNextRow(0, scaled(40.0f));
-                ImGui::TableSetColumnIndex(0);
-                const bool selected = state.selected_client_id == client.id;
-                if (ImGui::Selectable(client.hostname.c_str(), selected,
-                                      ImGuiSelectableFlags_None,
-                                      {0.0f, scaled(36.0f)})) {
-                    state.selected_client_id = client.id;
-                    state.annotation_enabled = false;
-                }
-                if (client_has_unread_chat(state, client.id)) {
-                    const ImVec2 rect_min = ImGui::GetItemRectMin();
-                    const ImVec2 rect_max = ImGui::GetItemRectMax();
-                    ImGui::GetWindowDrawList()->AddCircleFilled(
-                        {rect_max.x - scaled(9.0f),
-                         (rect_min.y + rect_max.y) * 0.5f},
-                        scaled(4.0f), IM_COL32(229, 72, 77, 255));
-                }
-                ImGui::TableSetColumnIndex(1);
-                ImGui::TextColored(status_text_color(client.status), "%s",
-                                   client_status_label(client.status, state));
-                pop_client_id();
+        for (const auto& client : clients) {
+            if (!client_matches_filter(client, state)) continue;
+            push_client_id(client.id);
+            const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+            const float gap = scaled(nstu::ui::spacing::xs);
+            const float name_height = ImGui::CalcTextSize(client.hostname.c_str(), nullptr,
+                                                         false, text_width).y;
+            const char* symbol = client.status == nstu::server::ClientStatus::online ? "● "
+                : client.status == nstu::server::ClientStatus::locked ? "■ "
+                : client.status == nstu::server::ClientStatus::degraded ? "▲ " : "○ ";
+            const std::string status = std::string(symbol) + client_status_label(client.status, state);
+            const float status_height = ImGui::CalcTextSize(status.c_str(), nullptr, false, text_width).y;
+            const bool unread = client_has_unread_chat(state, client.id);
+            const char* unread_label = tr(state, "● Unread chat", "● Tin nhắn chưa đọc");
+            const float unread_height = unread
+                ? ImGui::CalcTextSize(unread_label, nullptr, false, text_width).y + gap : 0.0f;
+            const ImVec2 text_position = ImGui::GetCursorScreenPos();
+            if (ImGui::Selectable("##focus-target", state.selected_client_id == client.id,
+                    ImGuiSelectableFlags_None, {0, name_height + gap + status_height + unread_height})) {
+                state.selected_client_id = client.id;
+                state.annotation_enabled = false;
             }
-            ImGui::EndTable();
+            ImVec2 position{text_position.x, ImGui::GetItemRectMin().y +
+                std::trunc(ImGui::GetStyle().ItemSpacing.y * 0.5f)};
+            auto* draw = ImGui::GetWindowDrawList();
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+                ImGui::GetColorU32(ImGuiCol_Text), client.hostname.c_str(), nullptr, text_width);
+            position.y += name_height + gap;
+            draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+                ImGui::ColorConvertFloat4ToU32(status_text_color(client.status)), status.c_str(), nullptr, text_width);
+            if (unread) {
+                position.y += status_height + gap;
+                draw->AddText(ImGui::GetFont(), ImGui::GetFontSize(), position,
+                    ImGui::ColorConvertFloat4ToU32(nstu::ui::interim_color(nstu::ui::ColorRole::info, g_dark_mode)),
+                    unread_label, nullptr, text_width);
+            }
+            pop_client_id();
         }
     }
     ImGui::EndChild();
@@ -2182,21 +2202,55 @@ void draw_telemetry_card(const char* label, const char* value, float width) {
 }
 
 void draw_uwf_confirmation_popup(
+    const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    if (state.uwf_confirmation_open &&
-        ImGui::BeginPopupModal("uwf-confirmation", nullptr,
+    if (!state.uwf_confirmation_open) return;
+    if (state.uwf_checkpoint_client_id != state.uwf_confirmation_client_id) {
+        state.uwf_checkpoint_acknowledged = false;
+        state.uwf_checkpoint_client_id = state.uwf_confirmation_client_id;
+    }
+    const auto decision = [&] {
+        return nstu::ui::evaluate_uwf_arm(state.uwf_confirmation_client_id, clients,
+            state.current_role, state.uwf_checkpoint_acknowledged);
+    };
+    const auto reason_text = [&](nstu::ui::UwfArmRejection reason) {
+        using Reason = nstu::ui::UwfArmRejection;
+        switch (reason) {
+        case Reason::role: return tr(state, "Requires Technician or Developer role.", "Yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển.");
+        case Reason::no_target: return tr(state, "No target was chosen.", "Chưa chọn máy đích.");
+        case Reason::missing_target: return tr(state, "The target is no longer in the current roster.", "Máy đích không còn trong danh sách hiện tại.");
+        case Reason::offline: return tr(state, "The target is offline.", "Máy đích đang ngoại tuyến.");
+        case Reason::unsupported: return tr(state, "The target reports that UWF is unsupported.", "Máy đích báo không hỗ trợ UWF.");
+        case Reason::already_protected: return tr(state, "Current protection is already proven; no arm request is needed.", "Đã xác minh bảo vệ hiện tại; không cần yêu cầu bật lại.");
+        case Reason::checkpoint: return tr(state, "Verify a recovery checkpoint before enabling.", "Xác minh điểm khôi phục trước khi bật.");
+        case Reason::none: return tr(state, "A readiness request does not prove current protection.", "Yêu cầu kiểm tra sẵn sàng không chứng minh bảo vệ hiện tại.");
+        }
+        return "";
+    };
+    const float width = std::min(scaled(nstu::ui::geometry::dialog_width),
+        std::max(1.0f, ImGui::GetMainViewport()->WorkSize.x - scaled(nstu::ui::spacing::xxl)));
+    ImGui::SetNextWindowSize({width, 0}, ImGuiCond_Always);
+    if (ImGui::BeginPopupModal("uwf-confirmation", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
+        const auto target = decision();
+        ImGui::TextWrapped("%s: %llu", tr(state, "Target", "Máy đích"),
+            static_cast<unsigned long long>(target.target_id));
+        if (target.target)
+            ImGui::TextWrapped("%s · %s", target.target->hostname.c_str(), target.target->address.c_str());
         ImGui::TextWrapped("%s", tr(
             state,
             "This runs full client readiness checks, preserves NSTU data and registry state, then arms Unified Write Filter for the next restart. Create or verify a recovery checkpoint before continuing. A successful setup shows a 60-second countdown and restarts the client automatically.",
             "Thao tác này chạy đầy đủ kiểm tra sẵn sàng, giữ lại dữ liệu và registry NSTU, rồi chuẩn bị Unified Write Filter cho lần khởi động tiếp theo. Hãy tạo hoặc xác minh điểm khôi phục trước khi tiếp tục. Khi thiết lập thành công, máy client sẽ hiển thị đếm ngược 60 giây rồi tự khởi động lại."));
-        if (ImGui::Button(tr(state, "I verified the checkpoint; enable",
-                             "Đã xác minh điểm khôi phục; bật"))) {
-            if (!is_action_permitted(state.current_role, OperatorAction::configure_uwf)) {
-                state.control_status = tr(state,
-                    "Reboot-to-restore configuration requires Technician or Developer role.",
-                    "Cấu hình khôi phục sau reboot yêu cầu vai trò Kỹ thuật viên hoặc Nhà phát triển.");
+        ImGui::Checkbox(tr(state, "Checkpoint verified###uwf-checkpoint", "Đã xác minh điểm khôi phục###uwf-checkpoint"),
+            &state.uwf_checkpoint_acknowledged);
+        const auto current = decision();
+        ImGui::TextWrapped("%s", reason_text(current.rejection));
+        ImGui::BeginDisabled(!current.allowed());
+        if (ImGui::Button(tr(state, "Enable reboot-to-restore", "Bật khôi phục sau reboot"))) {
+            const auto fresh = decision();
+            if (!fresh.allowed()) {
+                state.control_status = reason_text(fresh.rejection);
             } else {
                 std::string error;
                 // Fleet path: arm UWF and request the visible client restart, so a
@@ -2212,11 +2266,14 @@ void draw_uwf_confirmation_popup(
                 }
             }
             state.uwf_confirmation_open = false;
+            state.uwf_checkpoint_acknowledged = false;
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button(tr(state, "Cancel", "Hủy"))) {
             state.uwf_confirmation_open = false;
+            state.uwf_checkpoint_acknowledged = false;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -2227,13 +2284,21 @@ void draw_selected_client(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+        {scaled(nstu::ui::spacing::lg), ImGui::GetStyle().ItemSpacing.y});
     draw_focus_client_list(clients, state);
     ImGui::SameLine();
-    if (!ImGui::BeginChild("focus-detail", {0, 0}, false)) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+        {scaled(nstu::ui::spacing::lg), scaled(nstu::ui::spacing::lg)});
+    const bool detail_visible = ImGui::BeginChild("focus-detail", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleVar(2);
+    if (!detail_visible) {
+        draw_uwf_confirmation_popup(clients, state, control_plane);
         ImGui::EndChild();
         return;
     }
     if (selected_client == nullptr) {
+        draw_uwf_confirmation_popup(clients, state, control_plane);
         const char* empty = clients.empty()
             ? tr(state, "No clients connected", "Chưa có máy nào kết nối")
             : tr(state, "Select a client", "Chọn một máy học sinh");
@@ -2248,28 +2313,40 @@ void draw_selected_client(
         return;
     }
 
+    if (ImGui::Button(tr(state, "Back to Classroom###focus-back", "Về lớp học###focus-back")))
+        state.view = DashboardView::room_screens;
     if (g_heading_font != nullptr) {
         ImGui::PushFont(g_heading_font);
     }
-    ImGui::TextUnformatted(selected_client->hostname.c_str());
+    ImGui::TextWrapped("%s", selected_client->hostname.c_str());
     if (g_heading_font != nullptr) {
         ImGui::PopFont();
     }
-    ImGui::SameLine();
-    draw_status_badge(selected_client->status, state);
+    const char* connection_symbol = selected_client->status == nstu::server::ClientStatus::online ? "●"
+        : selected_client->status == nstu::server::ClientStatus::locked ? "■"
+        : selected_client->status == nstu::server::ClientStatus::degraded ? "▲" : "○";
+    ImGui::TextColored(status_text_color(selected_client->status), "%s %s", connection_symbol,
+                       client_status_label(selected_client->status, state));
     if (selected_client->help_requested) {
         ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4{0.32f, 0.20f, 0.05f, 1.0f});
-        if (ImGui::BeginChild("help-banner", {0, scaled(34.0f)}, true, ImGuiWindowFlags_NoScrollbar)) {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(ImVec4{1.0f, 0.75f, 0.15f, 1.0f}, "[!] %s",
+        const float inset = scaled(nstu::ui::spacing::md);
+        const float text_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - inset * 2.0f);
+        const float gap = ImGui::GetStyle().ItemSpacing.y;
+        const float message_height = selected_client->help_message.empty() ? 0.0f :
+            ImGui::CalcTextSize(selected_client->help_message.c_str(), nullptr, false, text_width).y + gap;
+        const float height = inset * 2.0f + ImGui::GetTextLineHeight() + gap + message_height + ImGui::GetFrameHeight();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {inset, inset});
+        ImGui::PushStyleColor(ImGuiCol_ChildBg,
+            nstu::ui::interim_color(nstu::ui::ColorRole::warning_bg, g_dark_mode));
+        const bool help_visible = ImGui::BeginChild("help-banner", {0, height},
+            ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar);
+        ImGui::PopStyleVar();
+        if (help_visible) {
+            ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::warning, g_dark_mode), "▲ %s",
                                tr(state, "Help Requested", "Yêu cầu trợ giúp"));
             if (!selected_client->help_message.empty()) {
-                ImGui::SameLine();
-                ImGui::TextDisabled("— %s", selected_client->help_message.c_str());
+                ImGui::TextWrapped("%s", selected_client->help_message.c_str());
             }
-            ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
-                                     ImGui::GetContentRegionMax().x - scaled(150.0f)));
             if (ImGui::SmallButton(tr(state, "Acknowledge Help", "Giải quyết trợ giúp"))) {
                 std::string error;
                 (void)control_plane.resolve_help_request(selected_client->id, &error);
@@ -2279,36 +2356,32 @@ void draw_selected_client(
         ImGui::PopStyleColor();
         ImGui::Spacing();
     }
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("%s", selected_client->address.c_str());
-    ImGui::SameLine();
-    ImGui::TextDisabled("•");
-    ImGui::SameLine();
     if (!selected_client->mac_address.empty()) {
         ImGui::TextDisabled("MAC: %s", selected_client->mac_address.c_str());
     } else {
         ImGui::TextDisabled("MAC: %s", tr(state, "Unknown", "Chưa rõ"));
     }
-    ImGui::SameLine();
-    ImGui::TextDisabled("•");
-    ImGui::SameLine();
     switch (selected_client->wol_support) {
     case nstu::net::WolSupportState::supported:
-        ImGui::TextColored(ImVec4{0.3f, 0.85f, 0.4f, 1.0f}, "[●] WOL: %s",
+        ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::success, g_dark_mode), "● WOL: %s",
                            tr(state, "Supported", "Được hỗ trợ"));
         break;
     case nstu::net::WolSupportState::unsupported:
-        ImGui::TextColored(ImVec4{0.9f, 0.4f, 0.4f, 1.0f}, "[▲] WOL: %s",
+        ImGui::TextColored(nstu::ui::interim_color(nstu::ui::ColorRole::danger, g_dark_mode), "▲ WOL: %s",
                            tr(state, "Unsupported", "Không hỗ trợ"));
         break;
     case nstu::net::WolSupportState::missing_mac:
-        ImGui::TextColored(ImVec4{0.7f, 0.7f, 0.7f, 1.0f}, "[○] WOL: %s",
+        ImGui::TextDisabled("○ WOL: %s",
                            tr(state, "Missing MAC", "Thiếu MAC"));
         break;
     case nstu::net::WolSupportState::unknown:
-        ImGui::TextColored(ImVec4{0.7f, 0.7f, 0.7f, 1.0f}, "[○] WOL: %s",
+        ImGui::TextDisabled("○ WOL: %s",
                            tr(state, "Unknown", "Chưa rõ"));
         break;
     }
+    ImGui::PopTextWrapPos();
     bool managed = selected_client->frozen;
     if (ImGui::Checkbox(
             tr(state, "Managed mode", "Chế độ được quản lý"),
@@ -2335,7 +2408,6 @@ void draw_selected_client(
             "Blocks service stop and uninstall until disabled here or by a local administrator.",
             "Chặn dừng dịch vụ và gỡ cài đặt cho đến khi tắt tại đây hoặc bởi quản trị viên cục bộ."));
     }
-    ImGui::SameLine();
     // Requirement check before activation: if the client has already reported
     // that its Windows edition/feature set cannot support reboot-to-restore,
     // do not let the operator arm it - the attempt would only fail on the box.
@@ -2347,6 +2419,8 @@ void draw_selected_client(
     if (ImGui::Button(tr(state, "Enable reboot-to-restore",
                          "Bật khôi phục sau reboot"))) {
         state.uwf_confirmation_client_id = selected_client->id;
+        state.uwf_checkpoint_acknowledged = false;
+        state.uwf_checkpoint_client_id = selected_client->id;
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
     }
@@ -2368,28 +2442,24 @@ void draw_selected_client(
             nstu::control::UwfFleetPhase::idle) {
         const bool proven =
             selected_client->uwf.proves_current_protection();
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(
-            proven ? (g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
-                                  : ImVec4{0.10f, 0.55f, 0.24f, 1.0f})
-                   : (g_dark_mode ? ImVec4{0.96f, 0.76f, 0.34f, 1.0f}
-                                  : ImVec4{0.63f, 0.36f, 0.02f, 1.0f}),
-            "%s", nstu::server::to_string(selected_client->uwf.phase));
+            nstu::ui::interim_color(proven ? nstu::ui::ColorRole::success : nstu::ui::ColorRole::warning, g_dark_mode),
+            "%s %s", proven ? "●" : "▲", nstu::server::to_string(selected_client->uwf.phase));
         if (!selected_client->uwf.detail.empty()) {
             ImGui::TextWrapped("%s", selected_client->uwf.detail.c_str());
         }
         if (proven) {
             ImGui::TextColored(
-                g_dark_mode ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
-                            : ImVec4{0.10f, 0.55f, 0.24f, 1.0f},
+                nstu::ui::interim_color(nstu::ui::ColorRole::success, g_dark_mode),
                 "%s",
                 tr(state,
-                   "Reboot-to-restore protected in this session. Exam mode is "
-                   "permitted.",
-                   "Đã bảo vệ khôi phục sau reboot trong phiên này. Cho phép "
-                   "chế độ thi."));
+                   "Current-session reboot-to-restore protection reported. Other exam checks still apply.",
+                   "Đã báo bảo vệ khôi phục sau reboot trong phiên này. Vẫn kiểm tra các điều kiện thi khác."));
         }
+        ImGui::PopTextWrapPos();
     }
-    draw_uwf_confirmation_popup(state, control_plane);
+    draw_uwf_confirmation_popup(clients, state, control_plane);
 
     char latency[32]{};
     char packet_loss[32]{};
@@ -2403,45 +2473,27 @@ void draw_selected_client(
     } else {
         strcpy_s(refresh, tr(state, "Paused", "Đã dừng"));
     }
-    const float telemetry_gap = ImGui::GetStyle().ItemSpacing.x;
-    const float telemetry_width =
-        (ImGui::GetContentRegionAvail().x - telemetry_gap * 2.0f) / 3.0f;
-    draw_telemetry_card(tr(state, "Latency", "Độ trễ"), latency,
-                        telemetry_width);
-    ImGui::SameLine();
-    draw_telemetry_card(tr(state, "Packet loss", "Mất gói"), packet_loss,
-                        telemetry_width);
-    ImGui::SameLine();
-    draw_telemetry_card(tr(state, "Snapshot refresh", "Chu kỳ chụp"),
-                        refresh, telemetry_width);
-
-    ImGui::TextUnformatted(tr(state, "Latest screen snapshot",
-                              "Ảnh chụp màn hình mới nhất"));
-    const bool live_now = selected_client->streaming;
-    ImGui::SameLine();
-    if (live_now) {
-        const ImVec4 live_color = g_dark_mode
-                                      ? ImVec4{0.40f, 0.85f, 0.53f, 1.0f}
-                                      : ImVec4{0.10f, 0.55f, 0.24f, 1.0f};
-        std::string live_label;
-        if (state.measured_stream_fps > 0.0) {
-            const long long tenths = static_cast<long long>(
-                state.measured_stream_fps * 10.0 + 0.5);
-            live_label = std::string(tr(state, "· Live ", "· Trực tiếp ")) +
-                         std::to_string(tenths / 10) + "." +
-                         std::to_string(tenths % 10) + " fps";
-        } else {
-            live_label =
-                tr(state, "· Live (measuring)", "· Trực tiếp (đang đo)");
+    if (ImGui::BeginTable("focus-telemetry", 3, ImGuiTableFlags_SizingStretchSame)) {
+        const std::array<const char*, 3> labels{tr(state, "Latency", "Độ trễ"),
+            tr(state, "Packet loss", "Mất gói"), tr(state, "Snapshot refresh", "Chu kỳ chụp")};
+        const std::array<const char*, 3> values{latency, packet_loss, refresh};
+        ImGui::TableNextRow();
+        for (int column = 0; column < 3; ++column) {
+            ImGui::TableSetColumnIndex(column);
+            ImGui::PushTextWrapPos(0.0f);
+            ImGui::TextDisabled("%s", labels[static_cast<std::size_t>(column)]);
+            ImGui::TextUnformatted(values[static_cast<std::size_t>(column)]);
+            ImGui::PopTextWrapPos();
         }
-        ImGui::TextColored(live_color, "%s", live_label.c_str());
-    } else {
-        ImGui::TextDisabled("%s", tr(state, "· Snapshot", "· Ảnh chụp"));
+        ImGui::EndTable();
     }
+
+    ImGui::TextUnformatted(tr(state, "Focus stream · requested target 15 FPS",
+                              "Luồng xem máy · mục tiêu yêu cầu 15 FPS"));
     const float preview_width = ImGui::GetContentRegionAvail().x;
     const float preview_height = std::clamp(
-        preview_width * 0.5625f, scaled(220.0f),
-        std::max(scaled(220.0f), ImGui::GetContentRegionAvail().y - scaled(210.0f)));
+        preview_width / nstu::ui::geometry::snapshot_aspect, scaled(nstu::ui::geometry::focus_viewport_min),
+        std::max(scaled(nstu::ui::geometry::focus_viewport_min), ImGui::GetContentRegionAvail().y - scaled(210.0f)));
     const auto surface = draw_screen_surface(
         *selected_client, preview_height, "##focus-screen", state);
     // Remote input no longer rides on this embedded Focus surface: it lives in a
@@ -2598,20 +2650,61 @@ void draw_selected_client(
         state.annotation_dragging = false;
     }
 
-    ImGui::PushStyleColor(
-        ImGuiCol_Button, g_dark_mode ? ImVec4{0.82f, 0.81f, 0.78f, 1.0f}
-                                     : ImVec4{0.12f, 0.12f, 0.11f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_ButtonHovered,
-        g_dark_mode ? ImVec4{0.90f, 0.89f, 0.86f, 1.0f}
-                    : ImVec4{0.20f, 0.20f, 0.19f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_ButtonActive,
-        g_dark_mode ? ImVec4{0.96f, 0.95f, 0.92f, 1.0f}
-                    : ImVec4{0.25f, 0.25f, 0.24f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_Text, g_dark_mode ? ImVec4{0.10f, 0.10f, 0.09f, 1.0f}
-                                   : ImVec4{1.0f, 1.0f, 1.0f, 1.0f});
+    // Query after the surface and its annotation hit-test: has_frame represents
+    // the successfully uploaded current generation, not merely JPEG presence.
+    using StreamObserver = nstu::ui::FocusStreamObserver;
+    const auto stream = state.focus_stream.present({
+        .rendered_client_id = selected_client->id,
+        .selected_client_id = state.selected_client_id,
+        .generation = selected_client->snapshot_generation,
+        .in_focus = state.view == DashboardView::selected_client,
+        .usable_texture = surface.has_frame,
+        .now = std::chrono::steady_clock::now()});
+    const char* stream_label = tr(state, "○ Cached snapshot · live delivery unverified",
+                                        "○ Ảnh chụp đã lưu · chưa xác minh luồng trực tiếp");
+    auto stream_color = nstu::ui::ColorRole::muted;
+    switch (stream.phase) {
+    case StreamObserver::Phase::live:
+        stream_label = stream.fps_sample_ready
+            ? tr(state, "● Live · delivered frame rate", "● Trực tiếp · tốc độ khung hình nhận")
+            : tr(state, "● Live · measuring delivered FPS", "● Trực tiếp · đang đo FPS nhận");
+        stream_color = nstu::ui::ColorRole::success; break;
+    case StreamObserver::Phase::requesting:
+        stream_label = tr(state, "○ Stream request sent · waiting for new frames",
+                                "○ Đã gửi yêu cầu luồng · chờ khung hình mới"); break;
+    case StreamObserver::Phase::rearming:
+        stream_label = tr(state, "▲ Stream rearm sent · waiting for new frames",
+                                "▲ Đã gửi lại yêu cầu · chờ khung hình mới"); break;
+    case StreamObserver::Phase::request_failed:
+        stream_label = tr(state, "▲ Stream request failed · cached image only",
+                                "▲ Yêu cầu luồng thất bại · chỉ có ảnh đã lưu");
+        stream_color = nstu::ui::ColorRole::danger; break;
+    case StreamObserver::Phase::stalled:
+        stream_label = tr(state, "▲ Frames stalled · cached image only",
+                                "▲ Luồng khung hình bị dừng · chỉ có ảnh đã lưu"); break;
+    case StreamObserver::Phase::generation_reset:
+        stream_label = tr(state, "▲ Frame sequence reset · live delivery unverified",
+                                "▲ Chuỗi khung hình đặt lại · chưa xác minh trực tiếp"); break;
+    case StreamObserver::Phase::frame_unavailable:
+        stream_label = tr(state, "▲ Current frame unavailable", "▲ Khung hình hiện tại không khả dụng"); break;
+    case StreamObserver::Phase::offline:
+        stream_label = tr(state, "○ Offline · no live stream", "○ Ngoại tuyến · không có luồng trực tiếp"); break;
+    case StreamObserver::Phase::inactive:
+    case StreamObserver::Phase::unverified: break;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, nstu::ui::interim_color(stream_color, g_dark_mode));
+    ImGui::TextWrapped("%s", stream_label);
+    if (stream.fps_sample_ready) ImGui::Text("%.1f FPS", stream.observed_fps);
+    ImGui::PopStyleColor();
+
+    ImGui::PushStyleColor(ImGuiCol_Button,
+        nstu::ui::interim_color(nstu::ui::ColorRole::accent, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+        nstu::ui::interim_color(nstu::ui::ColorRole::accent_hover, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,
+        nstu::ui::interim_color(nstu::ui::ColorRole::accent_hover, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        nstu::ui::interim_color(nstu::ui::ColorRole::on_accent, g_dark_mode));
     ImGui::BeginDisabled(state.auto_monitor);
     if (ImGui::Button(selected_client->snapshotting
                           ? tr(state, "Stop snapshots", "Dừng chụp")
@@ -2644,7 +2737,6 @@ void draw_selected_client(
             "snapshot theo từng máy."));
     }
     ImGui::PopStyleColor(4);
-    ImGui::SameLine();
     const bool remote_available = selected_client->status !=
         nstu::server::ClientStatus::offline;
     const bool legacy_open_here = g_remote_window != nullptr &&
@@ -2652,6 +2744,43 @@ void draw_selected_client(
 
     const auto session_snapshot = g_remote_session ? g_remote_session->snapshot()
                                                    : nstu::server::RemoteSessionSnapshot{};
+    ImGui::TextWrapped("%s", tr(state, "Remote Control · separate window", "Điều khiển từ xa · cửa sổ riêng"));
+    ImGui::TextWrapped("%s", tr(state,
+        "Focus displays frames and annotations. Keyboard and mouse control belong to the separate Remote workflow.",
+        "Focus hiển thị khung hình và nét vẽ. Điều khiển bàn phím và chuột thuộc quy trình từ xa riêng."));
+    using RemoteState = nstu::server::RemoteSessionState;
+    const char* lifecycle = tr(state, "○ Viewer idle", "○ Trình xem đang chờ");
+    switch (session_snapshot.state) {
+    case RemoteState::preflighting: lifecycle = tr(state, "○ Viewer preflight", "○ Kiểm tra trình xem"); break;
+    case RemoteState::launching: lifecycle = tr(state, "○ Launching viewer", "○ Đang mở trình xem"); break;
+    case RemoteState::running: lifecycle = tr(state, "● Viewer process running", "● Tiến trình xem đang chạy"); break;
+    case RemoteState::stopping: lifecycle = tr(state, "○ Stopping viewer", "○ Đang dừng trình xem"); break;
+    case RemoteState::exited: lifecycle = tr(state, "○ Viewer process exited", "○ Tiến trình xem đã thoát"); break;
+    case RemoteState::failed: lifecycle = tr(state, "▲ Viewer process failed", "▲ Tiến trình xem thất bại"); break;
+    case RemoteState::idle: break;
+    }
+    ImGui::TextWrapped("%s", lifecycle);
+    if (session_snapshot.client_id != 0) {
+        const auto target = std::find_if(clients.begin(), clients.end(), [&](const auto& client) {
+            return client.id == session_snapshot.client_id;
+        });
+        if (target != clients.end())
+            ImGui::TextWrapped("%s: %s · %s · %llu", tr(state, "Viewer target", "Máy của trình xem"),
+                target->hostname.c_str(), target->address.c_str(), static_cast<unsigned long long>(target->id));
+        else ImGui::TextWrapped("%s: %llu · %s", tr(state, "Viewer target", "Máy của trình xem"),
+            static_cast<unsigned long long>(session_snapshot.client_id), tr(state, "record unavailable", "không có bản ghi"));
+    }
+    if (session_snapshot.state != RemoteState::idle) {
+        ImGui::TextWrapped("%s", tr(state, "Process state does not confirm media delivery or input readiness.",
+                                            "Trạng thái tiến trình không xác nhận truyền hình ảnh hoặc sẵn sàng nhận thao tác."));
+        if (session_snapshot.exit_code)
+            ImGui::Text("%s: %u", tr(state, "Exit code", "Mã thoát"), *session_snapshot.exit_code);
+        if (!session_snapshot.bounded_diagnostic.empty())
+            ImGui::TextWrapped("%s", session_snapshot.bounded_diagnostic.c_str());
+    }
+    if (g_remote_window != nullptr)
+        ImGui::TextWrapped("%s · %llu", tr(state, "Legacy remote window open for target", "Cửa sổ từ xa cũ đang mở cho máy"),
+                           static_cast<unsigned long long>(g_remote_target_client));
     const bool session_active_here = session_snapshot.client_id == selected_client->id &&
         (session_snapshot.state == nstu::server::RemoteSessionState::preflighting ||
          session_snapshot.state == nstu::server::RemoteSessionState::launching ||
@@ -2741,26 +2870,34 @@ void draw_selected_client(
         }
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
-    ImGui::Checkbox(tr(state, "Legacy remote", "Điều khiển cũ"),
+    ImGui::Checkbox(tr(state, "Legacy###legacy-remote", "Cửa sổ cũ###legacy-remote"),
                     &g_use_legacy_remote);
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("%s", tr(
             state,
-            "Use legacy built-in D3D remote window instead of Moonlight.",
-            "Dùng cửa sổ D3D cũ thay vì Moonlight."));
+            "Choose the built-in D3D window for the next launch. The current viewer process or window keeps its existing lifecycle.",
+            "Chọn cửa sổ D3D tích hợp cho lần mở tiếp. Tiến trình hoặc cửa sổ hiện tại giữ nguyên vòng đời."));
     }
+    ImGui::TextWrapped("%s", tr(state,
+        "Use the built-in D3D window for the next start. The current viewer keeps its existing lifecycle.",
+        "Dùng cửa sổ D3D tích hợp cho lần mở tiếp. Trình xem hiện tại giữ nguyên vòng đời."));
     // Keyboard entry and the offline auto-stop now belong to the separate
     // remote-control window: it forwards real key events and the main loop
     // closes it when the controlled client drops offline.
-    ImGui::SameLine();
+    ImGui::Separator();
+    const auto next_action = [&](const char* label) {
+        const float width = ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+        const float right = ImGui::GetWindowPos().x + ImGui::GetContentRegionMax().x;
+        if (ImGui::GetItemRectMax().x + ImGui::GetStyle().ItemSpacing.x + width <= right)
+            ImGui::SameLine();
+    };
     if (ImGui::Button(state.annotation_enabled
                           ? tr(state, "Finish drawing", "Kết thúc vẽ")
                           : tr(state, "Draw on screen", "Vẽ lên màn hình"))) {
         state.annotation_enabled = !state.annotation_enabled;
         state.annotation_dragging = false;
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Clear drawing", "Xóa nét vẽ"));
     if (ImGui::Button(tr(state, "Clear drawing", "Xóa nét vẽ"))) {
         std::string error;
         const bool cleared =
@@ -2774,18 +2911,16 @@ void draw_selected_client(
         }
         ImGui::OpenPopup("control-status");
     }
-    ImGui::SameLine();
-    ImGui::PushStyleColor(
-        ImGuiCol_Button, g_dark_mode ? ImVec4{0.27f, 0.13f, 0.13f, 1.0f}
-                                     : ImVec4{0.99f, 0.92f, 0.92f, 1.0f});
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
-        g_dark_mode ? ImVec4{0.36f, 0.17f, 0.17f, 1.0f}
-                    : ImVec4{0.97f, 0.86f, 0.86f, 1.0f});
-    ImGui::PushStyleColor(
-        ImGuiCol_Text, g_dark_mode ? ImVec4{0.94f, 0.56f, 0.55f, 1.0f}
-                                   : ImVec4{0.62f, 0.18f, 0.17f, 1.0f});
     const bool is_locked =
         selected_client->status == nstu::server::ClientStatus::locked;
+    next_action(is_locked ? tr(state, "Unlock client", "Mở khóa máy")
+                          : tr(state, "Lock client", "Khóa máy"));
+    ImGui::PushStyleColor(ImGuiCol_Button,
+        nstu::ui::interim_color(nstu::ui::ColorRole::danger_bg, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,
+        nstu::ui::interim_color(nstu::ui::ColorRole::danger_bg, g_dark_mode));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+        nstu::ui::interim_color(nstu::ui::ColorRole::danger, g_dark_mode));
     if (ImGui::Button(is_locked
                            ? tr(state, "Unlock client", "Mở khóa máy")
                            : tr(state, "Lock client", "Khóa máy"))) {
@@ -2806,13 +2941,13 @@ void draw_selected_client(
         ImGui::OpenPopup("control-status");
     }
     ImGui::PopStyleColor(3);
-    ImGui::SameLine();
+    next_action(tr(state, "Launch Web", "Mở trang web"));
     if (ImGui::Button(tr(state, "Launch Web", "Mở trang web"))) {
         state.checked_client_ids = {selected_client->id};
         state.pending_bulk_action = BulkActionKind::launch_url;
         state.bulk_confirmation_open = true;
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Reboot", "Khởi động lại"));
     const bool exam_on_selected = control_plane.exam_active(selected_client->id);
     if (exam_on_selected) {
         ImGui::BeginDisabled();
@@ -2826,7 +2961,7 @@ void draw_selected_client(
         ImGui::SetTooltip("%s", tr(state, "Power actions are disabled during active assessments.",
                                           "Không thể thao tác nguồn khi đang có bài thi."));
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Shutdown", "Tắt máy"));
     if (ImGui::Button(tr(state, "Shutdown", "Tắt máy"))) {
         state.checked_client_ids = {selected_client->id};
         state.pending_bulk_action = BulkActionKind::shutdown;
@@ -2839,7 +2974,7 @@ void draw_selected_client(
     if (exam_on_selected) {
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Wake", "Bật máy"));
     const bool is_client_online = (selected_client->status != nstu::server::ClientStatus::offline);
     const bool missing_mac = selected_client->mac_address.empty();
     const bool unsupported_wol = (selected_client->wol_support == nstu::net::WolSupportState::unsupported);
@@ -2876,7 +3011,7 @@ void draw_selected_client(
     if (disable_wake) {
         ImGui::EndDisabled();
     }
-    ImGui::SameLine();
+    next_action(tr(state, "Send File", "Phát tệp"));
     const bool disable_send_file = !is_client_online || exam_on_selected;
     if (disable_send_file) {
         ImGui::BeginDisabled();
@@ -2957,15 +3092,31 @@ void draw_selected_client(
         ImGui::SliderInt(tr(state, "Thickness", "Độ dày"),
                          &state.annotation_thickness, 2, 12);
     }
-    if (ImGui::BeginPopup("control-status")) {
-        ImGui::TextUnformatted(state.control_status.c_str());
-        ImGui::EndPopup();
-    }
-
-    if (ImGui::BeginChild("chat-panel", {0, scaled(112.0f)}, true)) {
-        ImGui::TextUnformatted(tr(state, "Chat", "Trò chuyện"));
+    bool chat_status_requested = false;
+    const char* send_label = tr(state, "Send", "Gửi");
+    const char* chat_label = tr(state, "Chat", "Trò chuyện");
+    const auto& chat_style = ImGui::GetStyle();
+    const float send_text_width = ImGui::CalcTextSize(send_label).x;
+    const float send_padding_x = std::min(chat_style.FramePadding.x,
+        std::max(0.0f, (ImGui::GetContentRegionAvail().x - send_text_width) * 0.5f));
+    const float send_width = send_text_width + send_padding_x * 2.0f;
+    const float chat_padding_x = std::min(chat_style.WindowPadding.x,
+        std::max(0.0f, (ImGui::GetContentRegionAvail().x - send_width) * 0.5f));
+    const float chat_width = std::max(1.0f, ImGui::GetContentRegionAvail().x - chat_padding_x * 2.0f);
+    const bool send_inline = chat_width >= send_width + chat_style.ItemSpacing.x + ImGui::GetFrameHeight();
+    const float chat_log_height = scaled(52.0f);
+    const float chat_height = chat_style.WindowPadding.y * 2.0f + ImGui::CalcTextSize(chat_label, nullptr, false, chat_width).y +
+        chat_log_height + ImGui::GetFrameHeight() * (send_inline ? 1.0f : 2.0f) +
+        chat_style.ItemSpacing.y * (send_inline ? 2.0f : 3.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {chat_padding_x, chat_style.WindowPadding.y});
+    const bool chat_visible = ImGui::BeginChild("chat-panel", {0, chat_height},
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    if (chat_visible) {
+        ImGui::TextWrapped("%s", chat_label);
         const auto chat_log = control_plane.chat_history(selected_client->id);
-        if (ImGui::BeginChild("chat-log", {0, scaled(52.0f)}, true)) {
+        if (ImGui::BeginChild("chat-log", {0, chat_log_height}, true)) {
             if (chat_log.empty()) {
                 ImGui::TextDisabled(
                     "%s", tr(state, "No messages in this session.",
@@ -2984,13 +3135,15 @@ void draw_selected_client(
             }
         }
         ImGui::EndChild();
-        ImGui::SetNextItemWidth(scaled(-78.0f));
+        ImGui::SetNextItemWidth(send_inline
+            ? std::max(1.0f, ImGui::GetContentRegionAvail().x - send_width - chat_style.ItemSpacing.x)
+            : ImGui::GetContentRegionAvail().x);
         const bool submit = ImGui::InputText(
             "##chat-input", state.chat_input.data(), state.chat_input.size(),
             ImGuiInputTextFlags_EnterReturnsTrue);
-        ImGui::SameLine();
-        if ((submit || ImGui::Button(tr(state, "Send", "Gửi"),
-                                     {scaled(68.0f), 0.0f})) &&
+        if (send_inline) ImGui::SameLine();
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {send_padding_x, chat_style.FramePadding.y});
+        if ((submit || ImGui::Button(send_label, {send_width, 0.0f})) &&
             state.chat_input[0] != '\0') {
             std::string error;
             if (control_plane.send_chat(selected_client->id,
@@ -3002,10 +3155,16 @@ void draw_selected_client(
                 state.control_status = error;
                 record_operation_failure("Chat", "Chat command failed", error);
             }
-            ImGui::OpenPopup("control-status");
+            chat_status_requested = true;
         }
+        ImGui::PopStyleVar();
     }
     ImGui::EndChild();
+    if (chat_status_requested) ImGui::OpenPopup("control-status");
+    if (ImGui::BeginPopup("control-status")) {
+        ImGui::TextWrapped("%s", state.control_status.c_str());
+        ImGui::EndPopup();
+    }
     ImGui::EndChild();
 }
 
@@ -3027,10 +3186,11 @@ bool draw_segment_option(const char* label, bool selected, float width) {
     return pressed;
 }
 
-void draw_preferences(DashboardState& state, float pos_x, float settings_width) {
-    ImGui::SameLine(pos_x);
-    if (ImGui::Button(tr(state, "Settings", "Cài đặt"),
-                      {settings_width, scaled(28.0f)})) {
+void draw_preferences(DashboardState& state, float pos_x, float settings_width,
+                      bool inline_button = true) {
+    if (inline_button) ImGui::SameLine(pos_x);
+    if (ImGui::Button(tr(state, "Settings###settings-trigger", "Cài đặt###settings-trigger"),
+                      {settings_width, 0.0f})) {
         ImGui::OpenPopup("settings-popup");
     }
     ImGui::SetNextWindowSize({scaled(410.0f), 0.0f}, ImGuiCond_Appearing);
@@ -3177,14 +3337,19 @@ void draw_preferences(DashboardState& state, float pos_x, float settings_width) 
     ImGui::EndPopup();
 }
 
-void draw_role_switcher(DashboardState& state, float pos_x, float width) {
-    ImGui::SameLine(pos_x);
+void draw_role_switcher(DashboardState& state, float pos_x, float width,
+                        bool inline_button = true) {
+    if (inline_button) ImGui::SameLine(pos_x);
     const bool is_vietnamese = (state.language == Language::vietnamese);
     char role_btn_text[128]{};
     sprintf_s(role_btn_text, "%s: %s##role-btn",
               tr(state, "Role", "Vai trò"),
               role_label(state.current_role, is_vietnamese));
-    if (ImGui::Button(role_btn_text, {width, scaled(28.0f)})) {
+    if (!inline_button) {
+        sprintf_s(role_btn_text, "%s###role-btn",
+                  tr(state, "Operator role", "Vai trò"));
+    }
+    if (ImGui::Button(role_btn_text, {width, 0.0f})) {
         ImGui::OpenPopup("role-selector-popup");
     }
     if (ImGui::BeginPopup("role-selector-popup")) {
@@ -3276,10 +3441,11 @@ void update_teacher_broadcast_mode(DashboardState& state,
     }
 }
 
-void draw_diagnostics_popup(DashboardState& state, float pos_x, float button_width) {
-    ImGui::SameLine(pos_x);
-    if (ImGui::Button(tr(state, "Diagnostics", "Chẩn đoán"),
-                      {button_width, scaled(28.0f)})) {
+void draw_diagnostics_popup(DashboardState& state, float pos_x, float button_width,
+                            bool inline_button = true) {
+    if (inline_button) ImGui::SameLine(pos_x);
+    if (ImGui::Button(tr(state, "Diagnostics###diagnostics-trigger", "Chẩn đoán###diagnostics-trigger"),
+                      {button_width, 0.0f})) {
         refresh_graphics_report();
         ImGui::OpenPopup("diagnostics-popup");
     }
@@ -3969,14 +4135,15 @@ void draw_pairing_requests(DashboardState& state,
 
 void draw_pairing_popup(DashboardState& state,
                         nstu::server::ServerControlPlane& control_plane,
-                        float pos_x, float button_width) {
-    ImGui::SameLine(pos_x);
+                        float pos_x, float button_width,
+                        bool inline_button = true) {
+    if (inline_button) ImGui::SameLine(pos_x);
     bool focus_panel = false;
     if (ImGui::Button(
             tr(state,
-               state.pairing_panel_open ? "Pairing active" : "Add computers",
-               state.pairing_panel_open ? "Đang ghép nối" : "Thêm máy"),
-            {button_width, scaled(28.0f)})) {
+               state.pairing_panel_open ? "Pairing active###pairing-trigger" : "Add computers###pairing-trigger",
+               state.pairing_panel_open ? "Đang ghép nối###pairing-trigger" : "Thêm máy###pairing-trigger"),
+            {button_width, 0.0f})) {
         if (!state.pairing_panel_open) {
             state.pairing_status.clear();
             state.pairing_panel_open = true;
@@ -4164,8 +4331,8 @@ void generate_sealed_cohort_export(
     if (nstu::server::sealed_export::export_to_file(
             export_path, grade, answers, audit_events, server_seal_key, &error)) {
         state.last_export_path = export_path.string();
-        state.control_status = tr(state, "Sealed export created successfully: ",
-                                  "Đã tạo file niêm phong thành công: ") + filename;
+        state.control_status = tr(state, "Demonstration sealed export created: ",
+                                  "Đã tạo file niêm phong minh họa: ") + filename;
     } else {
         state.control_status = tr(state, "Export failed: ", "Xuất thất bại: ") + error;
     }
@@ -4176,12 +4343,12 @@ void draw_exam_panel(
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
     if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
-    ImGui::TextUnformatted(tr(state, "Teacher Exam Operator Console", "Bảng điều khiển kỳ thi"));
+    ImGui::TextWrapped("%s", tr(state, "Teacher Exam Operator Console", "Bảng điều khiển kỳ thi"));
     if (g_heading_font != nullptr) ImGui::PopFont();
     ImGui::TextWrapped("%s", tr(
         state,
-        "Orchestrate cohort assessments, track live candidate progress, and export tamper-evident sealed grades.",
-        "Điều phối kỳ thi, theo dõi tiến độ thí sinh theo thời gian thực và xuất kết quả niêm phong số."));
+        "Prepare staged packages and inspect loading, ready and begun server states. Begin and Stop report queued requests, not candidate acknowledgements.",
+        "Chuẩn bị gói thi đã triển khai và xem trạng thái tải, sẵn sàng, đã bắt đầu trên server. Bắt đầu và Dừng báo yêu cầu đã xếp hàng, không phải xác nhận từ thí sinh."));
 
     ImGui::Separator();
     ImGui::Spacing();
@@ -4219,11 +4386,14 @@ void draw_exam_panel(
     ImGui::InputTextWithHint("##exam-package-id", "Package ID",
                              state.exam_package_id.data(), state.exam_package_id.size());
     ImGui::SetNextItemWidth(std::min(scaled(420.0f), ImGui::GetContentRegionAvail().x));
-    ImGui::InputTextWithHint("##exam-candidate-id", "Candidate ID (or cohort prefix)",
+    ImGui::InputTextWithHint("##exam-candidate-id", tr(state, "Candidate ID for selected computer", "Mã thí sinh cho máy được chọn"),
                              state.exam_candidate_id.data(), state.exam_candidate_id.size());
     ImGui::SetNextItemWidth(std::min(scaled(720.0f), ImGui::GetContentRegionAvail().x));
     ImGui::InputTextWithHint("##exam-digest", "Content SHA-256",
                              state.exam_digest_hex.data(), state.exam_digest_hex.size());
+    ImGui::TextWrapped("%s", tr(state,
+        "Selected load uses the entered candidate ID. All-online load uses each computer's hostname. Scanning/selecting a package does not calculate its digest or stage files on clients.",
+        "Mở trên máy chọn dùng mã thí sinh đã nhập. Mở trên tất cả máy online dùng tên từng máy. Quét/chọn gói không tính digest hoặc triển khai file lên máy client."));
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -4234,9 +4404,11 @@ void draw_exam_panel(
     const auto ready_clients = control_plane.ready_exam_clients();
 
     ImGui::TextUnformatted(tr(state, "2. Cohort Launch & Synchronized Barrier", "2. Điều phối & Bắt đầu đồng bộ"));
+    ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("%s: %zu | %s: %zu",
-                        tr(state, "Active exams", "Kỳ thi đang chạy"), active_states.size(),
-                        tr(state, "Ready to begin", "Sẵn sàng bắt đầu"), ready_clients.size());
+                        tr(state, "Server exam contexts", "Phiên thi trên server"), active_states.size(),
+                        tr(state, "Ready reports (including begun)", "Báo sẵn sàng (gồm đã bắt đầu)"), ready_clients.size());
+    ImGui::PopTextWrapPos();
 
     const auto active_for_selected = std::find_if(
         active_states.begin(), active_states.end(), [selected_client](const auto& exam) {
@@ -4311,7 +4483,7 @@ void draw_exam_panel(
                 ++begun_count;
             }
         }
-        state.control_status = tr(state, "Released exam barrier for ", "Đã mở rào chắn kỳ thi cho ") +
+        state.control_status = tr(state, "Begin requests queued for ", "Đã xếp hàng yêu cầu bắt đầu cho ") +
                               std::to_string(begun_count) + tr(state, " candidates.", " thí sinh.");
     }
     ImGui::EndDisabled();
@@ -4327,7 +4499,7 @@ void draw_exam_panel(
                 ++stopped_count;
             }
         }
-        state.control_status = tr(state, "Stopped exam on ", "Đã dừng bài thi trên ") +
+        state.control_status = tr(state, "Stop requests queued for ", "Đã xếp hàng yêu cầu dừng cho ") +
                               std::to_string(stopped_count) + tr(state, " computers.", " máy tính.");
     }
     ImGui::EndDisabled();
@@ -4337,7 +4509,7 @@ void draw_exam_panel(
     ImGui::Spacing();
 
     // 3. Live Cohort Monitoring Table
-    ImGui::TextUnformatted(tr(state, "3. Live Cohort Telemetry", "3. Theo dõi phòng thi trực tiếp"));
+    ImGui::TextWrapped("%s", tr(state, "3. Cohort Server State", "3. Trạng thái phòng thi trên server"));
     if (clients.empty()) {
         ImGui::TextDisabled("%s", tr(state, "No student computers connected to server.", "Chưa có máy sinh viên kết nối."));
     } else if (ImGui::BeginTable("exam-cohort-table", 6,
@@ -4384,7 +4556,7 @@ void draw_exam_panel(
                     ImGui::TextDisabled("%s", tr(state, "Idle", "Sẵn sàng nhận đề"));
                 }
             } else if (it_exam->begun) {
-                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s", tr(state, "In Progress", "Đang thi"));
+                ImGui::TextColored(ImVec4{0.2f, 0.8f, 0.2f, 1.0f}, "%s", tr(state, "Begun", "Đã bắt đầu"));
             } else if (it_exam->ready) {
                 ImGui::TextColored(ImVec4{0.9f, 0.8f, 0.1f, 1.0f}, "%s", tr(state, "Ready to Begin", "Đã sẵn sàng"));
             } else {
@@ -4411,7 +4583,7 @@ void draw_exam_panel(
                 if (ImGui::SmallButton(tr(state, "Begin", "Bắt đầu"))) {
                     std::string err;
                     state.control_status = control_plane.begin_exam(client.id, 0, &err)
-                        ? tr(state, "Exam begun.", "Đã bắt đầu bài thi.")
+                        ? tr(state, "Begin request queued.", "Đã xếp hàng yêu cầu bắt đầu.")
                         : err;
                 }
             }
@@ -4420,12 +4592,12 @@ void draw_exam_panel(
                 if (ImGui::SmallButton(tr(state, "Stop", "Dừng"))) {
                     std::string err;
                     state.control_status = control_plane.stop_exam(client.id, &err)
-                        ? tr(state, "Exam stopped.", "Đã dừng bài thi.")
+                        ? tr(state, "Stop request queued.", "Đã xếp hàng yêu cầu dừng.")
                         : err;
                 }
             }
 
-            ImGui::PopID();
+            pop_client_id();
         }
         ImGui::EndTable();
     }
@@ -4435,7 +4607,10 @@ void draw_exam_panel(
     ImGui::Spacing();
 
     // 4. Sealed Export Container
-    ImGui::TextUnformatted(tr(state, "4. Tamper-Evident Sealed Export", "4. Xuất kết quả niêm phong số"));
+    ImGui::TextWrapped("%s", tr(state, "4. Demonstration Sealed Export", "4. File niêm phong minh họa"));
+    ImGui::TextWrapped("%s", tr(state,
+        "Demonstration export uses sample grades, empty responses, sample audit events and a test sealing key. It does not export candidate results.",
+        "File minh họa dùng điểm mẫu, câu trả lời trống, sự kiện kiểm toán mẫu và khóa niêm phong thử nghiệm. File không xuất kết quả của thí sinh."));
     if (ImGui::Button(tr(state, "Generate Sealed Export (.nstugrade)", "Tạo file niêm phong (.nstugrade)"), {scaled(260.0f), 0})) {
         generate_sealed_cohort_export(state, control_plane);
     }
@@ -4445,491 +4620,533 @@ void draw_exam_panel(
                            tr(state, "Last exported to", "Đã lưu vào"), state.last_export_path.c_str());
     }
 }
-void draw_menu_strip(DashboardState& state, bool has_clients,
-                     nstu::server::ServerControlPlane& control_plane) {
-    if (!ImGui::BeginChild("menu-strip", {0, scaled(31.0f)}, false,
-                           ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::EndChild();
-        return;
-    }
-    if (g_heading_font != nullptr) {
-        ImGui::PushFont(g_heading_font);
-    }
-    ImGui::TextUnformatted("NSTU School");
-    if (g_heading_font != nullptr) {
-        ImGui::PopFont();
-    }
-#if NSTU_DEV_UNPROTECTED_EXAM
-    // Permanent, unmissable marker for the public DEV channel. This build starts
-    // exams without proven reboot-to-restore protection; the operator must never
-    // mistake it for a Release install.
-    ImGui::SameLine();
-    ImGui::TextColored(ImVec4{0.96f, 0.36f, 0.36f, 1.0f}, "%s",
-                       tr(state, "DEV (UNPROTECTED) - exams run without UWF",
-                          "DEV (KHÔNG BẢO VỆ) - thi không cần UWF"));
-#endif
-    ImGui::SameLine();
-    if (draw_segment_option(tr(state, "Class", "Lớp"),
-                            state.view == DashboardView::room_screens,
-                            scaled(58.0f))) {
-        state.view = DashboardView::room_screens;
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(!has_clients);
-    if (draw_segment_option(tr(state, "Client", "Máy"),
-                            state.view == DashboardView::selected_client,
-                            scaled(60.0f))) {
-        state.view = DashboardView::selected_client;
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (draw_segment_option(tr(state, "Exam", "Bài thi"),
-                            state.view == DashboardView::exam,
-                            scaled(60.0f))) {
-        state.view = DashboardView::exam;
-    }
-    if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health)) {
-        ImGui::SameLine();
-        if (draw_segment_option(tr(state, "Fleet", "Hệ thống"),
-                                state.view == DashboardView::fleet_health,
-                                scaled(68.0f))) {
-            state.view = DashboardView::fleet_health;
+
+float shell_action_width(const char* label) {
+    return ImGui::CalcTextSize(label).x +
+           ImGui::GetStyle().FramePadding.x * 2.0f;
+}
+
+void shell_next_item(float width, float& used, bool& first, float available) {
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    if (!first) {
+        if (used + gap + width <= available) {
+            ImGui::SameLine();
+            used += gap;
+        } else {
+            used = 0.0f;
         }
     }
+    used += width;
+    first = false;
+}
 
-    const float right_x = ImGui::GetContentRegionMax().x;
-    const float gap = scaled(8.0f);
-    const float settings_w = scaled(104.0f);
-    const float role_w = scaled(160.0f);
-    const bool show_diag = is_action_permitted(state.current_role, OperatorAction::view_diagnostics_raw);
-    const float diag_w = show_diag ? scaled(118.0f) : 0.0f;
-    const float pair_w = scaled(136.0f);
-
-    const float x_settings = right_x - settings_w;
-    const float x_role = x_settings - gap - role_w;
-    const float x_diag = show_diag ? (x_role - gap - diag_w) : x_role;
-    const float x_pair = x_diag - gap - pair_w;
-
-    draw_pairing_popup(state, control_plane, x_pair, pair_w);
-    if (show_diag) {
-        draw_diagnostics_popup(state, x_diag, diag_w);
+int shell_row_count(const std::vector<float>& widths, float available) {
+    int rows = 1;
+    float used = 0.0f;
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    for (const float width : widths) {
+        if (used > 0.0f && used + gap + width > available) {
+            ++rows;
+            used = 0.0f;
+        }
+        used += (used > 0.0f ? gap : 0.0f) + width;
     }
-    draw_role_switcher(state, x_role, role_w);
-    draw_preferences(state, x_settings, settings_w);
+    return rows;
+}
+
+bool draw_shell_action_button(const char* id, const char* label,
+                              bool enabled = true, bool selected = false,
+                              float width = 0.0f) {
+    ImGui::PushID(id);
+    ImGui::BeginDisabled(!enabled);
+    if (selected) {
+        ImGui::PushStyleColor(ImGuiCol_Button,
+            nstu::ui::interim_color(nstu::ui::ColorRole::selected, g_dark_mode));
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            nstu::ui::interim_color(nstu::ui::ColorRole::selected_text, g_dark_mode));
+    }
+    const std::string caption = std::string(label) + "###action";
+    const bool activated = ImGui::Button(caption.c_str(), {width, 0.0f});
+    if (selected) {
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::EndDisabled();
+    ImGui::PopID();
+    return activated;
+}
+
+const char* shell_view_title(const DashboardState& state) {
+    switch (state.view) {
+    case DashboardView::room_screens:
+        return tr(state, "Classroom", "Lớp học");
+    case DashboardView::selected_client:
+        return tr(state, "Focus Viewer", "Xem máy");
+    case DashboardView::exam:
+        return tr(state, "Exams", "Bài thi");
+    case DashboardView::fleet_health:
+        return tr(state, "Fleet Health", "Hệ thống");
+    }
+    return "NSTU";
+}
+
+void draw_shell_navigation_button(const char* id, const char* label,
+                                  IconKind icon, DashboardView destination,
+                                  DashboardState& state, bool enabled = true) {
+    const std::string caption = "      " + std::string(label) + "###" + id;
+    const bool active = state.view == destination;
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button,
+            nstu::ui::interim_color(nstu::ui::ColorRole::selected, g_dark_mode));
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            nstu::ui::interim_color(nstu::ui::ColorRole::selected_text, g_dark_mode));
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, {0.0f, 0.5f});
+    ImGui::BeginDisabled(!enabled);
+    if (ImGui::Button(caption.c_str(),
+                     {ImGui::GetContentRegionAvail().x,
+                      std::max(scaled(nstu::ui::geometry::table_row_min),
+                               ImGui::GetFrameHeight())})) {
+        state.view = destination;
+    }
+    const ImVec2 minimum = ImGui::GetItemRectMin();
+    const ImVec2 maximum = ImGui::GetItemRectMax();
+    draw_icon(ImGui::GetWindowDrawList(), icon,
+              {minimum.x + scaled(nstu::ui::spacing::lg),
+               (minimum.y + maximum.y) * 0.5f},
+              nstu::ui::spacing::lg,
+              ImGui::GetColorU32(enabled ? ImGuiCol_Text : ImGuiCol_TextDisabled));
+    ImGui::EndDisabled();
+    ImGui::PopStyleVar();
+    if (active) {
+        ImGui::PopStyleColor(2);
+    }
+}
+
+
+void draw_menu_strip(DashboardState& state, bool,
+                     nstu::server::ServerControlPlane& control_plane) {
+    const float inset = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
+                                   nstu::ui::geometry::shell_compact_breakpoint
+                               ? nstu::ui::geometry::content_inset_compact
+                               : nstu::ui::geometry::content_inset);
+    const float wrap_width = std::max(1.0f,
+        ImGui::GetContentRegionAvail().x - inset * 2.0f);
+    const std::string room = control_plane.server_name();
+    float title_height = ImGui::GetTextLineHeight();
+    if (g_page_title_font != nullptr) {
+        ImGui::PushFont(g_page_title_font);
+        title_height = ImGui::CalcTextSize(shell_view_title(state), nullptr,
+                                          false, wrap_width).y;
+        ImGui::PopFont();
+    }
+    float room_height = ImGui::GetTextLineHeight();
+    if (g_caption_font != nullptr) {
+        ImGui::PushFont(g_caption_font);
+        room_height = std::max(ImGui::GetTextLineHeight(),
+            ImGui::CalcTextSize(room.c_str(), nullptr, false, wrap_width).y);
+        ImGui::PopFont();
+    }
+    float height = title_height + room_height +
+                   ImGui::GetStyle().ItemSpacing.y + scaled(nstu::ui::spacing::sm * 2.0f);
+#if NSTU_DEV_UNPROTECTED_EXAM
+    const char* warning = tr(state,
+        "DEV (UNPROTECTED) - exams run without UWF",
+        "DEV (KHÔNG BẢO VỆ) - thi không cần UWF");
+    height += ImGui::CalcTextSize(warning, nullptr, false, wrap_width).y +
+              ImGui::GetStyle().ItemSpacing.y;
+#endif
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                       {inset, scaled(nstu::ui::spacing::sm)});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,
+        nstu::ui::interim_color(nstu::ui::ColorRole::window, g_dark_mode));
+    if (ImGui::BeginChild("shell-header",
+                         {0, std::max(scaled(nstu::ui::geometry::header), height)},
+                         ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar)) {
+        if (g_page_title_font != nullptr) ImGui::PushFont(g_page_title_font);
+        ImGui::TextWrapped("%s", shell_view_title(state));
+        if (g_page_title_font != nullptr) ImGui::PopFont();
+        if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", room.c_str());
+        ImGui::PopTextWrapPos();
+        if (g_caption_font != nullptr) ImGui::PopFont();
+#if NSTU_DEV_UNPROTECTED_EXAM
+        ImGui::PushStyleColor(ImGuiCol_Text,
+            nstu::ui::interim_color(nstu::ui::ColorRole::danger, g_dark_mode));
+        ImGui::TextWrapped("%s", warning);
+        ImGui::PopStyleColor();
+#endif
+    }
     ImGui::EndChild();
-}
-
-void draw_ribbon_group_caption(float width, const char* label) {
-    const ImVec2 text_size = ImGui::CalcTextSize(label);
-    ImGui::SetCursorPosY(scaled(58.0f));
-    ImGui::SetCursorPosX(std::max(
-        ImGui::GetStyle().WindowPadding.x, (width - text_size.x) * 0.5f));
-    ImGui::TextDisabled("%s", label);
-}
-
-// A ribbon group is at least as wide as the caption centred beneath it. The
-// authored widths are sized for the buttons; a longer caption (a translation,
-// or simply a larger font at high DPI) would otherwise spill past the group
-// and collide with the next one.
-float ribbon_group_width(float authored_width_at_96dpi, const char* caption) {
-    const float caption_width = ImGui::CalcTextSize(caption).x +
-                                ImGui::GetStyle().WindowPadding.x * 2.0f;
-    return std::max(scaled(authored_width_at_96dpi), caption_width);
-}
-
-void draw_ribbon_divider() {
-    const ImVec2 start = ImGui::GetCursorScreenPos();
-    ImGui::Dummy({1.0f, scaled(64.0f)});
-    ImGui::GetWindowDrawList()->AddLine(
-        {start.x, start.y + scaled(3.0f)}, {start.x, start.y + scaled(61.0f)},
-        ImGui::GetColorU32(ImGuiCol_Separator));
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar();
 }
 
 void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
                  const nstu::server::ClientRecord* selected_client,
                  DashboardState& state,
                  nstu::server::ServerControlPlane& control_plane) {
-    if (!ImGui::BeginChild("command-ribbon", {0, scaled(82.0f)}, true,
-                           ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::EndChild();
-        return;
-    }
     const bool has_clients = !clients.empty();
-    const char* student_caption = tr(state, "Student", "Học sinh");
-    const float student_width = ribbon_group_width(140.0f, student_caption);
-    if (ImGui::BeginChild("student-commands", {student_width, scaled(74.0f)},
-                          false, ImGuiWindowFlags_NoScrollbar)) {
-        // Snapshots run automatically for the class view (auto_monitor), so the
-        // manual Start/Stop capture buttons no longer live on the ribbon.
-        if (draw_icon_button("lock-room", tr(state, "Lock", "Khóa"),
-                             IconKind::lock, {scaled(58.0f), scaled(54.0f)},
-                             false, has_clients)) {
-            set_room_lock(clients, state, control_plane, true);
+    const bool checked = has_clients && !state.checked_client_ids.empty();
+    const bool focus = state.view == DashboardView::selected_client;
+    const bool classroom = state.view == DashboardView::room_screens;
+    const char* lock_label = tr(state, "Lock selected", "Khóa máy đã chọn");
+    const char* unlock_label = tr(state, "Unlock selected", "Mở máy đã chọn");
+    const char* draw_label = tr(state, "Draw", "Vẽ");
+    const char* clear_label = tr(state, "Clear drawing", "Xóa nét vẽ");
+    bool unread_chat = false;
+    for (const auto& client : clients) {
+        if (client_has_unread_chat(state, client.id)) {
+            unread_chat = true;
+            break;
         }
-        ImGui::SameLine();
-        if (draw_icon_button("unlock-room", tr(state, "Unlock", "Mở khóa"),
-                             IconKind::unlock, {scaled(64.0f), scaled(54.0f)},
-                             false, has_clients)) {
-            set_room_lock(clients, state, control_plane, false);
-        }
-        draw_ribbon_group_caption(student_width, student_caption);
     }
-    ImGui::EndChild();
-
-    ImGui::SameLine();
-    draw_ribbon_divider();
-    ImGui::SameLine();
-    const char* teaching_caption = tr(state, "Teaching", "Giảng dạy");
-    const float teaching_width = ribbon_group_width(330.0f, teaching_caption);
-    if (ImGui::BeginChild("teaching-commands", {teaching_width, scaled(74.0f)},
-                          false, ImGuiWindowFlags_NoScrollbar)) {
-        if (draw_icon_button("show-room", tr(state, "Screens", "Màn hình"),
-                             IconKind::grid, {scaled(66.0f), scaled(54.0f)},
-                             state.view == DashboardView::room_screens)) {
-            state.view = DashboardView::room_screens;
-        }
-        ImGui::SameLine();
-        if (draw_icon_button("focus-client", tr(state, "Focus", "Tập trung"),
-                             IconKind::monitor, {scaled(66.0f), scaled(54.0f)},
-                             state.view == DashboardView::selected_client,
-                             selected_client != nullptr)) {
-            state.view = DashboardView::selected_client;
-        }
-        ImGui::SameLine();
-        if (draw_icon_button("draw-client", tr(state, "Draw", "Vẽ"),
-                             IconKind::pen, {scaled(58.0f), scaled(54.0f)},
-                             state.annotation_enabled,
-                             selected_client != nullptr &&
-                                 state.view ==
-                                     DashboardView::selected_client)) {
-            state.annotation_enabled = !state.annotation_enabled;
-            state.annotation_dragging = false;
-        }
-        ImGui::SameLine();
-        if (draw_icon_button("clear-client", tr(state, "Clear", "Xóa"),
-                             IconKind::erase, {scaled(58.0f), scaled(54.0f)},
-                             false, selected_client != nullptr)) {
-            std::string error;
-            state.control_status = control_plane.clear_overlay(
-                                       selected_client->id, &error)
-                ? tr(state, "Student overlay cleared.", "Đã xóa lớp vẽ.")
-                : error;
-        }
-        ImGui::SameLine();
-        bool any_unread_chat = false;
-        for (const auto& client : clients) {
-            if (client_has_unread_chat(state, client.id)) {
-                any_unread_chat = true;
-                break;
+    const char* chat_label = unread_chat
+        ? tr(state, "Chat (new)", "Chat (mới)") : tr(state, "Chat", "Chat");
+    const char* broadcast_label = state.broadcast_enabled
+        ? tr(state, "Stop broadcast", "Dừng phát")
+        : tr(state, "Broadcast", "Phát màn hình");
+    const char* more_label = tr(state, "More actions", "Thao tác khác");
+    std::vector<float> widths;
+    if (classroom) {
+        widths.push_back(shell_action_width(lock_label));
+        widths.push_back(shell_action_width(unlock_label));
+    } else if (focus) {
+        widths.push_back(shell_action_width(draw_label));
+        widths.push_back(shell_action_width(clear_label));
+        widths.push_back(shell_action_width(chat_label));
+    }
+    widths.push_back(shell_action_width(broadcast_label));
+    widths.push_back(shell_action_width(more_label));
+    const float inset = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
+                                   nstu::ui::geometry::shell_compact_breakpoint
+                               ? nstu::ui::geometry::content_inset_compact
+                               : nstu::ui::geometry::content_inset);
+    const int rows = shell_row_count(widths,
+        std::max(1.0f, ImGui::GetContentRegionAvail().x - inset * 2.0f));
+    const float height = std::max(scaled(nstu::ui::geometry::toolbar_min),
+        static_cast<float>(rows) * ImGui::GetFrameHeight() +
+        static_cast<float>(rows - 1) * ImGui::GetStyle().ItemSpacing.y +
+        scaled(nstu::ui::spacing::xs * 2.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                       {inset, scaled(nstu::ui::spacing::xs)});
+    if (ImGui::BeginChild("shell-commands", {0, height}, ImGuiChildFlags_AlwaysUseWindowPadding,
+                         ImGuiWindowFlags_NoScrollbar)) {
+        float used = 0.0f;
+        bool first = true;
+        const float available = ImGui::GetContentRegionAvail().x;
+        const auto action = [&](const char* id, const char* label,
+                                bool enabled, bool selected = false) {
+            shell_next_item(shell_action_width(label), used, first, available);
+            return draw_shell_action_button(id, label, enabled, selected);
+        };
+        if (classroom) {
+            if (action("bulk-lock", lock_label, checked)) {
+                state.pending_bulk_action = BulkActionKind::lock;
+                state.bulk_confirmation_open = true;
+            }
+            if (action("bulk-unlock", unlock_label, checked)) {
+                state.pending_bulk_action = BulkActionKind::unlock;
+                state.bulk_confirmation_open = true;
+            }
+        } else if (focus) {
+            if (action("draw-client", draw_label, selected_client != nullptr,
+                       state.annotation_enabled)) {
+                state.annotation_enabled = !state.annotation_enabled;
+                state.annotation_dragging = false;
+            }
+            if (action("clear-client", clear_label, selected_client != nullptr)) {
+                std::string error;
+                state.control_status = control_plane.clear_overlay(
+                                           selected_client->id, &error)
+                    ? tr(state, "Student overlay cleared.", "Đã xóa lớp vẽ.")
+                    : error;
+            }
+            if (action("chat-client", chat_label, selected_client != nullptr)) {
+                state.view = DashboardView::selected_client;
             }
         }
-        if (draw_icon_button("chat-client", tr(state, "Chat", "Chat"),
-                             IconKind::chat, {scaled(58.0f), scaled(54.0f)},
-                             false, selected_client != nullptr, true,
-                             any_unread_chat)) {
-            state.view = DashboardView::selected_client;
-        }
-        draw_ribbon_group_caption(teaching_width, teaching_caption);
-    }
-    ImGui::EndChild();
-
-    ImGui::SameLine();
-    draw_ribbon_divider();
-    ImGui::SameLine();
-    const char* broadcast_caption = tr(state, "Teacher screen", "Màn hình GV");
-    const float broadcast_width = ribbon_group_width(190.0f, broadcast_caption);
-    if (ImGui::BeginChild("broadcast-commands", {broadcast_width, scaled(74.0f)},
-                          false, ImGuiWindowFlags_NoScrollbar)) {
-        if (draw_icon_button(
-                "broadcast-room",
-                state.broadcast_enabled ? tr(state, "Stop", "Dừng")
-                                        : tr(state, "Broadcast", "Phát"),
-                state.broadcast_enabled ? IconKind::stop : IconKind::broadcast,
-                {scaled(60.0f), scaled(54.0f)}, state.broadcast_enabled,
-                has_clients)) {
+        if (action("broadcast-room", broadcast_label, has_clients,
+                   state.broadcast_enabled)) {
             toggle_teacher_broadcast(state, control_plane);
         }
-        ImGui::SameLine();
-        ImGui::BeginGroup();
-        const bool is_follow =
-            (state.broadcast_mode == nstu::control::DemonstrationMode::follow_along);
-        if (ImGui::SmallButton(is_follow ? tr(state, "Follow-Along", "Cửa sổ nổi")
-                                         : tr(state, "Focus Mode", "Toàn màn hình"))) {
-            const auto next_mode = is_follow
-                ? nstu::control::DemonstrationMode::focus
-                : nstu::control::DemonstrationMode::follow_along;
-            update_teacher_broadcast_mode(state, control_plane, next_mode,
-                                          state.broadcast_lock_input);
+        if (action("more-actions", more_label, true)) ImGui::OpenPopup("shell-more");
+        if (ImGui::BeginPopup("shell-more")) {
+            if (ImGui::BeginMenu(tr(state, "Checked computers###checked", "Máy đã chọn###checked"), checked)) {
+                const auto bulk = [&](const char* label, BulkActionKind kind,
+                                      bool enabled = true) {
+                    const std::string caption = std::string(label) + "###bulk-" +
+                        std::to_string(static_cast<int>(kind));
+                    if (ImGui::MenuItem(caption.c_str(), nullptr, false, enabled)) {
+                        state.pending_bulk_action = kind;
+                        state.bulk_confirmation_open = true;
+                    }
+                };
+                bulk(lock_label, BulkActionKind::lock);
+                bulk(unlock_label, BulkActionKind::unlock);
+                bulk(tr(state, "Refresh snapshots", "Làm mới ảnh"), BulkActionKind::refresh_snapshots);
+                bulk(tr(state, "Acknowledge help", "Giải quyết trợ giúp"), BulkActionKind::acknowledge_help);
+                bulk(tr(state, "Open website", "Mở trang web"), BulkActionKind::launch_url);
+                if (!is_action_permitted(state.current_role, OperatorAction::reboot_client))
+                    ImGui::TextDisabled("%s", tr(state,
+                        "Power actions require Technician or Developer.",
+                        "Thao tác nguồn cần Kỹ thuật viên hoặc Nhà phát triển."));
+                bulk(tr(state, "Reboot", "Khởi động lại"), BulkActionKind::reboot,
+                     is_action_permitted(state.current_role, OperatorAction::reboot_client));
+                bulk(tr(state, "Shutdown", "Tắt máy"), BulkActionKind::shutdown,
+                     is_action_permitted(state.current_role, OperatorAction::shutdown_client));
+                bulk(tr(state, "Wake", "Bật máy"), BulkActionKind::wake_on_lan);
+                bulk(tr(state, "Distribute file", "Phát tệp"), BulkActionKind::distribute_file);
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu(tr(state, "Selected computer###selected", "Máy đang chọn###selected"),
+                                 selected_client != nullptr)) {
+                const std::string draw_menu = std::string(draw_label) + "###selected-draw";
+                const std::string clear_menu = std::string(clear_label) + "###selected-clear";
+                const std::string chat_menu = std::string(chat_label) + "###selected-chat";
+                if (ImGui::MenuItem(draw_menu.c_str(), nullptr, state.annotation_enabled, focus)) {
+                    state.annotation_enabled = !state.annotation_enabled;
+                    state.annotation_dragging = false;
+                }
+                if (ImGui::MenuItem(clear_menu.c_str())) {
+                    std::string error;
+                    state.control_status = control_plane.clear_overlay(
+                                               selected_client->id, &error)
+                        ? tr(state, "Student overlay cleared.", "Đã xóa lớp vẽ.")
+                        : error;
+                }
+                if (ImGui::MenuItem(chat_menu.c_str())) state.view = DashboardView::selected_client;
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu(tr(state, "Whole room###room", "Toàn phòng###room"), has_clients)) {
+                if (ImGui::MenuItem(tr(state, "Lock room###room-lock", "Khóa toàn phòng###room-lock")))
+                    set_room_lock(clients, state, control_plane, true);
+                if (ImGui::MenuItem(tr(state, "Unlock room###room-unlock", "Mở khóa toàn phòng###room-unlock")))
+                    set_room_lock(clients, state, control_plane, false);
+                ImGui::EndMenu();
+            }
+            if (ImGui::BeginMenu(tr(state, "Teacher broadcast###broadcast", "Màn hình giáo viên###broadcast"))) {
+                const std::string broadcast_menu = std::string(broadcast_label) + "###broadcast-toggle";
+                if (ImGui::MenuItem(broadcast_menu.c_str(), nullptr, state.broadcast_enabled, has_clients))
+                    toggle_teacher_broadcast(state, control_plane);
+                const bool is_follow =
+                    state.broadcast_mode == nstu::control::DemonstrationMode::follow_along;
+                if (ImGui::MenuItem(is_follow ? tr(state, "Follow-Along###mode", "Cửa sổ nổi###mode")
+                                              : tr(state, "Focus Mode###mode", "Toàn màn hình###mode"))) {
+                    const auto next_mode = is_follow
+                        ? nstu::control::DemonstrationMode::focus
+                        : nstu::control::DemonstrationMode::follow_along;
+                    update_teacher_broadcast_mode(state, control_plane, next_mode,
+                                                  state.broadcast_lock_input);
+                }
+                bool lock_val = state.broadcast_lock_input;
+                ImGui::BeginDisabled(is_follow);
+                if (ImGui::Checkbox(tr(state, "Lock input###input-lock", "Khóa phím###input-lock"), &lock_val))
+                    update_teacher_broadcast_mode(state, control_plane,
+                                                  state.broadcast_mode, lock_val);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                    ImGui::SetTooltip("%s", is_follow
+                        ? tr(state, "Input locking is disabled in Follow-Along mode",
+                                    "Khóa phím bị tắt trong Chế độ Theo dõi")
+                        : tr(state, "Lock student mouse and keyboard during Focus broadcast",
+                                    "Khóa chuột và bàn phím học sinh khi phát"));
+                ImGui::EndDisabled();
+                ImGui::EndMenu();
+            }
+            ImGui::EndPopup();
         }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("%s", is_follow
-                ? tr(state, "Switch to Focus Mode (fullscreen topmost presentation)",
-                            "Chuyển sang Chế độ Tiêu điểm (toàn màn hình)")
-                : tr(state, "Switch to Follow-Along Mode (resizable floating window)",
-                            "Chuyển sang Chế độ Theo dõi (cửa sổ nổi)"));
-        }
-        bool lock_val = state.broadcast_lock_input;
-        ImGui::BeginDisabled(is_follow);
-        if (ImGui::Checkbox(tr(state, "Lock input", "Khóa phím"), &lock_val)) {
-            update_teacher_broadcast_mode(state, control_plane, state.broadcast_mode,
-                                          lock_val);
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("%s", is_follow
-                ? tr(state, "Input locking is disabled in Follow-Along mode",
-                            "Khóa phím bị tắt trong Chế độ Theo dõi")
-                : tr(state, "Lock student mouse and keyboard during Focus broadcast",
-                            "Khóa chuột và bàn phím học sinh khi phát"));
-        }
-        ImGui::EndDisabled();
-        ImGui::EndGroup();
-        draw_ribbon_group_caption(broadcast_width, broadcast_caption);
     }
     ImGui::EndChild();
-    ImGui::EndChild();
-}
-
-bool draw_filter_chip(const char* id, const char* label, std::size_t count,
-                      bool selected) {
-    char text[96]{};
-    sprintf_s(text, "%s  %zu", label, count);
-    ImGui::PushID(id);
-    if (selected) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(
-                                                    ImGuiCol_Header));
-    }
-    const bool pressed = ImGui::Button(text, {0, scaled(28.0f)});
-    if (selected) {
-        ImGui::PopStyleColor();
-    }
-    ImGui::PopID();
-    return pressed;
+    ImGui::PopStyleVar();
 }
 
 void draw_workspace_toolbar(
     const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state) {
-    const auto counts = count_room_statuses(clients);
-    if (draw_filter_chip("all", tr(state, "All", "Tất cả"), clients.size(),
-                         state.room_filter == RoomFilter::all)) {
-        state.room_filter = RoomFilter::all;
-    }
-    ImGui::SameLine();
-    if (draw_filter_chip("online", tr(state, "Online", "Trực tuyến"),
-                         counts.online,
-                         state.room_filter == RoomFilter::online)) {
-        state.room_filter = RoomFilter::online;
-    }
-    ImGui::SameLine();
-    if (draw_filter_chip("attention", tr(state, "Attention", "Chú ý"),
-                         counts.attention,
-                         state.room_filter == RoomFilter::attention)) {
-        state.room_filter = RoomFilter::attention;
-    }
-    ImGui::SameLine();
-    if (draw_filter_chip("locked", tr(state, "Locked", "Đã khóa"),
-                         counts.locked,
-                         state.room_filter == RoomFilter::locked)) {
-        state.room_filter = RoomFilter::locked;
-    }
-    ImGui::SameLine();
-    if (draw_filter_chip("offline", tr(state, "Offline", "Ngoại tuyến"),
-                         counts.offline,
-                         state.room_filter == RoomFilter::offline)) {
-        state.room_filter = RoomFilter::offline;
-        state.show_offline = true;
-    }
-    ImGui::SameLine();
-    if (draw_filter_chip("help", tr(state, "Help", "Trợ giúp"),
-                         counts.help,
-                         state.room_filter == RoomFilter::help)) {
-        state.room_filter = RoomFilter::help;
-    }
-
-    ImGui::SameLine();
-    ImGui::TextDisabled("|");
-    ImGui::SameLine();
-
-    // View mode toggle chips (Grid vs List)
-    if (draw_filter_chip("view-grid", tr(state, "Grid", "Lưới"), 0,
-                         state.display_mode == ClassDisplayMode::grid)) {
-        state.display_mode = ClassDisplayMode::grid;
-    }
-    ImGui::SameLine();
-    if (draw_filter_chip("view-list", tr(state, "List", "Danh sách"), 0,
-                         state.display_mode == ClassDisplayMode::list)) {
-        state.display_mode = ClassDisplayMode::list;
-    }
-
-    // Selection & Bulk Actions
-    if (!clients.empty()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("|");
-        ImGui::SameLine();
-
-        if (ImGui::SmallButton(tr(state, "Select All", "Chọn tất cả"))) {
-            std::vector<const nstu::server::ClientRecord*> visible_clients;
-            visible_clients.reserve(clients.size());
-            for (const auto& c : clients) {
-                if (client_matches_filter(c, state)) {
-                    visible_clients.push_back(&c);
-                }
-            }
-            state.checked_client_ids = nstu::server::select_all_matching(visible_clients);
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton(tr(state, "Clear", "Bỏ chọn"))) {
-            state.checked_client_ids.clear();
-        }
-
-        if (!state.checked_client_ids.empty()) {
-            ImGui::SameLine();
-            ImGui::TextDisabled("(%zu %s)", state.checked_client_ids.size(),
-                                tr(state, "selected", "đã chọn"));
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Bulk Lock", "Khóa đã chọn"))) {
-                state.pending_bulk_action = BulkActionKind::lock;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Bulk Unlock", "Mở khóa đã chọn"))) {
-                state.pending_bulk_action = BulkActionKind::unlock;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Bulk Refresh", "Chụp lại"))) {
-                state.pending_bulk_action = BulkActionKind::refresh_snapshots;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Ack Help", "Giải quyết trợ giúp"))) {
-                state.pending_bulk_action = BulkActionKind::acknowledge_help;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Launch Web", "Mở trang web"))) {
-                state.pending_bulk_action = BulkActionKind::launch_url;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Reboot", "Khởi động lại"))) {
-                state.pending_bulk_action = BulkActionKind::reboot;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Shutdown", "Tắt máy"))) {
-                state.pending_bulk_action = BulkActionKind::shutdown;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Wake", "Bật máy"))) {
-                state.pending_bulk_action = BulkActionKind::wake_on_lan;
-                state.bulk_confirmation_open = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton(tr(state, "Send File", "Phát tệp"))) {
-                state.pending_bulk_action = BulkActionKind::distribute_file;
-                state.bulk_confirmation_open = true;
-            }
-        }
-    }
-
-    const float search_width = scaled(180.0f);
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
-                             ImGui::GetContentRegionMax().x - search_width));
+    const float available = ImGui::GetContentRegionAvail().x;
+    float used = 0.0f;
+    bool first = true;
+    const float filter_width = scaled(nstu::ui::geometry::classroom_filter);
+    const float search_width = std::max(scaled(nstu::ui::geometry::classroom_search_min),
+        available - filter_width - shell_action_width(tr(state, "Grid", "Lưới")) -
+        shell_action_width(tr(state, "List", "Danh sách")) -
+        shell_action_width(tr(state, "Show offline", "Hiện ngoại tuyến")) -
+        ImGui::GetStyle().ItemSpacing.x * 4.0f);
+    shell_next_item(search_width, used, first, available);
     ImGui::SetNextItemWidth(search_width);
-    ImGui::InputTextWithHint("##client-filter",
-                             tr(state, "Find client", "Tìm máy"),
-                             state.client_filter.data(),
-                             state.client_filter.size());
+    ImGui::InputTextWithHint("##client-filter", tr(state, "Find client by name or address", "Tìm tên hoặc địa chỉ máy"),
+                             state.client_filter.data(), state.client_filter.size());
+    shell_next_item(filter_width, used, first, available);
+    ImGui::SetNextItemWidth(filter_width);
+    const std::array<const char*, 6> filters{
+        tr(state, "All computers", "Tất cả máy"), tr(state, "Online", "Trực tuyến"),
+        tr(state, "Attention", "Chú ý"), tr(state, "Locked", "Đã khóa"),
+        tr(state, "Offline", "Ngoại tuyến"), tr(state, "Help", "Trợ giúp")};
+    if (ImGui::BeginCombo("##room-filter", filters[static_cast<std::size_t>(state.room_filter)])) {
+        for (std::size_t index = 0; index < filters.size(); ++index) {
+            const auto filter = static_cast<RoomFilter>(index);
+            if (ImGui::Selectable(filters[index], state.room_filter == filter)) {
+                state.room_filter = filter;
+                if (filter == RoomFilter::offline) state.show_offline = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    const auto action = [&](const char* id, const char* label, bool selected = false) {
+        shell_next_item(shell_action_width(label), used, first, available);
+        return draw_shell_action_button(id, label, true, selected);
+    };
+    if (action("view-grid", tr(state, "Grid", "Lưới"),
+             state.display_mode == ClassDisplayMode::grid)) state.display_mode = ClassDisplayMode::grid;
+    if (action("view-list", tr(state, "List", "Danh sách"),
+             state.display_mode == ClassDisplayMode::list)) state.display_mode = ClassDisplayMode::list;
+    const char* offline = tr(state, "Show offline###toolbar-offline", "Hiện ngoại tuyến###toolbar-offline");
+    shell_next_item(ImGui::CalcTextSize(offline, nullptr, true).x +
+                    ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x,
+                    used, first, available);
+    ImGui::Checkbox(offline, &state.show_offline);
+    std::vector<const nstu::server::ClientRecord*> visible_clients;
+    visible_clients.reserve(clients.size());
+    std::size_t visible_checked = 0;
+    for (const auto& client : clients) {
+        if (client_matches_filter(client, state)) {
+            visible_clients.push_back(&client);
+            if (state.checked_client_ids.contains(client.id)) ++visible_checked;
+        }
+    }
+    ImGui::TextDisabled("%zu %s · %zu %s", state.checked_client_ids.size(),
+        tr(state, "selected", "đã chọn"), state.checked_client_ids.size() - visible_checked,
+        tr(state, "hidden or unavailable", "ẩn hoặc không khả dụng"));
+    used = 0.0f; first = true;
+    if (action("select-matching", tr(state, "Select matching", "Chọn máy khớp")))
+        state.checked_client_ids = nstu::server::select_all_matching(visible_clients);
+    if (action("clear-selection", tr(state, "Clear selection", "Bỏ chọn")))
+        state.checked_client_ids.clear();
     ImGui::Separator();
 }
 
 void draw_navigation_rail(
-    const std::vector<nstu::server::ClientRecord>& clients,
+    const std::vector<nstu::server::ClientRecord>&,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    if (!ImGui::BeginChild("navigation-rail", {scaled(48.0f), 0}, true,
-                           ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::EndChild();
-        return;
-    }
-    if (draw_icon_button("nav-room", tr(state, "Room screens", "Màn hình phòng"),
-                         IconKind::grid, {scaled(36.0f), scaled(38.0f)},
-                         state.view == DashboardView::room_screens, true,
-                         false)) {
-        state.view = DashboardView::room_screens;
-    }
-    if (draw_icon_button("nav-focus", tr(state, "Selected client", "Máy đang chọn"),
-                         IconKind::monitor, {scaled(36.0f), scaled(38.0f)},
-                         state.view == DashboardView::selected_client,
-                         selected_client != nullptr, false)) {
-        state.view = DashboardView::selected_client;
-    }
-    if (draw_icon_button("nav-exam", tr(state, "Exam", "Bài thi"),
-                         IconKind::lock, {scaled(36.0f), scaled(38.0f)},
-                         state.view == DashboardView::exam,
-                         true, false)) {
-        state.view = DashboardView::exam;
-    }
-    if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health)) {
-        if (draw_icon_button("nav-fleet", tr(state, "Fleet health", "Sức khỏe hệ thống"),
-                             IconKind::monitor, {scaled(36.0f), scaled(38.0f)},
-                             state.view == DashboardView::fleet_health,
-                             true, false)) {
-            state.view = DashboardView::fleet_health;
+    const float width = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
+                                   nstu::ui::geometry::shell_compact_breakpoint
+                               ? nstu::ui::geometry::sidebar_compact
+                               : nstu::ui::geometry::sidebar);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                       {scaled(nstu::ui::spacing::lg), scaled(nstu::ui::spacing::lg)});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,
+        nstu::ui::interim_color(nstu::ui::ColorRole::window, g_dark_mode));
+    const bool sidebar_visible = ImGui::BeginChild("shell-sidebar", {width, 0},
+                                                 ImGuiChildFlags_AlwaysUseWindowPadding);
+    ImGui::PopStyleColor();
+    if (sidebar_visible) {
+        if (g_brand_image.view() != nullptr && !g_graphics_device_lost) {
+            const float brand_width = ImGui::GetContentRegionAvail().x;
+            const float aspect = static_cast<float>(g_brand_image.width()) /
+                                 static_cast<float>(g_brand_image.height());
+            ImGui::Image(reinterpret_cast<ImTextureID>(g_brand_image.view()),
+                         {brand_width, brand_width / aspect});
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("NSTU");
+        } else {
+            if (g_heading_font != nullptr) ImGui::PushFont(g_heading_font);
+            ImGui::TextUnformatted("NSTU");
+            if (g_heading_font != nullptr) ImGui::PopFont();
         }
-    }
-    ImGui::Separator();
-    if (draw_icon_button("nav-lock", tr(state, "Lock room", "Khóa phòng"),
-                         IconKind::lock, {scaled(36.0f), scaled(38.0f)}, false,
-                         !clients.empty(), false)) {
-        set_room_lock(clients, state, control_plane, true);
-    }
-    if (draw_icon_button("nav-broadcast",
-                         tr(state, "Teacher broadcast", "Phát màn hình giáo viên"),
-                         IconKind::broadcast, {scaled(36.0f), scaled(38.0f)},
-                         state.broadcast_enabled, !clients.empty(), false)) {
-        toggle_teacher_broadcast(state, control_plane);
-    }
-    if (draw_icon_button("nav-chat", tr(state, "Client chat", "Chat với máy"),
-                         IconKind::chat, {scaled(36.0f), scaled(38.0f)}, false,
-                         selected_client != nullptr, false)) {
-        state.view = DashboardView::selected_client;
+        ImGui::TextDisabled("%s", tr(state, "Classroom tools", "Công cụ lớp học"));
+        ImGui::Spacing();
+        draw_shell_navigation_button("nav-room", tr(state, "Classroom", "Lớp học"),
+                                     IconKind::grid, DashboardView::room_screens, state);
+        draw_shell_navigation_button("nav-focus", tr(state, "Focus Viewer", "Xem máy"),
+                                     IconKind::monitor, DashboardView::selected_client,
+                                     state, selected_client != nullptr);
+        draw_shell_navigation_button("nav-exam", tr(state, "Exams", "Bài thi"),
+                                     IconKind::lock, DashboardView::exam, state);
+        const bool diagnostics = is_action_permitted(
+            state.current_role, OperatorAction::view_diagnostics_raw);
+        if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health))
+            draw_shell_navigation_button("nav-fleet", tr(state, "Fleet Health", "Hệ thống"),
+                                         IconKind::monitor, DashboardView::fleet_health, state);
+        const bool is_vi = state.language == Language::vietnamese;
+        const char* role = role_label(state.current_role, is_vi);
+        const float role_height = ImGui::CalcTextSize(
+            role, nullptr, false, ImGui::GetContentRegionAvail().x).y;
+        const float utility_height =
+            (ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y) *
+                static_cast<float>(diagnostics ? 4 : 3) +
+            role_height + scaled(nstu::ui::spacing::lg + nstu::ui::spacing::sm);
+        ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(),
+            ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - utility_height));
+        ImGui::Separator();
+        const float utility_width = ImGui::GetContentRegionAvail().x;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                           {scaled(nstu::ui::spacing::xl), scaled(nstu::ui::spacing::xl)});
+        draw_pairing_popup(state, control_plane, 0, utility_width, false);
+        draw_preferences(state, 0, utility_width, false);
+        draw_role_switcher(state, 0, utility_width, false);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", role);
+        ImGui::PopTextWrapPos();
+        if (diagnostics) draw_diagnostics_popup(state, 0, utility_width, false);
+        ImGui::PopStyleVar();
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar();
 }
 
 void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
                      DashboardState& state) {
     const auto counts = count_room_statuses(clients);
-    if (!ImGui::BeginChild("status-bar", {0, scaled(28.0f)}, true,
-                           ImGuiWindowFlags_NoScrollbar)) {
-        ImGui::EndChild();
-        return;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                       {scaled(nstu::ui::spacing::lg), 0.0f});
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+                       {scaled(nstu::ui::spacing::sm), scaled(nstu::ui::spacing::xs)});
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,
+        nstu::ui::interim_color(nstu::ui::ColorRole::window, g_dark_mode));
+    if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
+    if (ImGui::BeginChild("shell-status", {0, scaled(nstu::ui::geometry::statusbar)},
+                         ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar)) {
+        ImGui::SetCursorPosY(std::max(0.0f,
+            (scaled(nstu::ui::geometry::statusbar) - ImGui::GetFrameHeight()) * 0.5f));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(status_text_color(nstu::server::ClientStatus::online),
+                           "● %zu %s", counts.online, tr(state, "online", "trực tuyến"));
+        const char* offline = tr(state, "Show offline###show-offline", "Hiện ngoại tuyến###show-offline");
+        const float checkbox_width = ImGui::GetFrameHeight() +
+            ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(offline, nullptr, true).x;
+        const float right = ImGui::GetWindowContentRegionMax().x - checkbox_width;
+        if (!state.control_status.empty()) {
+            ImGui::SameLine();
+            const float remaining = right - ImGui::GetCursorPosX() -
+                                    ImGui::GetStyle().ItemSpacing.x;
+            if (remaining > ImGui::GetFrameHeight()) {
+                const std::string label = state.control_status + "###shell-result";
+                if (ImGui::Button(label.c_str(), {remaining, 0}))
+                    ImGui::OpenPopup("shell-result-popup");
+                if (ImGui::IsItemHovered() || ImGui::IsItemFocused())
+                    ImGui::SetTooltip("%s", state.control_status.c_str());
+            }
+        }
+        ImGui::SameLine(right);
+        ImGui::Checkbox(offline, &state.show_offline);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                           {scaled(nstu::ui::spacing::xl), scaled(nstu::ui::spacing::xl)});
+        ImGui::SetNextWindowSize(
+            {std::min(scaled(nstu::ui::geometry::dialog_width),
+                      ImGui::GetMainViewport()->WorkSize.x - scaled(nstu::ui::spacing::xxl)), 0},
+            ImGuiCond_Appearing);
+        if (ImGui::BeginPopup("shell-result-popup")) {
+            if (ImGui::GetIO().FontDefault != nullptr) ImGui::PushFont(ImGui::GetIO().FontDefault);
+            ImGui::TextWrapped("%s", state.control_status.c_str());
+            if (ImGui::GetIO().FontDefault != nullptr) ImGui::PopFont();
+            ImGui::EndPopup();
+        }
+        ImGui::PopStyleVar();
     }
-    ImGui::TextColored(status_text_color(nstu::server::ClientStatus::online),
-                       "●");
-    ImGui::SameLine();
-    ImGui::Text("%zu %s", counts.online,
-                tr(state, "online", "trực tuyến"));
-    if (!state.control_status.empty()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s", state.control_status.c_str());
-    }
-    const char* show_offline_label =
-        tr(state, "Show offline", "Hiện ngoại tuyến");
-    // Right-align on the checkbox's real width (box + inner gap + label) rather
-    // than a hand-tuned padding constant: a fixed reserve is only correct at one
-    // font size and leaves the control stranded mid-bar once the UI scales.
-    const float controls_width =
-        ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x +
-        ImGui::CalcTextSize(show_offline_label).x;
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + scaled(8.0f),
-                             ImGui::GetContentRegionMax().x - controls_width));
-    ImGui::Checkbox(show_offline_label, &state.show_offline);
-    /* Refresh interval is configured from Settings. */
     ImGui::EndChild();
+    if (g_caption_font != nullptr) ImGui::PopFont();
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 }
 
 void draw_bulk_action_confirmation_popup(
@@ -4939,6 +5156,12 @@ void draw_bulk_action_confirmation_popup(
     if (state.bulk_confirmation_open) {
         ImGui::OpenPopup("bulk-action-confirmation");
     }
+    const ImVec2 work = ImGui::GetMainViewport()->WorkSize;
+    const float inset = scaled(nstu::ui::geometry::dialog_inset);
+    const ImVec2 maximum{std::max(1.0f, work.x - inset * 2.0f),
+                         std::max(1.0f, work.y - inset * 2.0f)};
+    ImGui::SetNextWindowSizeConstraints(
+        {std::min(scaled(nstu::ui::geometry::dialog_width), maximum.x), 0}, maximum);
     if (!ImGui::BeginPopupModal("bulk-action-confirmation", nullptr,
                                 ImGuiWindowFlags_AlwaysAutoResize)) {
         return;
@@ -4956,15 +5179,50 @@ void draw_bulk_action_confirmation_popup(
     const std::string room_name = state.room_name_input.data();
     const bool is_wol = (state.pending_bulk_action == BulkActionKind::wake_on_lan);
     const std::size_t effective_target_count = is_wol ? target_summary.skipped_offline : target_summary.eligible_online;
-    ImGui::TextWrapped("%s",
-        nstu::server::format_bulk_confirmation_message(
-            state.pending_bulk_action, effective_target_count,
-            room_name, is_vietnamese).c_str());
+    std::size_t visible_checked = 0;
+    for (const auto& client : clients)
+        if (state.checked_client_ids.contains(client.id) && client_matches_filter(client, state))
+            ++visible_checked;
+    const auto checked_count = state.checked_client_ids.size();
+    const auto missing_count = checked_count - target_summary.total_selected;
+    ImGui::TextWrapped("%s: %zu · %s: %zu · %s: %zu", tr(state, "Checked", "Đã chọn"),
+        checked_count, tr(state, "Hidden or unavailable", "Ẩn hoặc không khả dụng"),
+        checked_count - visible_checked, tr(state, "Unavailable records", "Bản ghi không khả dụng"), missing_count);
+    ImGui::TextWrapped("%zu %s. %s", effective_target_count,
+        is_wol ? tr(state, "preliminary offline candidates", "máy ngoại tuyến sơ bộ")
+               : tr(state, "preliminary non-offline candidates", "máy không ngoại tuyến sơ bộ"),
+        tr(state, "Authentication, exam and capability guards still apply; dispatch does not confirm completion.",
+                  "Vẫn kiểm tra xác thực, kỳ thi và khả năng; gửi yêu cầu không xác nhận hoàn tất."));
+    if (!room_name.empty()) ImGui::TextWrapped("%s: %s", tr(state, "Room", "Phòng"), room_name.c_str());
+    std::vector<std::uint64_t> targets(state.checked_client_ids.begin(), state.checked_client_ids.end());
+    std::sort(targets.begin(), targets.end());
+    if (ImGui::BeginChild("confirmed-target-list",
+            {0, std::min(scaled(nstu::ui::geometry::table_row_min * 4.0f), maximum.y * 0.25f)},
+            ImGuiChildFlags_Borders)) {
+        for (const auto id : targets) {
+            const auto found = std::find_if(clients.begin(), clients.end(),
+                [id](const auto& client) { return client.id == id; });
+            if (found == clients.end()) {
+                ImGui::TextWrapped("%llu · %s", static_cast<unsigned long long>(id),
+                    tr(state, "Unavailable · not attempted", "Không khả dụng · không thử gửi"));
+            } else {
+                const bool visible = client_matches_filter(*found, state);
+                const bool eligible = is_wol ? found->status == nstu::server::ClientStatus::offline
+                                             : found->status != nstu::server::ClientStatus::offline;
+                ImGui::TextWrapped("%s · %s · %llu · %s%s", found->hostname.c_str(), found->address.c_str(),
+                    static_cast<unsigned long long>(id),
+                    eligible ? tr(state, "Preliminary candidate", "Máy sơ bộ")
+                             : tr(state, "Connection skipped", "Bỏ qua theo kết nối"),
+                    visible ? "" : tr(state, " · hidden", " · ẩn"));
+            }
+        }
+    }
+    ImGui::EndChild();
 
     if (!is_wol && target_summary.skipped_offline > 0) {
         ImGui::Spacing();
         ImGui::TextColored(
-            ImVec4{0.9f, 0.7f, 0.1f, 1.0f},
+            nstu::ui::interim_color(nstu::ui::ColorRole::warning, g_dark_mode),
             "%s: %zu %s",
             tr(state, "Notice", "Lưu ý"),
             target_summary.skipped_offline,
@@ -4972,7 +5230,7 @@ void draw_bulk_action_confirmation_popup(
     } else if (is_wol && target_summary.eligible_online > 0) {
         ImGui::Spacing();
         ImGui::TextColored(
-            ImVec4{0.4f, 0.7f, 1.0f, 1.0f},
+            nstu::ui::interim_color(nstu::ui::ColorRole::info, g_dark_mode),
             "%s: %zu %s",
             tr(state, "Notice", "Lưu ý"),
             target_summary.eligible_online,
@@ -5115,9 +5373,16 @@ void draw_bulk_action_confirmation_popup(
                     ? std::string_view{state.file_dist_path_input.data()}
                     : std::string_view{}),
             state.current_role);
-        state.control_status =
-            nstu::server::format_bulk_action_result_status(
-                state.pending_bulk_action, result, is_vietnamese);
+        const auto not_attempted = checked_count >= result.attempted ? checked_count - result.attempted : 0;
+        state.control_status = std::string(is_wol
+            ? tr(state, "Wake-request attempts: ", "Lần thử gửi yêu cầu đánh thức: ")
+            : tr(state, "Command dispatch attempts: ", "Lần thử gửi lệnh: ")) +
+            std::to_string(result.attempted) + tr(state, "; dispatched ", "; đã gửi ") +
+            std::to_string(result.succeeded) + tr(state, "; failed ", "; thất bại ") +
+            std::to_string(result.failed) + tr(state, "; not attempted ", "; không thử gửi ") +
+            std::to_string(not_attempted) + tr(state, ". Device completion is not acknowledged.",
+                                                    ". Chưa có xác nhận hoàn tất từ máy.");
+        if (!result.error_messages.empty()) state.control_status += " " + result.error_messages.front();
         state.bulk_confirmation_open = false;
         ImGui::CloseCurrentPopup();
     }
@@ -5149,6 +5414,7 @@ void draw_technician_fleet_health(
         ImGui::SetCursorPosY(scaled(80.0f));
         ImGui::TextDisabled("%s", tr(state, "No computers enrolled or discovered in fleet.",
                                      "Chưa có máy tính nào trong hệ thống."));
+        draw_uwf_confirmation_popup(clients, state, control_plane);
         return;
     }
 
@@ -5485,18 +5751,21 @@ void draw_technician_fleet_health(
                 ImGui::SetTooltip("%s", tr(state, "Already protected.", "Đã được bảo vệ."));
             }
 
-            ImGui::PopID();
+            pop_client_id();
         }
         ImGui::EndTable();
     }
 
     if (target_uwf_arm_client_id != 0) {
         state.uwf_confirmation_client_id = target_uwf_arm_client_id;
+        state.uwf_checkpoint_acknowledged = false;
+        state.uwf_checkpoint_client_id = target_uwf_arm_client_id;
         state.uwf_confirmation_open = true;
         ImGui::OpenPopup("uwf-confirmation");
     }
-    draw_uwf_confirmation_popup(state, control_plane);
+    draw_uwf_confirmation_popup(clients, state, control_plane);
 }
+
 
 void draw_dashboard_shell(
     const std::vector<nstu::server::ClientRecord>& clients,
@@ -5506,43 +5775,69 @@ void draw_dashboard_shell(
         state.view == DashboardView::fleet_health) {
         state.view = DashboardView::room_screens;
     }
-    draw_menu_strip(state, !clients.empty(), control_plane);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+        {scaled(nstu::ui::geometry::dialog_inset), scaled(nstu::ui::geometry::dialog_inset)});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, scaled(nstu::ui::radius::dialog));
     draw_software_updates_modal(clients, state);
     draw_telemetry_report_popup(state, clients.size());
     draw_support_bundle_modal(state);
     draw_room_profile_modal(state, control_plane);
     draw_bulk_action_confirmation_popup(clients, state, control_plane);
-    draw_ribbon(clients, selected_client, state, control_plane);
-    draw_workspace_toolbar(clients, state);
-
-    if (ImGui::BeginChild("main-workspace", {0, scaled(-32.0f)}, false)) {
+    ImGui::PopStyleVar(2);
+    const float height = std::max(1.0f, ImGui::GetContentRegionAvail().y -
+                                  scaled(nstu::ui::geometry::statusbar));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.0f, 0.0f});
+    if (ImGui::BeginChild("shell-body", {0, height}, false,
+                         ImGuiWindowFlags_NoScrollbar)) {
+        // Sidebar and workbench share this row; their interior spacing is scoped.
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                           {scaled(nstu::ui::spacing::md), scaled(nstu::ui::spacing::sm)});
         draw_navigation_rail(clients, selected_client, state, control_plane);
+        ImGui::PopStyleVar();
         ImGui::SameLine();
-        const ImVec4 content_background = g_dark_mode
-            ? ImVec4{0.075f, 0.086f, 0.104f, 1.0f}
-            : ImVec4{0.858f, 0.878f, 0.902f, 1.0f};
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, content_background);
-        if (ImGui::BeginChild("workspace-content", {0, 0}, false)) {
-            if (state.view == DashboardView::room_screens) {
-                if (state.display_mode == ClassDisplayMode::grid) {
-                    draw_room_screen_wall(clients, state);
+        if (ImGui::BeginChild("shell-workbench", {0, 0}, false,
+                             ImGuiWindowFlags_NoScrollbar)) {
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                               {scaled(nstu::ui::spacing::md), scaled(nstu::ui::spacing::sm)});
+            draw_menu_strip(state, !clients.empty(), control_plane);
+            draw_ribbon(clients, selected_client, state, control_plane);
+            const float inset = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
+                                           nstu::ui::geometry::shell_compact_breakpoint
+                                       ? nstu::ui::geometry::content_inset_compact
+                                       : nstu::ui::geometry::content_inset);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {inset, inset});
+            ImGui::PushStyleColor(ImGuiCol_ChildBg,
+                nstu::ui::interim_color(nstu::ui::ColorRole::canvas, g_dark_mode));
+            if (ImGui::BeginChild("workspace-content", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding,
+                                 ImGuiWindowFlags_NoScrollbar)) {
+                draw_workspace_toolbar(clients, state);
+                // Owning renderers keep their established padding and callbacks.
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
+                    {scaled(nstu::ui::spacing::xl), scaled(nstu::ui::spacing::xl)});
+                if (state.view == DashboardView::room_screens) {
+                    if (state.display_mode == ClassDisplayMode::grid)
+                        draw_room_screen_wall(clients, state);
+                    else
+                        draw_room_client_table(clients, state, control_plane);
+                } else if (state.view == DashboardView::selected_client) {
+                    draw_selected_client(clients, selected_client, state, control_plane);
+                } else if (state.view == DashboardView::fleet_health) {
+                    draw_technician_fleet_health(clients, state, control_plane);
                 } else {
-                    draw_room_client_table(clients, state, control_plane);
+                    draw_exam_panel(clients, selected_client, state, control_plane);
                 }
-            } else if (state.view == DashboardView::selected_client) {
-                draw_selected_client(clients, selected_client, state,
-                                     control_plane);
-            } else if (state.view == DashboardView::fleet_health) {
-                draw_technician_fleet_health(clients, state, control_plane);
-            } else {
-                draw_exam_panel(clients, selected_client, state,
-                                control_plane);
+                ImGui::PopStyleVar();
             }
+            ImGui::EndChild();
+            ImGui::PopStyleColor();
+            ImGui::PopStyleVar();
+            ImGui::PopStyleVar();
         }
         ImGui::EndChild();
-        ImGui::PopStyleColor();
     }
     ImGui::EndChild();
+    ImGui::PopStyleVar(2);
     draw_status_bar(clients, state);
 }
 
@@ -5661,6 +5956,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGui::GetIO().IniFilename = nullptr;
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     apply_dashboard_style(dashboard.dark_mode);
     load_dashboard_fonts();
     ImGui_ImplWin32_Init(window);
@@ -5739,10 +6035,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         ImGui::NewFrame();
         ImGui::SetNextWindowPos({0, 0});
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
         ImGui::Begin("NSTU", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                          ImGuiWindowFlags_NoResize |
                          ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::PopStyleVar();
 
         const auto clients = registry.snapshot();
         // Chat notifications: refresh per-client inbound (student) counts, flash
@@ -5863,54 +6161,22 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         const nstu::server::ClientRecord* selected =
             selected_client == clients.end() ? nullptr : &*selected_client;
 
-        // Delivered-fps meter for the focused/streaming client (Epic B
-        // diagnostic): sample snapshot_generation once per second so the Focus
-        // label reports the real frame rate reaching the manager, not "~15fps".
-        if (selected != nullptr && selected->streaming) {
-            if (dashboard.fps_sample_client_id != selected->id) {
-                dashboard.fps_sample_client_id = selected->id;
-                dashboard.fps_sample_generation = selected->snapshot_generation;
-                dashboard.fps_sample_time = now;
-                dashboard.measured_stream_fps = 0.0;
-            } else {
-                const auto elapsed = now - dashboard.fps_sample_time;
-                if (elapsed >= std::chrono::seconds(1)) {
-                    const double secs =
-                        std::chrono::duration<double>(elapsed).count();
-                    const std::uint64_t current_generation =
-                        selected->snapshot_generation;
-                    // A reconnect under the same id can reset the generation
-                    // below the stored baseline; guard the unsigned subtraction
-                    // so this one sample reports 0 instead of underflowing to an
-                    // absurd frame count.
-                    const std::uint64_t frames =
-                        current_generation >= dashboard.fps_sample_generation
-                            ? current_generation -
-                                  dashboard.fps_sample_generation
-                            : 0;
-                    dashboard.measured_stream_fps =
-                        static_cast<double>(frames) / secs;
-                    dashboard.fps_sample_generation = current_generation;
-                    dashboard.fps_sample_time = now;
-                }
-            }
-        } else {
-            dashboard.fps_sample_client_id = 0;
-            dashboard.measured_stream_fps = 0.0;
-        }
-
         // Live streaming: the independent remote-control window keeps its
         // controlled client streaming regardless of the current view; otherwise
         // the client shown in Focus streams at ~15fps. Leaving Focus with no
         // remote window open, or the client going offline, stops the stream and
         // the class wall falls back to its slower snapshot cadence.
         std::uint64_t desired_stream_id = 0;
+        using StreamObserver = nstu::ui::FocusStreamObserver;
+        auto stream_owner = StreamObserver::Owner::none;
+        auto stream_outcome = StreamObserver::RequestOutcome::none;
         if (g_remote_window != nullptr && g_remote_target_client != 0) {
             for (const auto& streamed : clients) {
                 if (streamed.id == g_remote_target_client &&
                     streamed.status !=
                         nstu::server::ClientStatus::offline) {
                     desired_stream_id = streamed.id;
+                    stream_owner = StreamObserver::Owner::legacy_remote;
                     break;
                 }
             }
@@ -5919,6 +6185,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             dashboard.view == DashboardView::selected_client &&
             selected->status != nstu::server::ClientStatus::offline) {
             desired_stream_id = selected->id;
+            stream_owner = StreamObserver::Owner::focus;
         }
         if (dashboard.streaming_client_id != desired_stream_id) {
             if (dashboard.streaming_client_id != 0) {
@@ -5927,8 +6194,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             }
             if (desired_stream_id != 0) {
                 std::string stream_error;
-                if (!control_plane.set_streaming(desired_stream_id, true, 15,
-                                                 &stream_error)) {
+                const bool sent = control_plane.set_streaming(desired_stream_id, true, 15,
+                                                              &stream_error);
+                if (stream_owner == StreamObserver::Owner::focus)
+                    stream_outcome = sent ? StreamObserver::RequestOutcome::start_sent
+                                          : StreamObserver::RequestOutcome::start_failed;
+                if (!sent) {
                     record_operation_failure(
                         "Focus", "Live stream start failed", stream_error);
                 }
@@ -5959,8 +6230,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                                              kStreamStallRearm);
         if (rearm != nstu::server::StreamRearm::none) {
             std::string rearm_error;
-            if (!control_plane.set_streaming(desired_stream_id, true, 15,
-                                             &rearm_error)) {
+            const bool sent = control_plane.set_streaming(desired_stream_id, true, 15,
+                                                          &rearm_error);
+            if (stream_owner == StreamObserver::Owner::focus)
+                stream_outcome = sent ? StreamObserver::RequestOutcome::rearm_sent
+                                      : StreamObserver::RequestOutcome::rearm_failed;
+            if (!sent) {
                 record_operation_failure("Focus", "Live stream re-arm failed",
                                          rearm_error);
             } else if (rearm == nstu::server::StreamRearm::first) {
@@ -5971,6 +6246,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             }
         }
 
+        dashboard.focus_stream.tick({
+            .in_focus = dashboard.view == DashboardView::selected_client,
+            .selected_client_id = selected ? selected->id : 0,
+            .desired_stream_id = desired_stream_id,
+            .owner = stream_owner,
+            .generation = selected ? selected->snapshot_generation : 0,
+            .non_offline = selected && selected->status != nstu::server::ClientStatus::offline,
+            .reported_streaming = selected && selected->streaming,
+            .outcome = stream_outcome,
+            .now = now});
         draw_dashboard_shell(clients, selected, dashboard, control_plane);
         ImGui::End();
 
@@ -6008,7 +6293,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             for (const auto& ev : g_remote_session->drain_events()) {
                 if (ev.state == nstu::server::RemoteSessionState::running) {
                     dashboard.control_status = tr(dashboard,
-                        "Remote session connected.", "Đã kết nối điều khiển từ xa.");
+                        "Viewer process running; media and input readiness are unconfirmed.",
+                        "Tiến trình xem đang chạy; chưa xác nhận hình ảnh và sẵn sàng nhận thao tác.");
                 } else if (ev.state == nstu::server::RemoteSessionState::failed) {
                     dashboard.control_status = tr(dashboard,
                         "Remote session failed: ", "Điều khiển từ xa thất bại: ") +
@@ -6096,6 +6382,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);
     g_snapshot_textures.clear();
+    g_brand_image.reset();
     g_imgui_ready = false;
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
