@@ -68,6 +68,7 @@ inline constexpr float badge = 6.0f;
 namespace geometry {
 inline constexpr float reference_dpi = 96.0f;
 inline constexpr float outline = 1.0f;
+inline constexpr float shell_compact_breakpoint = 1100.0f;
 inline constexpr float sidebar = 200.0f;
 inline constexpr float sidebar_compact = 176.0f;
 inline constexpr float header = 64.0f;
