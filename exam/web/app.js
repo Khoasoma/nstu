@@ -2801,8 +2801,7 @@
   }
 
   function hasAnswer(item) {
-    const answer = state.answers[item.id];
-    return Array.isArray(answer) ? answer.length > 0 : String(answer || "").trim().length > 0;
+    return !answerIsEmpty(state.answers[item.id]);
   }
 
   function renderQuestion() {
@@ -2880,7 +2879,7 @@
       input.type = "radio";
       input.name = item.id;
       input.value = String(index);
-      input.checked = String(state.answers[item.id] || "") === String(index);
+      input.checked = String(state.answers[item.id] ?? "") === String(index);
       input.addEventListener("change", () => saveAnswer(item.id, index));
       label.append(input, document.createTextNode(option));
       list.appendChild(label);

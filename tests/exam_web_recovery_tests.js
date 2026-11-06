@@ -2174,3 +2174,39 @@ for (const test of aggregationTests) {
 }
 assert.strictEqual(reviewFailures.length, 0, reviewFailures.join("\n"));
 console.log(`exam web recovery tests: ${43 + aggregationTests.length} passed`);
+
+function firstOptionHarness(storage = new FakeStorage()) {
+  const identity = contextFor("first-option-presentation");
+  const manifest = { ...MANIFEST, questions: [
+    { id: "q1", type: "multiple_choice", points: 1, prompt: "Choose", options: ["First", "Second"] },
+    { id: "q2", type: "short_answer", points: 1, prompt: "Independent answer" }
+  ] };
+  return { ...createHarness(identity, null, storage, { manifest, hosted: false }), identity };
+}
+function firstOptionInput(h) {
+  return h.document.getElementById("question-content").children.find(node =>
+    node.className === "option-list").children[0].children[0];
+}
+function testFirstOptionAnsweredMarker() {
+  const h = firstOptionHarness();
+  firstOptionInput(h).dispatchEvent({ type: "change" });
+  assert.equal(JSON.parse(h.localStorage.getItem(`${storageKey(h.identity)}:answers`)).q1, 0);
+  assert.match(h.document.getElementById("question-list").children[0].className, /\banswered\b/);
+}
+function testFirstOptionLanguageNavigationAndReload() {
+  const h = firstOptionHarness();
+  firstOptionInput(h).dispatchEvent({ type: "change" });
+  const language = h.document.getElementById("language-setting");
+  language.value = "vi";
+  language.dispatchEvent({ type: "change" });
+  assert.equal(firstOptionInput(h).checked, true);
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  h.document.querySelector('[data-action="previous"]').dispatchEvent({ type: "click" });
+  assert.equal(firstOptionInput(h).checked, true);
+  const reloaded = firstOptionHarness(h.localStorage);
+  assert.equal(firstOptionInput(reloaded).checked, true);
+  assert.equal(JSON.parse(reloaded.localStorage.getItem(`${storageKey(h.identity)}:answers`)).q1, 0);
+}
+testFirstOptionAnsweredMarker();
+testFirstOptionLanguageNavigationAndReload();
+console.log("exam first-option presentation regressions: 2 passed");
