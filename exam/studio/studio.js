@@ -851,6 +851,51 @@
     return manifest;
   }
 
+  async function readRunnerAsset(relativePath, maximumBytes) {
+    const response = await fetch(relativePath, { redirect: "error" });
+    if (!response.ok || new URL(response.url).origin !== location.origin || !response.body) {
+      throw new Error(`Runner asset unavailable: ${relativePath}`);
+    }
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        length += value.byteLength;
+        if (length > maximumBytes) throw new Error(`Runner asset exceeds limit: ${relativePath}`);
+        chunks.push(value);
+      }
+    } finally {
+      await reader.cancel();
+      reader.releaseLock();
+    }
+    const bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    return bytes;
+  }
+
+  async function verifiedBrandPng(bytes) {
+    if (bytes.byteLength !== 171569) throw new Error("Bundled NSTU image has an invalid length.");
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    const hex = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
+    if (hex !== "0b3cf7023212288d978bd898d0fa9ec1dcb7e82c92b678fa2bd1d42e18272486") {
+      throw new Error("Bundled NSTU image does not match the supplied artwork.");
+    }
+    return bytes;
+  }
+
+  function losslessRunnerText(bytes) {
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+    const encoded = new TextEncoder().encode(text);
+    if (!text || encoded.length !== bytes.length || encoded.some((value, index) => value !== bytes[index])) {
+      throw new Error("Runner text cannot be preserved as UTF8.");
+    }
+    return text;
+  }
+
   async function exportPackage() {
     // Sync current values from editor inputs
     currentExam.id = el("exam-id").value.trim();
@@ -890,22 +935,36 @@
       zip.add("manifest.json", manifestJson);
 
       // Add web runner files from template.js or relative fetch
-      const runner = window.NSTU_RUNNER_TEMPLATE || {};
-      if (runner.indexHtml && runner.stylesCss && runner.appJs) {
+      const runner = window.NSTU_RUNNER_TEMPLATE;
+      let brand;
+      if (runner !== undefined) {
+        if (!runner || ["indexHtml", "stylesCss", "appJs"].some(key => typeof runner[key] !== "string" || !runner[key])) {
+          throw new Error("Bundled runner text is incomplete.");
+        }
+        const base64 = runner.brandPngBase64;
+        if (typeof base64 !== "string" || base64.length !== 228760 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+          throw new Error("Bundled NSTU image encoding is invalid.");
+        }
+        const binary = atob(base64);
+        if (btoa(binary) !== base64) throw new Error("Bundled NSTU image encoding is not canonical.");
+        brand = await verifiedBrandPng(Uint8Array.from(binary, value => value.charCodeAt(0)));
         zip.add("exam/web/index.html", runner.indexHtml);
         zip.add("exam/web/styles.css", runner.stylesCss);
         zip.add("exam/web/app.js", runner.appJs);
       } else {
         // Fallback fetch
-        const [hRes, cRes, jRes] = await Promise.all([
-          fetch("../web/index.html").then(r => r.text()),
-          fetch("../web/styles.css").then(r => r.text()),
-          fetch("../web/app.js").then(r => r.text())
+        const [hRes, cRes, jRes, png] = await Promise.all([
+          readRunnerAsset("../web/index.html", 1024 * 1024),
+          readRunnerAsset("../web/styles.css", 1024 * 1024),
+          readRunnerAsset("../web/app.js", 1024 * 1024),
+          readRunnerAsset("../web/assets/nstu-brand.png", 171569)
         ]);
-        zip.add("exam/web/index.html", hRes);
-        zip.add("exam/web/styles.css", cRes);
-        zip.add("exam/web/app.js", jRes);
+        brand = await verifiedBrandPng(png);
+        zip.add("exam/web/index.html", losslessRunnerText(hRes));
+        zip.add("exam/web/styles.css", losslessRunnerText(cRes));
+        zip.add("exam/web/app.js", losslessRunnerText(jRes));
       }
+      zip.add("exam/web/assets/nstu-brand.png", brand);
 
       const result = await zip.build();
 
