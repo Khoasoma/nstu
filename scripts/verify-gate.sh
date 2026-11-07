@@ -31,6 +31,17 @@ step()  { printf '\n=== %s ===\n' "$1"; }
 pass()  { printf '  PASS  %s\n' "$1"; }
 fail()  { printf '  FAIL  %s\n' "$1"; FAILED=1; }
 note()  { printf '  NOTE  %s\n' "$1"; }
+verdict() {
+    printf '\n========================================\n'
+    if [ "$FAILED" -eq 0 ]; then
+        printf 'LOCAL GATE: PASS\n'
+        [ "$STRICT" -eq 0 ] && printf 'Run --strict before declaring done (CI is MSVC /WX Release).\n'
+        printf 'This does NOT prove CI will pass: CI uses MSVC, not GCC.\n'
+        exit 0
+    fi
+    printf 'LOCAL GATE: FAIL -- do not report this work as done.\n'
+    exit 1
+}
 
 # ---------------------------------------------------------------- rule checks
 step "Rule: no banned vendor names in code, targets, or filenames"
@@ -84,26 +95,43 @@ else
     pass "no assertions removed from tests/"
 fi
 
-step "Browser / Node suite (syntax and recovery tests)"
+step "Required current-source regressions (browser, Studio, tokens and package contracts)"
 if command -v node >/dev/null 2>&1; then
-    if node --check exam/web/app.js >/dev/null 2>&1; then
-        pass "node --check exam/web/app.js"
+    if node scripts/tests/required-regressions.mjs; then
+        pass "required current-source suites"
     else
-        fail "node --check exam/web/app.js failed"
+        fail "required current-source suites failed"
+        verdict
     fi
-    node_test_out="$(node tests/exam_web_recovery_tests.js 2>&1)"
-    if [ $? -eq 0 ]; then
-        pass "$node_test_out"
+    if node scripts/tests/verify-required-regressions-tests.mjs; then
+        pass "verification entrypoint fault tests"
     else
-        fail "node tests/exam_web_recovery_tests.js failed:"
-        printf '        %s\n' "$node_test_out"
+        fail "verification entrypoint fault tests failed"
+        verdict
     fi
 else
-    fail "node is not on PATH -- required to verify browser suite"
+    fail "node is not on PATH -- required to verify current-source regressions"
+    verdict
 fi
 
 # ---------------------------------------------------------------- build + test
 BUILD_OK=1
+GATE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/nstu-gate.XXXXXXXX")" || {
+    fail "cannot create owned verification log directory"
+    verdict
+}
+cleanup_logs() {
+    rm -f -- "$GATE_TMP/configure.log" "$GATE_TMP/build.log" "$GATE_TMP/tests.log"
+    rmdir -- "$GATE_TMP"
+}
+trap cleanup_logs EXIT
+CONFIG_LOG="$GATE_TMP/configure.log"
+BUILD_LOG="$GATE_TMP/build.log"
+TEST_LOG="$GATE_TMP/tests.log"
+if ! touch "$CONFIG_LOG" "$BUILD_LOG" "$TEST_LOG"; then
+    fail "cannot initialize owned verification logs"
+    verdict
+fi
 if [ "$STRICT" -eq 1 ]; then
     BUILD_DIR="build/gate"
     step "Build (strict: Release + NSTU_ENABLE_WERROR=ON, mirrors CI warnings)"
@@ -113,9 +141,12 @@ if [ "$STRICT" -eq 1 ]; then
     # manual deallocation. MSVC /WX -- the authoritative gate -- is clean on it.
     # Suppressed deliberately so a spurious diagnostic cannot pressure anyone
     # into changing correct code.
-    if ! cmake -S . -B "$BUILD_DIR" -G "MinGW Makefiles"               -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON               -DCMAKE_CXX_FLAGS="-Wno-free-nonheap-object" >/tmp/nstu-cfg.log 2>&1; then
-        fail "configure failed:"
-        tail -20 /tmp/nstu-cfg.log | sed 's/^/        /'
+    if cmake -S . -B "$BUILD_DIR" -G "MinGW Makefiles"               -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON               -DCMAKE_CXX_FLAGS="-Wno-free-nonheap-object" >"$CONFIG_LOG" 2>&1; then
+        pass "configure succeeded"
+    else
+        configure_exit=$?
+        fail "configure failed (exit $configure_exit):"
+        sed 's/^/        /' "$CONFIG_LOG"
         BUILD_OK=0
     fi
 else
@@ -127,7 +158,6 @@ else
     fi
 fi
 
-BUILD_LOG="$(mktemp)"
 if [ "$BUILD_OK" -eq 1 ]; then
     if cmake --build "$BUILD_DIR" -j 8 >"$BUILD_LOG" 2>&1; then
         pass "build succeeded"
@@ -160,24 +190,13 @@ step "Tests"
 if [ "$BUILD_OK" -eq 0 ]; then
     note "skipped -- build did not complete (running them would report 44 bogus failures)"
 else
-    TEST_LOG="$(mktemp)"
     if ctest --test-dir "$BUILD_DIR" --output-on-failure -j4 >"$TEST_LOG" 2>&1; then
         pass "$(grep -E 'tests passed' "$TEST_LOG" | tail -1)"
     else
         fail "ctest failed:"
         grep -E 'Failed|tests passed' "$TEST_LOG" | head -15 | sed 's/^/        /'
     fi
-    rm -f "$TEST_LOG"
 fi
-rm -f "$BUILD_LOG"
 
 # ---------------------------------------------------------------- verdict
-printf '\n========================================\n'
-if [ "$FAILED" -eq 0 ]; then
-    printf 'LOCAL GATE: PASS\n'
-    [ "$STRICT" -eq 0 ] && printf 'Run --strict before declaring done (CI is MSVC /WX Release).\n'
-    printf 'This does NOT prove CI will pass: CI uses MSVC, not GCC.\n'
-    exit 0
-fi
-printf 'LOCAL GATE: FAIL -- do not report this work as done.\n'
-exit 1
+verdict
