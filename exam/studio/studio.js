@@ -555,10 +555,13 @@
     q.options.forEach((optText, tokenIdx) => {
       if (placedTokenIndices.has(tokenIdx)) return; // Already placed in a slot
 
-      const chip = document.createElement("div");
+      const chip = document.createElement("button");
       chip.className = "drag-chip";
+      chip.type = "button";
       chip.draggable = true;
       chip.dataset.tokenIdx = tokenIdx;
+      chip.setAttribute("aria-label", `Heading ${tokenIdx + 1}: ${optText}`);
+      chip.setAttribute("aria-pressed", String(selectedTokenForPlacement === tokenIdx));
       chip.innerHTML = `
         <span class="chip-handle-icon">⠿</span>
         <span>${escapeHtml(optText)}</span>
@@ -581,12 +584,14 @@
 
       // Click to select (fallback for trackpad / touch)
       chip.addEventListener("click", () => {
+        const previousFocus = chip.contains(document.activeElement) ? document.activeElement : null;
         if (selectedTokenForPlacement === tokenIdx) {
           selectedTokenForPlacement = null;
         } else {
           selectedTokenForPlacement = tokenIdx;
         }
         renderPreviewMatching(q);
+        restoreMatchingFocus(q, "token", tokenIdx, previousFocus);
       });
 
       tray.appendChild(chip);
@@ -613,25 +618,43 @@
       slot.dataset.targetIdx = targetIdx;
 
       const assignedTokenIdx = currentAssignments[targetIdx];
+      const activation = document.createElement("button");
+      activation.type = "button";
+      activation.className = "target-select";
+      const hasAssignment = assignedTokenIdx !== undefined && assignedTokenIdx !== null;
+      const tokenText = hasAssignment ? q.options[assignedTokenIdx] || "" : "";
+      activation.setAttribute("aria-label", `Target ${targetIdx + 1}: ${tgtLabel}. ${hasAssignment ? `Assigned heading ${assignedTokenIdx + 1}: ${tokenText}` : "Unassigned"}`);
 
       if (assignedTokenIdx !== undefined && assignedTokenIdx !== null) {
         // Slot is filled
         slot.classList.add("filled");
-        const tokenText = q.options[assignedTokenIdx] || "";
-        slot.innerHTML = `
-          <div class="placed-chip">
-            <span>${escapeHtml(tokenText)}</span>
-            <button class="chip-remove-btn" type="button" title="Remove heading back to tray">✕</button>
-          </div>
-        `;
-        slot.querySelector(".chip-remove-btn").addEventListener("click", (e) => {
+        const placed = document.createElement("div");
+        placed.className = "placed-chip";
+        const text = document.createElement("span");
+        text.textContent = tokenText;
+        activation.appendChild(text);
+        const removal = document.createElement("button");
+        removal.className = "chip-remove-btn";
+        removal.type = "button";
+        removal.title = "Remove heading back to tray";
+        removal.textContent = "✕";
+        removal.setAttribute("aria-label", `Remove heading from target ${targetIdx + 1}: ${tgtLabel}`);
+        removal.addEventListener("click", (e) => {
+          const previousFocus = slot.contains(document.activeElement) ? document.activeElement : null;
           e.stopPropagation();
           delete currentAssignments[targetIdx];
           renderPreviewMatching(q);
+          restoreMatchingFocus(q, "target", targetIdx, previousFocus);
         });
+        placed.append(activation, removal);
+        slot.appendChild(placed);
       } else {
         // Slot is empty
-        slot.innerHTML = `<span class="slot-placeholder-text">Drop heading here or click to assign</span>`;
+        const placeholder = document.createElement("span");
+        placeholder.className = "slot-placeholder-text";
+        placeholder.textContent = "Drop heading here or click to assign";
+        activation.appendChild(placeholder);
+        slot.appendChild(activation);
       }
 
       // Drag Over / Leave
@@ -647,17 +670,21 @@
 
       // Drop
       slot.addEventListener("drop", (e) => {
+        const active = document.activeElement;
+        const previousFocus = tray.contains(active) || targetList.contains(active) ? active : null;
         e.preventDefault();
         slot.classList.remove("drag-over");
         const tokenIdxStr = e.dataTransfer.getData("text/plain");
         if (tokenIdxStr !== "") {
           const tIdx = parseInt(tokenIdxStr, 10);
           assignTokenToSlot(q, targetIdx, tIdx);
+          restoreMatchingFocus(q, "target", targetIdx, previousFocus);
         }
       });
 
       // Click to place
       slot.addEventListener("click", () => {
+        const previousFocus = slot.contains(document.activeElement) ? document.activeElement : null;
         if (selectedTokenForPlacement !== null) {
           assignTokenToSlot(q, targetIdx, selectedTokenForPlacement);
           selectedTokenForPlacement = null;
@@ -666,11 +693,26 @@
           delete currentAssignments[targetIdx];
           renderPreviewMatching(q);
         }
+        restoreMatchingFocus(q, "target", targetIdx, previousFocus);
       });
 
       row.append(labelBox, slot);
       targetList.appendChild(row);
     });
+  }
+
+  function restoreMatchingFocus(q, kind, index, previousFocus) {
+    if (!previousFocus || previousFocus.isConnected || previousFocus.ownerDocument !== document ||
+        currentExam.questions[previewIndex] !== q || getComputedStyle(el("preview-view")).display === "none" ||
+        el("export-modal").classList.contains("open")) return;
+    const target = kind === "token"
+      ? Array.from(el("p-token-tray").children).find(node => Number(node.dataset.tokenIdx) === index)
+      : Array.from(el("p-target-list").children).map(row => row.children[1])
+        .find(node => Number(node?.dataset.targetIdx) === index)?.querySelector(".target-select");
+    if (usableExportFocus(target)) {
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    }
   }
 
   function assignTokenToSlot(q, targetIdx, tokenIdx) {
@@ -1095,6 +1137,21 @@
     });
   }
 
+  let matchingResizeFrame = null;
+  function queueMatchingFocusReveal() {
+    if (matchingResizeFrame !== null) window.cancelAnimationFrame(matchingResizeFrame);
+    matchingResizeFrame = null;
+    if (getComputedStyle(el("preview-view")).display === "none") return;
+    matchingResizeFrame = window.requestAnimationFrame(() => {
+      matchingResizeFrame = null;
+      const active = document.activeElement;
+      if (getComputedStyle(el("preview-view")).display === "none" ||
+          !currentExam.questions[previewIndex]?.isMatching || el("export-modal").classList.contains("open") ||
+          !el("p-matching-surface").contains(active) || !usableExportFocus(active)) return;
+      active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    });
+  }
+
   let numericDraftModel = null;
   let numericDraftOwners = new WeakMap();
   const numericFields = {
@@ -1464,6 +1521,7 @@
     el("btn-cancel-export").addEventListener("click", closeExportDialog);
     document.addEventListener("keydown", handleExportDialogKey);
     window.addEventListener("resize", queueAuthoringFocusReveal);
+    window.addEventListener("resize", queueMatchingFocusReveal);
 
     // Add Question
     el("btn-add-question").addEventListener("click", () => {
