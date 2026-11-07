@@ -1132,16 +1132,15 @@
   function saveDraft() {
     syncExamMetadata();
 
-    const manifestObj = compileManifest(currentExam);
-    const jsonStr = JSON.stringify(manifestObj, null, 2);
+    const jsonStr = JSON.stringify(currentExam, null, 2);
     const blob = new Blob([jsonStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${currentExam.id}-manifest.json`;
+    a.download = `${currentExam.id}-draft.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast("Manifest draft downloaded", "success");
+    showToast("Authoring draft downloaded", "success");
   }
 
   function escapeHtml(str) {

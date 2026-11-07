@@ -447,18 +447,19 @@ class ImportDomNode {
 
 const zipSource = await readFile(new URL('exam/studio/zip.js', root), 'utf8');
 const importInstrumentation = `
-  const importStats = { reset:0, editor:0, preview:0, matching:0, mc:0, forms:[] };
+  const importStats = { reset:0, editor:0, preview:0, matching:0, mc:0, compile:0, forms:[] };
   const originalImportReset=resetPreviewState, originalImportEditor=renderEditor,
     originalImportPreview=renderPreview, originalImportMatching=renderPreviewMatching,
-    originalImportMc=renderPreviewMc, originalImportForm=renderActiveQuestionForm;
+    originalImportMc=renderPreviewMc, originalImportForm=renderActiveQuestionForm, originalImportCompiler=compileManifest;
   resetPreviewState=()=>{importStats.reset++;return originalImportReset();};
   renderEditor=()=>{importStats.editor++;return originalImportEditor();};
   renderPreview=()=>{importStats.preview++;return originalImportPreview();};
   renderPreviewMatching=q=>{importStats.matching++;return originalImportMatching(q);};
   renderPreviewMc=q=>{importStats.mc++;return originalImportMc(q);};
   renderActiveQuestionForm=()=>{importStats.forms.push(currentExam.questions[activeQuestionIndex]?.type);return originalImportForm();};
+  compileManifest=exam=>{importStats.compile++;return originalImportCompiler(exam);};
   window.importProbe={
-    load:handleImportFile, stats:importStats,
+    load:handleImportFile, save:saveDraft, sync:syncExamMetadata, stats:importStats,
     inspect:()=>({exam:currentExam,active:activeQuestionIndex,index:previewIndex,answers:previewAnswers,token:selectedTokenForPlacement}),
     seed:(exam,answers,open)=>{currentExam=exam;activeQuestionIndex=1;previewIndex=0;previewAnswers=answers;selectedTokenForPlacement=1;el('preview-view').style.display=open?'flex':'none';renderEditor();if(open)renderPreview();Object.assign(importStats,{reset:0,editor:0,preview:0,matching:0,mc:0,forms:[]});},
     place:(target,token)=>assignTokenToSlot(currentExam.questions[previewIndex],target,token),
@@ -467,11 +468,15 @@ const importInstrumentation = `
 `;
 async function actualImportHarness(reader) {
   const nodes = new Map(), getNode = id => { if (!nodes.has(id)) nodes.set(id, new ImportDomNode(id)); return nodes.get(id); };
+  const downloads = [], blobs = new Map();
+  class DownloadURL extends URL { static createObjectURL(blob) { const url='blob:test-'+blobs.size;blobs.set(url,blob);return url; } static revokeObjectURL() {} }
   getNode('preview-view').style.display = 'none';
-  const globals = { window: { addEventListener() {} }, document: { readyState: 'complete', documentElement: { dataset: {} }, getElementById: getNode, createElement: () => new ImportDomNode(), addEventListener() {} },
+  const globals = { window: { addEventListener() {} }, document: { readyState: 'complete', documentElement: { dataset: {} }, getElementById: getNode, createElement: tag => {
+    const node=new ImportDomNode();if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;
+  }, addEventListener() {} },
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
     TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
-    crypto: (await import('node:crypto')).webcrypto, URL, location: { origin:'http://studio.test' } };
+    crypto: (await import('node:crypto')).webcrypto, URL:DownloadURL, location: { origin:'http://studio.test' } };
   const context = vm.createContext(globals);
   vm.runInContext(zipSource, context); context.NstuZip = globals.window.NstuZip;
   if (reader) context.NstuZip = { ...context.NstuZip, Reader: reader };
@@ -482,7 +487,7 @@ async function actualImportHarness(reader) {
     {id:'old-match',type:'reading',prompt:'Old matching',isMatching:true,options:['Old A','Old B'],matchingTargets:['A','B']},
     {id:'old-short',type:'short_answer',prompt:'Old short'}] };
   const answers = {'old-match':{0:0},'old-short':'old answer'};
-  return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip,
+  return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip, downloads,
     seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
 }
 const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
@@ -602,3 +607,29 @@ for(const format of ['json','zip'])for(const open of [false,true]) {
   const retained=await acceptedImport(inert,format,open);assert.equal(JSON.stringify(retained.after.exam),JSON.stringify(inert));acceptedCases++;
 }
 console.log(`Studio actual import/render admission: ${rejectedCases} negative and ${acceptedCases} positive cases passed`);
+
+// Save's actual handler must preserve authoring data after its existing metadata sync.
+let authoringSaveCases=0;
+for(const matching of [false,true])for(const points of [0,101,1.25]) {
+  const h=await actualImportHarness();h.seed(false);const model={id:'authoring-save',title:'Original',subject:'Subject',durationSeconds:600,
+    allowedOrigins:['old.example'],candidate:'Inert candidate',documents:[{id:'doc',url:'paper.pdf',title:'Paper'}],extra:{kept:['literal']},questions:[{
+      id:'question-one',type:'reading',prompt:'NFC ế / NFD e\u0302\u0301 / 𝄞',instruction:'',points,wordLimit:9.5,
+      options:['A',''],isMatching:matching,matchingTargets:[''],passage:'',answerPlaceholder:'',pdf:'paper.pdf',authoringExtension:{kept:true}
+    }]};
+  await h.probe.load(jsonImport(model));
+  h.node('exam-title').value='  Saved authoring title  ';h.node('exam-subject').value='  Saved subject  ';h.node('exam-duration').value='17';
+  h.node('exam-allowed-origins').value='alpha.example\nalpha.example\nbeta.example';
+  h.probe.save();assert.equal(h.downloads.length,1);assert.equal(h.downloads[0].filename,'authoring-save-draft.json');
+  assert.equal(h.node('toast-container').children.at(-1).textContent,'Authoring draft downloaded');
+  assert.equal(h.downloads[0].blob.type,'application/json');assert.equal(h.probe.stats.compile,0,'Save must not invoke the runtime compiler');
+  const text=await h.downloads[0].blob.text(), saved=JSON.parse(text), post=h.probe.inspect().exam;
+  assert.equal(JSON.stringify(saved),JSON.stringify(post));assert.equal(saved.questions[0].points,points);assert.equal(saved.questions[0].isMatching,matching);
+  assert.deepEqual(saved.questions[0].matchingTargets,['']);assert.equal(saved.questions[0].wordLimit,9.5);assert.equal(saved.questions[0].passage,'');assert.equal(saved.questions[0].answerPlaceholder,'');
+  assert.equal(saved.title,'Saved authoring title');assert.equal(saved.subject,'Saved subject');assert.equal(saved.durationSeconds,1020);assert.deepEqual(saved.allowedOrigins,['alpha.example','beta.example']);
+  assert.equal(saved.questions[0].prompt,model.questions[0].prompt);assert.deepEqual(saved.extra,model.extra);assert.equal(saved.questions[0].pdf,'paper.pdf');
+  await h.probe.load({name:'saved-draft.json',text:async()=>text});assert.equal(h.probe.inspect().exam.questions[0].isMatching,matching);
+  assert.equal(h.probe.inspect().exam.questions[0].matchingTargets[0],'');authoringSaveCases++;
+}
+const studioMarkup=await readFile(new URL('exam/studio/index.html',root),'utf8');
+assert.match(studioMarkup,/<button class="btn btn-primary" id="btn-save-draft" type="button" title="Save authoring draft JSON">/);
+console.log(`Studio actual authoring Save payload and roundtrip: ${authoringSaveCases} cases passed`);
