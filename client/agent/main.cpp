@@ -1,4 +1,5 @@
 #include "nstu/agent_protocol.hpp"
+#include "nstu/service_pairing_confirmation.hpp"
 #include "nstu/exam_profile.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
@@ -13,6 +14,7 @@
 #include <objbase.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -86,7 +88,13 @@ constexpr int kChatSend = 1003;
 constexpr int kChatHelp = 1006;
 constexpr int kPairingList = 1004;
 constexpr int kPairingConnect = 1005;
+constexpr int kPairingTeacherInput = 1010;
+constexpr int kPairingMatch = 1011;
+constexpr int kPairingDiffer = 1012;
+constexpr int kPairingReject = 1013;
+constexpr int kPairingInputLabel = 1014;
 constexpr UINT_PTR kPairingStatusTimer = 1;
+constexpr UINT_PTR kPairingExpiryTimer = 2;
 
 HWND g_chat_window = nullptr;
 HWND g_chat_messages = nullptr;
@@ -101,8 +109,9 @@ UINT g_ui_font_dpi = 0;
 HWND g_lock_window = nullptr;
 HWND g_annotation_window = nullptr;
 HWND g_broadcast_window = nullptr;
-HWND g_pairing_window = nullptr;
+std::atomic<HWND> g_pairing_window = nullptr;
 HWND g_pairing_list = nullptr;
+HWND g_pairing_teacher_input = nullptr;
 nstu::client::ExamHost g_exam_host;
 std::atomic_bool g_agent_stopping = false;
 std::atomic_bool g_locked = false;
@@ -130,6 +139,7 @@ std::mutex g_broadcast_mutex;
 nstu::screen::BgraImage g_broadcast_image;
 std::mutex g_service_queue_mutex;
 nstu::client::AgentServiceQueue g_service_queue;
+std::deque<nstu::client::AgentMessage> g_pairing_replies;
 bool g_exam_controls_suppressed = false;
 bool g_chat_was_visible_for_exam = false;
 bool g_lock_was_visible_for_exam = false;
@@ -162,6 +172,7 @@ enum class PairingView {
     choices,
     waiting,
     code,
+    confirmation,
     status,
 };
 
@@ -170,6 +181,29 @@ PairingView g_pairing_view = PairingView::hidden;
 std::vector<nstu::client::AgentPairingChoice> g_pairing_choices;
 std::wstring g_pairing_caption;
 std::wstring g_pairing_code;
+nstu::client::AgentPairingNativeConfirmation g_pairing_confirmation;
+// UI-thread-owned binding for the actual empty edit/control presentation.
+// A pipe supersession can precede its posted update; an old edit must not
+// acknowledge the new token during an intervening paint or button click.
+std::optional<nstu::client::AgentPairingAttemptToken> g_pairing_controls_token;
+
+void discard_pairing_replies() {
+    std::scoped_lock lock(g_service_queue_mutex);
+    g_pairing_replies.clear();
+}
+
+bool queue_pairing_reply(const nstu::client::AgentPairingConfirmationReply& reply) {
+    std::scoped_lock lock(g_service_queue_mutex);
+    if (g_pairing_replies.size() >= 2) return false;
+    g_pairing_replies.push_back({nstu::client::AgentMessageType::pairing_confirmation_reply,
+        nstu::client::encode_agent_pairing_confirmation_reply(reply)});
+    return true;
+}
+
+nstu::client::PairingNativeControls pairing_controls(HWND window) {
+    return {window, g_pairing_teacher_input, GetDlgItem(window, kPairingMatch),
+        GetDlgItem(window, kPairingDiffer), GetDlgItem(window, kPairingReject), g_pairing_controls_token};
+}
 
 void queue_service_message(nstu::client::AgentMessage message) noexcept {
     if (message.payload.size() > nstu::client::kMaximumAgentPayloadBytes) {
@@ -235,6 +269,8 @@ void show_pairing_code(const nstu::client::AgentPairingCode& code) {
 void show_pairing_status(const nstu::client::AgentPairingStatus& status) {
     {
         std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_confirmation.disconnect();
+        discard_pairing_replies();
         g_pairing_caption = widen_ascii(status.detail);
         g_pairing_code.clear();
         g_pairing_view = PairingView::status;
@@ -247,6 +283,8 @@ void show_pairing_status(const nstu::client::AgentPairingStatus& status) {
 void hide_pairing_view() {
     {
         std::scoped_lock lock(g_pairing_mutex);
+        g_pairing_confirmation.disconnect();
+        discard_pairing_replies();
         g_pairing_view = PairingView::hidden;
         g_pairing_choices.clear();
         g_pairing_caption.clear();
@@ -311,6 +349,10 @@ bool flush_service_messages(nstu::client::NamedPipe& pipe) noexcept {
     {
         std::scoped_lock lock(g_service_queue_mutex);
         pending = g_service_queue.take_pending();
+        while (!g_pairing_replies.empty()) {
+            pending.push_back(std::move(g_pairing_replies.front()));
+            g_pairing_replies.pop_front();
+        }
     }
     while (!pending.empty()) {
         auto message = std::move(pending.front());
@@ -322,11 +364,13 @@ bool flush_service_messages(nstu::client::NamedPipe& pipe) noexcept {
         // The already-sent prefix must not be replayed here; the service's
         // durable outbox handles duplicate answer events separately.
         std::scoped_lock lock(g_service_queue_mutex);
+        nstu::client::discard_pairing_confirmation_messages(pending);
         while (!pending.empty()) {
             g_service_queue.push(std::move(pending.back()), true);
             pending.pop_back();
         }
-        g_service_queue.push(std::move(message), true);
+        if (message.type != nstu::client::AgentMessageType::pairing_confirmation_reply)
+            g_service_queue.push(std::move(message), true);
         return false;
     }
     return true;
@@ -989,6 +1033,41 @@ void pipe_control_loop(HWND overlay) {
                                      static_cast<LPARAM>(connected ? 1 : 0));
                     }
                 } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_confirmation_request) {
+                    if (const auto request = nstu::client::decode_agent_pairing_confirmation_request(message->payload)) {
+                        std::scoped_lock lock(g_pairing_mutex);
+                        discard_pairing_replies();
+                        if (g_pairing_confirmation.receive(*request, GetTickCount64())) {
+                            g_pairing_code = widen_ascii(request->code.substr(0, 3) + " " + request->code.substr(3));
+                            g_pairing_caption = L"Compare with your teacher on \"" + widen_ascii(request->server_name) +
+                                L"\". Enter the six digits from the teacher's screen, then choose Codes match.";
+                            g_pairing_view = PairingView::confirmation;
+                            if (!g_pairing_window || !PostMessageW(g_pairing_window, kPairingUpdatedMessage, 0, 0)) {
+                                const auto reply = g_pairing_confirmation.choose({}, request->attempt_token,
+                                    nstu::client::AgentPairingConfirmationChoice::no_ui, GetTickCount64());
+                                if (reply) (void)queue_pairing_reply(*reply);
+                                g_pairing_view = PairingView::hidden;
+                            }
+                        } else {
+                            g_pairing_view = PairingView::hidden;
+                            g_pairing_caption.clear();
+                            g_pairing_code.clear();
+                            notify_pairing_view();
+                        }
+                    }
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_confirmation_end) {
+                    if (const auto token = nstu::client::decode_agent_pairing_confirmation_end(message->payload)) {
+                        std::scoped_lock lock(g_pairing_mutex);
+                        if (g_pairing_confirmation.end(*token)) {
+                            discard_pairing_replies();
+                            g_pairing_view = PairingView::hidden;
+                            g_pairing_code.clear();
+                            g_pairing_caption.clear();
+                            notify_pairing_view();
+                        }
+                    }
+                } else if (message->type ==
                            nstu::client::AgentMessageType::pairing_choices) {
                     if (auto choices =
                             nstu::client::decode_agent_pairing_choices(
@@ -1619,23 +1698,44 @@ void submit_pairing_selection(HWND window) {
     PostMessageW(window, kPairingUpdatedMessage, 0, 0);
 }
 
-void draw_pairing_text(HDC device, const RECT& area, int height,
+bool draw_pairing_text(HDC device, const RECT& area, int height,
                        int weight, const wchar_t* face,
                        COLORREF color, const std::wstring& content,
                        UINT format) {
     if (content.empty()) {
-        return;
+        return false;
     }
     const HFONT font = CreateFontW(
         height, 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         DEFAULT_PITCH, face);
+    if (!font || !device) { if (font) DeleteObject(font); return false; }
     const auto previous = SelectObject(device, font);
     SetTextColor(device, color);
     RECT bounds = area;
-    DrawTextW(device, content.c_str(), -1, &bounds, format);
+    const bool drawn = DrawTextW(device, content.c_str(), -1, &bounds, format) > 0;
     SelectObject(device, previous);
     DeleteObject(font);
+    return drawn;
+}
+
+void submit_pairing_confirmation(HWND window, nstu::client::AgentPairingConfirmationChoice choice) {
+    {
+        std::scoped_lock lock(g_pairing_mutex);
+        if (!g_pairing_confirmation.request()) return;
+        const auto token = g_pairing_confirmation.request()->attempt_token;
+        const auto reply = g_pairing_confirmation.choose(pairing_controls(window), token, choice, GetTickCount64());
+        if (!reply) return;
+        if (!queue_pairing_reply(*reply)) g_pairing_confirmation.disconnect();
+        if (g_pairing_confirmation.awaiting_teacher()) {
+            g_pairing_caption = L"You confirmed the codes match. Keep these digits visible while your teacher compares and approves. Cancel to stop pairing.";
+        } else {
+            g_pairing_view = PairingView::hidden;
+            g_pairing_caption.clear();
+            g_pairing_code.clear();
+        }
+    }
+    notify_pairing_view();
 }
 
 LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
@@ -1661,17 +1761,37 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingConnect)),
             GetModuleHandleW(nullptr), nullptr);
         (void)connect;
+        CreateWindowExW(0, L"STATIC", L"Teacher's six-digit code:", WS_CHILD | SS_CENTER,
+            dpi_scaled(16, dpi), dpi_scaled(196, dpi), dpi_scaled(452, dpi), dpi_scaled(20, dpi),
+            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingInputLabel)),
+            GetModuleHandleW(nullptr), nullptr);
+        g_pairing_teacher_input = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_TABSTOP | ES_NUMBER | ES_CENTER | ES_AUTOHSCROLL,
+            dpi_scaled(190, dpi), dpi_scaled(218, dpi), dpi_scaled(104, dpi), dpi_scaled(28, dpi),
+            window, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPairingTeacherInput)),
+            GetModuleHandleW(nullptr), nullptr);
+        SendMessageW(g_pairing_teacher_input, EM_SETLIMITTEXT, 6, 0);
+        const std::array<std::pair<int, const wchar_t*>, 3> buttons{{
+            {kPairingMatch, L"Codes match"}, {kPairingDiffer, L"Codes differ"}, {kPairingReject, L"Reject"}}};
+        for (std::size_t index = 0; index < buttons.size(); ++index) {
+            CreateWindowExW(0, L"BUTTON", buttons[index].second, WS_CHILD | WS_TABSTOP | BS_OWNERDRAW,
+                dpi_scaled(16 + static_cast<int>(index) * 152, dpi), dpi_scaled(268, dpi),
+                dpi_scaled(140, dpi), dpi_scaled(28, dpi), window,
+                reinterpret_cast<HMENU>(static_cast<INT_PTR>(buttons[index].first)), GetModuleHandleW(nullptr), nullptr);
+        }
         EnumChildWindows(window, set_child_font,
                          reinterpret_cast<LPARAM>(ui_font(dpi)));
         return 0;
     }
     case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLOREDIT:
         return themed_control_color(wparam, kControlColor, control_brush());
     case WM_CTLCOLORSTATIC:
         return themed_control_color(wparam, kSurfaceColor, surface_brush());
     case WM_DRAWITEM: {
         const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lparam);
-        if (item == nullptr || item->CtlID != kPairingConnect) {
+        if (item == nullptr || (item->CtlID != kPairingConnect && item->CtlID != kPairingMatch &&
+            item->CtlID != kPairingDiffer && item->CtlID != kPairingReject)) {
             break;
         }
         const bool pressed = (item->itemState & ODS_SELECTED) != 0;
@@ -1689,7 +1809,7 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
         GetWindowTextW(item->hwndItem, caption,
                        static_cast<int>(std::size(caption)));
         SetBkMode(item->hDC, TRANSPARENT);
-        SetTextColor(item->hDC, kTextColor);
+        SetTextColor(item->hDC, (item->itemState & ODS_DISABLED) ? kMutedTextColor : kTextColor);
         RECT text_area = item->rcItem;
         DrawTextW(item->hDC, caption, -1, &text_area,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -1714,6 +1834,13 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
             MoveWindow(connect, dpi_scaled(368, dpi), dpi_scaled(218, dpi),
                        dpi_scaled(100, dpi), dpi_scaled(28, dpi), TRUE);
         }
+        MoveWindow(g_pairing_teacher_input, dpi_scaled(190, dpi), dpi_scaled(218, dpi),
+            dpi_scaled(104, dpi), dpi_scaled(28, dpi), TRUE);
+        MoveWindow(GetDlgItem(window, kPairingInputLabel), dpi_scaled(16, dpi), dpi_scaled(196, dpi),
+            dpi_scaled(452, dpi), dpi_scaled(20, dpi), TRUE);
+        for (int index = 0; index < 3; ++index)
+            MoveWindow(GetDlgItem(window, kPairingMatch + index), dpi_scaled(16 + index * 152, dpi),
+                dpi_scaled(268, dpi), dpi_scaled(140, dpi), dpi_scaled(28, dpi), TRUE);
         EnumChildWindows(window, set_child_font,
                          reinterpret_cast<LPARAM>(ui_font(dpi)));
         InvalidateRect(window, nullptr, TRUE);
@@ -1722,12 +1849,36 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
     case kPairingUpdatedMessage: {
         PairingView view = PairingView::hidden;
         std::vector<nstu::client::AgentPairingChoice> choices;
+        bool awaiting_teacher = false;
+        std::optional<nstu::client::AgentPairingAttemptToken> current_token;
         {
             std::scoped_lock lock(g_pairing_mutex);
             view = g_pairing_view;
             choices = g_pairing_choices;
+            awaiting_teacher = g_pairing_confirmation.awaiting_teacher();
+            if (g_pairing_confirmation.request()) current_token = g_pairing_confirmation.request()->attempt_token;
         }
         const bool choosing = view == PairingView::choices;
+        const bool confirming = view == PairingView::confirmation && current_token.has_value();
+        const bool fresh_prompt = confirming && g_pairing_controls_token != current_token;
+        if (fresh_prompt && !nstu::client::reset_pairing_native_input(g_pairing_teacher_input,
+                *current_token, g_pairing_controls_token)) {
+            submit_pairing_confirmation(window, nstu::client::AgentPairingConfirmationChoice::no_ui);
+            ShowWindow(window, SW_HIDE);
+            return 0;
+        }
+        if (!confirming) g_pairing_controls_token.reset();
+        ShowWindow(g_pairing_teacher_input, confirming ? SW_SHOW : SW_HIDE);
+        ShowWindow(GetDlgItem(window, kPairingInputLabel), confirming ? SW_SHOW : SW_HIDE);
+        EnableWindow(g_pairing_teacher_input, !awaiting_teacher);
+        for (int id = kPairingMatch; id <= kPairingReject; ++id) {
+            const auto button = GetDlgItem(window, id);
+            ShowWindow(button, confirming ? SW_SHOW : SW_HIDE);
+            EnableWindow(button, id == kPairingReject || !awaiting_teacher);
+        }
+        SetWindowTextW(GetDlgItem(window, kPairingReject), awaiting_teacher ? L"Cancel" : L"Reject");
+        KillTimer(window, kPairingExpiryTimer);
+        if (confirming) SetTimer(window, kPairingExpiryTimer, 250, nullptr);
         if (g_pairing_list != nullptr) {
             if (choosing) {
                 SendMessageW(g_pairing_list, LB_RESETCONTENT, 0, 0);
@@ -1761,9 +1912,25 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
         InvalidateRect(window, nullptr, TRUE);
         ShowWindow(window, SW_SHOW);
         SetForegroundWindow(window);
+        if (fresh_prompt) SetFocus(g_pairing_teacher_input);
         return 0;
     }
     case WM_TIMER:
+        if (wparam == kPairingExpiryTimer) {
+            bool expired = false;
+            {
+                std::scoped_lock lock(g_pairing_mutex);
+                if (const auto reply = g_pairing_confirmation.expire(GetTickCount64())) {
+                    (void)queue_pairing_reply(*reply);
+                    g_pairing_view = PairingView::hidden;
+                    g_pairing_code.clear();
+                    g_pairing_caption.clear();
+                    expired = true;
+                }
+            }
+            if (expired) notify_pairing_view();
+            return 0;
+        }
         if (wparam == kPairingStatusTimer) {
             KillTimer(window, kPairingStatusTimer);
             hide_pairing_view();
@@ -1771,6 +1938,19 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
         }
         break;
     case WM_COMMAND:
+        if (LOWORD(wparam) == IDCANCEL ||
+            (LOWORD(wparam) == kPairingReject && HIWORD(wparam) == BN_CLICKED)) {
+            submit_pairing_confirmation(window, nstu::client::AgentPairingConfirmationChoice::cancelled);
+            ShowWindow(window, SW_HIDE);
+            return 0;
+        }
+        if (HIWORD(wparam) == BN_CLICKED &&
+            (LOWORD(wparam) == kPairingMatch || LOWORD(wparam) == kPairingDiffer)) {
+            submit_pairing_confirmation(window, LOWORD(wparam) == kPairingMatch
+                ? nstu::client::AgentPairingConfirmationChoice::confirmed
+                : nstu::client::AgentPairingConfirmationChoice::mismatched_code);
+            return 0;
+        }
         if ((LOWORD(wparam) == kPairingConnect &&
              HIWORD(wparam) == BN_CLICKED) ||
             (LOWORD(wparam) == kPairingList &&
@@ -1788,37 +1968,51 @@ LRESULT CALLBACK pairing_window_proc(HWND window, UINT message,
         const UINT dpi = cached_or_window_dpi(g_pairing_window_dpi, window);
         std::wstring caption;
         std::wstring code;
+        std::optional<nstu::client::AgentPairingConfirmationRequest> rendered_request;
         {
             std::scoped_lock lock(g_pairing_mutex);
             caption = g_pairing_caption;
             code = g_pairing_code;
+            rendered_request = g_pairing_confirmation.request();
         }
         SetBkMode(device, TRANSPARENT);
         const RECT caption_area{dpi_scaled(16, dpi), dpi_scaled(16, dpi),
                                 client.right - dpi_scaled(16, dpi),
                                 dpi_scaled(92, dpi)};
-        draw_pairing_text(device, caption_area, -dpi_scaled(16, dpi),
+        const bool caption_drawn = draw_pairing_text(device, caption_area, -dpi_scaled(16, dpi),
                           FW_NORMAL, L"Segoe UI", kTextColor, caption,
                           DT_WORDBREAK | DT_NOPREFIX);
         const RECT code_area{dpi_scaled(16, dpi), dpi_scaled(100, dpi),
                              client.right - dpi_scaled(16, dpi),
-                             dpi_scaled(200, dpi)};
-        draw_pairing_text(device, code_area, -dpi_scaled(56, dpi), FW_BOLD,
+                             dpi_scaled(188, dpi)};
+        const bool code_drawn = draw_pairing_text(device, code_area, -dpi_scaled(56, dpi), FW_BOLD,
                           L"Consolas", kAccentColor, code,
                           DT_CENTER | DT_SINGLELINE | DT_VCENTER |
                               DT_NOPREFIX);
-        EndPaint(window, &paint);
+        const bool paint_completed = EndPaint(window, &paint) != FALSE;
+        if (rendered_request) {
+            const auto expected = widen_ascii(rendered_request->code.substr(0, 3) + " " + rendered_request->code.substr(3));
+            std::scoped_lock lock(g_pairing_mutex);
+            (void)g_pairing_confirmation.present(pairing_controls(window), rendered_request->attempt_token,
+                rendered_request->code, caption_drawn && code_drawn && paint_completed && code == expected &&
+                    g_pairing_controls_token == rendered_request->attempt_token &&
+                    paint.rcPaint.left <= caption_area.left && paint.rcPaint.top <= caption_area.top &&
+                    paint.rcPaint.right >= code_area.right && paint.rcPaint.bottom >= code_area.bottom,
+                GetTickCount64());
+        }
         return 0;
     }
     case WM_CLOSE:
-        // Closing the window declines nothing; the request is the service's
-        // and the server still has to answer it.
+        submit_pairing_confirmation(window, nstu::client::AgentPairingConfirmationChoice::cancelled);
         ShowWindow(window, SW_HIDE);
         return 0;
     case WM_DESTROY:
+        submit_pairing_confirmation(window, nstu::client::AgentPairingConfirmationChoice::cancelled);
         KillTimer(window, kPairingStatusTimer);
+        KillTimer(window, kPairingExpiryTimer);
         g_pairing_window = nullptr;
         g_pairing_list = nullptr;
+        g_pairing_teacher_input = nullptr;
         return 0;
     default:
         break;
@@ -2340,7 +2534,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     // refuses the window can still be managed once it is paired, so a
     // failure here is not fatal - every use of it is guarded.
     const int kPairingWidth = dpi_scaled(500, primary_dpi);
-    const int kPairingHeight = dpi_scaled(300, primary_dpi);
+    const int kPairingHeight = dpi_scaled(360, primary_dpi);
     g_pairing_window = CreateWindowExW(
         WS_EX_TOPMOST, kPairingWindowClass, L"NSTU setup",
         WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,

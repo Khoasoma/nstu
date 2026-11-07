@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <deque>
 #include <optional>
 #include <span>
@@ -89,6 +90,11 @@ enum class AgentMessageType : std::uint16_t {
     // Teacher demonstration mode configuration (Focus vs Follow-Along, input lock).
     // service -> agent: carries encoded BroadcastModeMessage payload.
     host_broadcast_mode = 41,
+    // Additive, local-only human confirmation. Existing pairing/network
+    // payloads retain their values and layouts; old peers fail closed.
+    pairing_confirmation_request = 42,
+    pairing_confirmation_reply = 43,
+    pairing_confirmation_end = 44,
 };
 
 struct AgentMessage {
@@ -129,6 +135,34 @@ struct AgentPairingCode {
 struct AgentPairingStatus {
     std::uint8_t outcome = 0;
     std::string detail;
+};
+
+// A prompt correlation value, never a key or enrollment credential.
+using AgentPairingAttemptToken = std::array<std::byte, 16>;
+
+enum class AgentPairingConfirmationChoice : std::uint8_t {
+    confirmed = 1,
+    rejected = 2,
+    mismatched_code = 3,
+    timed_out = 4,
+    no_ui = 5,
+    cancelled = 6,
+};
+
+struct AgentPairingConfirmationRequest {
+    AgentPairingAttemptToken attempt_token{};
+    // Absolute local GetTickCount64 time. Consumers validate the remaining
+    // bounded lifetime; the codec only validates wire structure/nonzero time.
+    std::uint64_t expires_at_ms = 0;
+    std::string code;
+    std::string server_name;
+};
+
+struct AgentPairingConfirmationReply {
+    AgentPairingAttemptToken attempt_token{};
+    AgentPairingConfirmationChoice choice = AgentPairingConfirmationChoice::no_ui;
+    bool code_shown = false;
+    std::string confirmed_code;
 };
 
 struct AgentStatus {
@@ -183,6 +217,19 @@ decode_agent_pairing_choices(std::span<const std::byte> payload);
     const AgentPairingStatus& status);
 [[nodiscard]] std::optional<AgentPairingStatus> decode_agent_pairing_status(
     std::span<const std::byte> payload);
+
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_confirmation_request(
+    const AgentPairingConfirmationRequest& request);
+[[nodiscard]] std::optional<AgentPairingConfirmationRequest>
+decode_agent_pairing_confirmation_request(std::span<const std::byte> payload);
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_confirmation_reply(
+    const AgentPairingConfirmationReply& reply);
+[[nodiscard]] std::optional<AgentPairingConfirmationReply>
+decode_agent_pairing_confirmation_reply(std::span<const std::byte> payload);
+[[nodiscard]] std::vector<std::byte> encode_agent_pairing_confirmation_end(
+    const AgentPairingAttemptToken& attempt_token);
+[[nodiscard]] std::optional<AgentPairingAttemptToken>
+decode_agent_pairing_confirmation_end(std::span<const std::byte> payload);
 
 [[nodiscard]] std::vector<std::byte> encode_remote_input(
     const wire::RemoteInputPacket& packet);

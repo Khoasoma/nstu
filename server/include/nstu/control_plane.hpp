@@ -57,6 +57,24 @@ struct PendingPairing {
     std::uint32_t seconds_remaining = 0;
 };
 
+enum class PairingRequestStage {
+    awaiting_client_confirmation,
+    awaiting_teacher_approval,
+};
+
+// Read-only offered/pending metadata for bilateral SAS comparison. Names and
+// addresses are unverified claims. Only the existing confirmed-only approval
+// path can issue a key; this view exposes no tags or secret key material.
+struct PairingRequest {
+    std::uint64_t pairing_id = 0;
+    std::string client_uuid;
+    std::string hostname;
+    std::string address;
+    std::string short_authentication_string;
+    std::uint32_t seconds_remaining = 0;
+    PairingRequestStage stage = PairingRequestStage::awaiting_client_confirmation;
+};
+
 struct PairingDiscoveryStats {
     bool beacon_enabled = false;
     std::uint64_t probes_received = 0;
@@ -246,6 +264,7 @@ public:
     [[nodiscard]] std::string server_name() const;
     void set_server_name(std::string_view name);
     [[nodiscard]] std::vector<PendingPairing> pending_pairings() const;
+    [[nodiscard]] std::vector<PairingRequest> pairing_requests() const;
     [[nodiscard]] bool approve_pairing(std::uint64_t pairing_id,
                                        std::string* error = nullptr);
     [[nodiscard]] bool reject_pairing(std::uint64_t pairing_id,

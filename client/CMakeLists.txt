@@ -19,6 +19,7 @@ add_library(nstu_client_platform STATIC
     src/named_pipe.cpp
     src/session.cpp
     src/service_install.cpp
+    src/service_pairing_confirmation.cpp
     src/stream_host_service.cpp
 )
 target_include_directories(nstu_client_platform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")

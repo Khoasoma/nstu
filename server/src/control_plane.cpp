@@ -1324,6 +1324,32 @@ public:
         }
     }
 
+    std::vector<PairingRequest> pairing_requests() const {
+        const auto now = std::chrono::steady_clock::now();
+        std::vector<PairingRequest> visible;
+        std::scoped_lock pairing_lock(pairing_mutex_);
+        visible.reserve(pending_pairings_.size());
+        for (const auto& [pairing_id, record] : pending_pairings_) {
+            if (record.expires_at <= now) continue;
+            const auto remaining = std::chrono::duration_cast<std::chrono::seconds>(record.expires_at - now);
+            visible.push_back(PairingRequest{
+                .pairing_id = pairing_id,
+                .client_uuid = record.transcript.client_uuid,
+                .hostname = record.transcript.client_hostname,
+                .address = record.address,
+                .short_authentication_string = record.secrets.short_authentication_string,
+                .seconds_remaining = static_cast<std::uint32_t>(remaining.count()),
+                .stage = record.client_confirmed ? PairingRequestStage::awaiting_teacher_approval
+                                                 : PairingRequestStage::awaiting_client_confirmation,
+            });
+        }
+        std::sort(visible.begin(), visible.end(),
+                  [](const PairingRequest& left, const PairingRequest& right) {
+                      return left.pairing_id < right.pairing_id;
+                  });
+        return visible;
+    }
+
     std::vector<PendingPairing> pending_pairings() const {
         const auto now = std::chrono::steady_clock::now();
         std::vector<PendingPairing> visible;
@@ -1815,8 +1841,8 @@ private:
 
     // The client's tag proves it derived the same secret from the same
     // transcript. That is not proof of identity - a man in the middle can do
-    // it too - but it does mean only requests that got that far are worth
-    // showing to the teacher.
+    // it too - but only requests that got that far can become approvable.
+    // The read-only offered view shows the SAS earlier for bilateral comparison.
     bool process_pairing_confirm(ConnectionState& state,
                                  const protocol::TcpFrame& frame) {
         if (frame.envelope.type == protocol::CommandType::heartbeat) {
@@ -2742,6 +2768,10 @@ void ServerControlPlane::set_server_name(std::string_view name) {
 
 std::vector<PendingPairing> ServerControlPlane::pending_pairings() const {
     return impl_->pending_pairings();
+}
+
+std::vector<PairingRequest> ServerControlPlane::pairing_requests() const {
+    return impl_->pairing_requests();
 }
 
 bool ServerControlPlane::approve_pairing(std::uint64_t pairing_id,

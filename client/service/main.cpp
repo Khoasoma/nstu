@@ -4,6 +4,7 @@
 #include "nstu/client_control.hpp"
 #include "nstu/client_freeze.hpp"
 #include "nstu/client_pairing.hpp"
+#include "nstu/service_pairing_confirmation.hpp"
 #include "nstu/client_uwf_request.hpp"
 #include "nstu/control_messages.hpp"
 #include "nstu/deployment.hpp"
@@ -169,6 +170,7 @@ std::condition_variable g_pairing_signal;
 std::optional<std::uint16_t> g_pairing_selection;
 std::size_t g_pairing_choice_count = 0;
 std::chrono::steady_clock::time_point g_next_pairing_sweep{};
+nstu::client::ServicePairingConfirmation g_pairing_confirmation;
 constexpr std::size_t kMaximumQueuedAgentMessages = 256;
 constexpr std::size_t kMaximumQueuedOutboundMessages = 32;
 constexpr std::size_t kMaximumQueuedExamIngress = 64;
@@ -892,8 +894,9 @@ void agent_pipe_loop() {
             std::scoped_lock lock(g_agent_path_mutex);
             expected_agent_path = g_agent_path;
         }
+        std::uint32_t validated_session = 0;
         if (!pipe.validate_client_process(expected_agent_path.wstring(),
-                                          nullptr, nullptr)) {
+                                          &validated_session, nullptr)) {
             // The pipe DACL permits the interactive user to connect, but only
             // the installed agent may occupy the service channel. Closing an
             // untrusted client here also lets the watchdog accept the real
@@ -902,6 +905,11 @@ void agent_pipe_loop() {
                 Sleep(250);
             }
             continue;
+        }
+        const auto pairing_peer = g_pairing_confirmation.connect_agent(validated_session);
+        {
+            std::scoped_lock lock(g_agent_queue_mutex);
+            nstu::client::discard_pairing_confirmation_messages(g_agent_queue);
         }
         g_agent_connected = true;
         const auto meta_connect = nstu::control::encode_fleet_metadata(
@@ -949,6 +957,10 @@ void agent_pipe_loop() {
             while (!pending.empty()) {
                 auto message = std::move(pending.front());
                 pending.pop_front();
+                if ((message.type == nstu::client::AgentMessageType::pairing_confirmation_request ||
+                     message.type == nstu::client::AgentMessageType::pairing_confirmation_end) &&
+                    !nstu::client::pairing_agent_message_current(g_pairing_confirmation, pairing_peer, message))
+                    continue;
                 if (!nstu::client::send_agent_message(pipe, message, nullptr)) {
                     pending.push_front(std::move(message));
                     write_failed = true;
@@ -956,6 +968,7 @@ void agent_pipe_loop() {
                 }
             }
             if (write_failed) {
+                nstu::client::discard_pairing_confirmation_messages(pending);
                 std::scoped_lock lock(g_agent_queue_mutex);
                 while (!pending.empty()) {
                     if (g_agent_queue.size() >=
@@ -1001,6 +1014,15 @@ void agent_pipe_loop() {
                 } else if (message->type ==
                            nstu::client::AgentMessageType::exam_answer_event) {
                     (void)queue_exam_event_payload(message->payload);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::pairing_confirmation_reply) {
+                    std::uint32_t current_session = 0;
+                    if (!pipe.validate_client_process(expected_agent_path.wstring(), &current_session, nullptr) ||
+                        current_session != pairing_peer.session_id) {
+                        g_pairing_confirmation.disconnect_agent(pairing_peer);
+                        break;
+                    }
+                    (void)g_pairing_confirmation.receive_reply(pairing_peer, message->payload);
                 } else if (message->type ==
                            nstu::client::AgentMessageType::pairing_select) {
                     record_pairing_selection(message->payload);
@@ -1075,6 +1097,11 @@ void agent_pipe_loop() {
             queue_outbound_message(
                 nstu::protocol::CommandType::fleet_metadata,
                 meta_disconnect);
+        }
+        g_pairing_confirmation.disconnect_agent(pairing_peer);
+        {
+            std::scoped_lock lock(g_agent_queue_mutex);
+            nstu::client::discard_pairing_confirmation_messages(g_agent_queue);
         }
         cancel_pairing_menu();
         pipe.close();
@@ -2608,16 +2635,14 @@ bool attempt_pairing(const std::stop_token& stop_token,
                   std::to_string(candidates[chosen].port) + " name=" +
                   candidates[chosen].server_name);
     std::string error;
-    auto result = nstu::client::pair_with_server(
+    const auto pairing_peer = g_pairing_confirmation.peer();
+    auto result = nstu::client::pair_with_interactive_agent(
         candidates[chosen], uuid, nstu::client::machine_hostname(),
-        [](const std::string& code, const std::string& server_name) {
-            auto payload = nstu::client::encode_agent_pairing_code(
-                {code, server_name});
-            if (!payload.empty()) {
-                queue_agent_message(
-                    {nstu::client::AgentMessageType::pairing_code,
-                     std::move(payload)});
-            }
+        g_pairing_confirmation,
+        [pairing_peer](nstu::client::AgentMessage message) {
+            std::scoped_lock lock(g_agent_queue_mutex);
+            return nstu::client::enqueue_pairing_agent_message(g_pairing_confirmation,
+                pairing_peer, g_agent_queue, kMaximumQueuedAgentMessages, std::move(message));
         },
         stop_token, {}, &error);
     if (result.outcome != nstu::client::PairingOutcome::enrolled) {
@@ -2633,6 +2658,11 @@ bool attempt_pairing(const std::stop_token& stop_token,
     // needing the installer's registry seed a second time. Empty when no
     // preference was set, which is the common case.
     result.config.preferred_room = preferred_room;
+    if (stop_token.stop_requested() || g_stop_requested.load()) {
+        nstu::client::clear_client_runtime_config(result.config);
+        queue_pairing_status(nstu::client::PairingOutcome::failed, "Pairing cancelled before saving identity");
+        return false;
+    }
     std::string save_error;
     const bool saved = nstu::client::save_client_runtime_config(
         result.config, path.wstring(), entropy, &save_error);
@@ -2941,6 +2971,7 @@ DWORD WINAPI control_handler(DWORD control, DWORD event_type, void*, void*) {
             return static_cast<DWORD>(ERROR_ACCESS_DENIED);
         }
         g_stop_requested = true;
+        g_pairing_confirmation.disconnect_agent(g_pairing_confirmation.peer());
         SetEvent(g_stop_event);
         wake_pipe_listener();
     } else if (control == kServiceControlReloadFreeze) {
@@ -3067,6 +3098,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
         report_telemetry_result(TelemetryOperation::maintenance, maintained, telemetry_error);
     }
     g_stop_requested = true;
+    g_pairing_confirmation.disconnect_agent(g_pairing_confirmation.peer());
     queue_exam_stop();
     queue_agent_message({nstu::client::AgentMessageType::remote_end, {}});
     g_stream_host_supervisor.handle_disconnect();

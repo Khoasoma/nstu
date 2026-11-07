@@ -70,7 +70,7 @@ bool read_le(std::span<const std::byte> input, std::size_t& offset, T& value) {
 
 bool valid_type(AgentMessageType type) noexcept {
     return type >= AgentMessageType::lock &&
-           type <= AgentMessageType::host_broadcast_mode;
+           type <= AgentMessageType::pairing_confirmation_end;
 }
 
 // Pairing text reaches the agent from the network and lands directly on a
@@ -119,11 +119,56 @@ bool read_exact(const NamedPipe& pipe, std::span<std::byte> output,
     return true;
 }
 
+bool valid_attempt_token(const AgentPairingAttemptToken& token) noexcept {
+    return std::any_of(token.begin(), token.end(),
+                       [](std::byte value) { return value != std::byte{0}; });
+}
+
+bool read_attempt_token(std::span<const std::byte> payload, std::size_t& offset,
+                        AgentPairingAttemptToken& token) noexcept {
+    if (payload.size() - offset < token.size()) return false;
+    std::copy_n(payload.begin() + static_cast<std::ptrdiff_t>(offset),
+                token.size(), token.begin());
+    offset += token.size();
+    return valid_attempt_token(token);
+}
+
+bool valid_confirmation_code(std::string_view code) noexcept {
+    return code.size() == pairing::kSasDigits &&
+           std::all_of(code.begin(), code.end(),
+                       [](char digit) { return digit >= '0' && digit <= '9'; });
+}
+
+bool valid_confirmation_reply(const AgentPairingConfirmationReply& reply) noexcept {
+    const auto choice = static_cast<std::uint8_t>(reply.choice);
+    return valid_attempt_token(reply.attempt_token) &&
+           choice >= static_cast<std::uint8_t>(AgentPairingConfirmationChoice::confirmed) &&
+           choice <= static_cast<std::uint8_t>(AgentPairingConfirmationChoice::cancelled) &&
+           (reply.confirmed_code.empty() || valid_confirmation_code(reply.confirmed_code)) &&
+           (reply.choice != AgentPairingConfirmationChoice::confirmed ||
+            (reply.code_shown && valid_confirmation_code(reply.confirmed_code)));
+}
+
+bool valid_confirmation_payload(AgentMessageType type,
+                                std::span<const std::byte> payload) {
+    switch (type) {
+    case AgentMessageType::pairing_confirmation_request:
+        return decode_agent_pairing_confirmation_request(payload).has_value();
+    case AgentMessageType::pairing_confirmation_reply:
+        return decode_agent_pairing_confirmation_reply(payload).has_value();
+    case AgentMessageType::pairing_confirmation_end:
+        return decode_agent_pairing_confirmation_end(payload).has_value();
+    default:
+        return true; // Preserve the existing frame contract for older kinds.
+    }
+}
+
 } // namespace
 
 std::vector<std::byte> encode_agent_message(const AgentMessage& message) {
     if (!valid_type(message.type) ||
-        message.payload.size() > kMaximumAgentPayloadBytes) {
+        message.payload.size() > kMaximumAgentPayloadBytes ||
+        !valid_confirmation_payload(message.type, message.payload)) {
         return {};
     }
     std::vector<std::byte> wire;
@@ -154,7 +199,7 @@ std::optional<AgentMessage> decode_agent_message(
         return std::nullopt;
     }
     const auto type = static_cast<AgentMessageType>(raw_type);
-    if (!valid_type(type)) {
+    if (!valid_type(type) || !valid_confirmation_payload(type, wire.subspan(offset))) {
         return std::nullopt;
     }
     AgentMessage message;
@@ -370,6 +415,70 @@ std::optional<AgentPairingStatus> decode_agent_pairing_status(
         return std::nullopt;
     }
     return status;
+}
+
+std::vector<std::byte> encode_agent_pairing_confirmation_request(
+    const AgentPairingConfirmationRequest& request) {
+    if (!valid_attempt_token(request.attempt_token) || request.expires_at_ms == 0 ||
+        !valid_confirmation_code(request.code) ||
+        !printable_text(request.server_name, kMaximumPairingTextBytes)) return {};
+    std::vector<std::byte> payload(request.attempt_token.begin(), request.attempt_token.end());
+    append_le(payload, request.expires_at_ms);
+    append_text(payload, request.code);
+    append_text(payload, request.server_name);
+    return payload;
+}
+
+std::optional<AgentPairingConfirmationRequest>
+decode_agent_pairing_confirmation_request(std::span<const std::byte> payload) {
+    AgentPairingConfirmationRequest request;
+    std::size_t offset = 0;
+    if (!read_attempt_token(payload, offset, request.attempt_token) ||
+        !read_le(payload, offset, request.expires_at_ms) || request.expires_at_ms == 0 ||
+        !read_text(payload, offset, request.code) ||
+        !read_text(payload, offset, request.server_name) || offset != payload.size() ||
+        !valid_confirmation_code(request.code) ||
+        !printable_text(request.server_name, kMaximumPairingTextBytes)) return std::nullopt;
+    return request;
+}
+
+std::vector<std::byte> encode_agent_pairing_confirmation_reply(
+    const AgentPairingConfirmationReply& reply) {
+    if (!valid_confirmation_reply(reply)) return {};
+    std::vector<std::byte> payload(reply.attempt_token.begin(), reply.attempt_token.end());
+    append_le(payload, static_cast<std::uint8_t>(reply.choice));
+    append_le(payload, static_cast<std::uint8_t>(reply.code_shown ? 1 : 0));
+    append_text(payload, reply.confirmed_code);
+    return payload;
+}
+
+std::optional<AgentPairingConfirmationReply>
+decode_agent_pairing_confirmation_reply(std::span<const std::byte> payload) {
+    AgentPairingConfirmationReply reply;
+    std::size_t offset = 0;
+    std::uint8_t choice = 0, shown = 0;
+    if (!read_attempt_token(payload, offset, reply.attempt_token) ||
+        !read_le(payload, offset, choice) || !read_le(payload, offset, shown) || shown > 1 ||
+        !read_text(payload, offset, reply.confirmed_code) || offset != payload.size())
+        return std::nullopt;
+    reply.choice = static_cast<AgentPairingConfirmationChoice>(choice);
+    reply.code_shown = shown != 0;
+    return valid_confirmation_reply(reply) ? std::optional{std::move(reply)} : std::nullopt;
+}
+
+std::vector<std::byte> encode_agent_pairing_confirmation_end(
+    const AgentPairingAttemptToken& attempt_token) {
+    if (!valid_attempt_token(attempt_token)) return {};
+    return {attempt_token.begin(), attempt_token.end()};
+}
+
+std::optional<AgentPairingAttemptToken>
+decode_agent_pairing_confirmation_end(std::span<const std::byte> payload) {
+    AgentPairingAttemptToken token{};
+    std::size_t offset = 0;
+    if (!read_attempt_token(payload, offset, token) || offset != payload.size())
+        return std::nullopt;
+    return token;
 }
 
 std::vector<std::byte> encode_remote_input(

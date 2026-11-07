@@ -499,6 +499,15 @@ if(TARGET nstu_client_platform)
         nstu_enable_test_assertions(nstu_ui_pairing_tests)
         add_test(NAME nstu.ui_pairing COMMAND nstu_ui_pairing_tests)
 
+        add_executable(nstu_service_pairing_confirmation_tests
+            service_pairing_confirmation_tests.cpp)
+        target_link_libraries(nstu_service_pairing_confirmation_tests PRIVATE
+            nstu_client_platform nstu_server_state)
+        nstu_enable_warnings(nstu_service_pairing_confirmation_tests)
+        nstu_enable_test_assertions(nstu_service_pairing_confirmation_tests)
+        add_test(NAME nstu.service_pairing_confirmation
+            COMMAND nstu_service_pairing_confirmation_tests)
+
         add_executable(nstu_exam_telemetry_integration_tests
             exam_telemetry_integration_tests.cpp)
         target_link_libraries(nstu_exam_telemetry_integration_tests PRIVATE

@@ -1,0 +1,30 @@
+# PAIR01 revised phase contract
+
+Status: PLAN_READY pending independent acceptance. Owner: delivery_pairing. Exact initial HEAD: `edb79e872339e372de9ee662ed71e9a0cacef154`. Own managed worktree: `C:/Users/xkhoa/.codex/worktrees/autonomous-pair01/nstu-ui-reviewed-20261107`. Read-only authoritative source: `D:/Codex/im/work/nstu-ui-reviewed-20261107`.
+
+Authority: owner autonomous delivery mandate and root's bounded prerequisite alternative. Applicable `AGENTS.md`, NSTU engineering/delivery loop, TDD, and `tasks/autonomous-workflow.md` (SHA256 `0A00D42FDEB6EA668A25B6F9F48098ED810741DC87341D51FE76105F246C3434`). WORKSPACE_SCOPE.md is absent; root's exact source restrictions apply. Each phase owns at most five product files and at most three acceptance groups. No product changes until its plan is independently accepted and exact pre-phase source/HEAD/hash receipt is recorded. No incomplete phase flow may be integrated or pushed. Cumulative nonauthor CODE_ACCEPT, full gates, and exact Windows CI precede final integration.
+
+## Corrected production ordering
+
+Current service passes empty `PairingAttemptOptions` at main.cpp:2611; current agent displays SAS but cannot send a human reply. Current server `pending_pairings()` at control_plane.cpp:1330 filters `!record.client_confirmed`; `approve_pairing` at 1356 also independently refuses that state. Requiring teacher code entry from the old view therefore deadlocks.
+
+New order: real cryptographic offer -> additive read-only teacher `pairing_requests()` shows SAS with `awaiting_client_confirmation` stage and disabled Approve -> agent renders client SAS and empty teacher-code input -> student compares screens, enters actual teacher code and explicitly confirms -> existing client sends its crypto confirmation -> teacher view stage becomes `awaiting_teacher_approval`, existing `pending_pairings()` now returns the request -> teacher compares both screens independently and explicitly approves -> unchanged verified server accept and service DPAPI save. No human comparison is replaced by local unchecked consent.
+
+Teacher early visibility does not permit enrollment, authorization, cryptographic approval, or key custody. Existing pending/approval behavior stays unchanged. The added read API exposes only metadata/SAS already held in the existing record, never shared secrets/tags/key material. No network wire changes, external requests, dependencies, policy relaxation, services/firewall/host security manipulation, or production operations.
+
+## Phase boundaries
+
+| Phase | Product files | Dependency and exit |
+|---|---:|---|
+| PAIR01A additive local IPC codecs | 4 | First phase; strict hand-derived compatibility and malformed-input tests. |
+| PAIR01B bounded service broker and agent state | 5 | A accepted/scoped tests pass. Model/wrapper tests preserve fail-closed defaults; product main callers remain unchanged. |
+| PAIR01C teacher early visibility prerequisite | 5 | A/B reviewed; root confirms FOCUS01 has completed/released server main. Current source hashes must be rebound and reviewed before edit. New read API, stage model, real transport tests, narrow pairing render changes. |
+| PAIR01D actual service/agent/UI wiring | 5 | A/B/C source interfaces and C teacher view independently accepted. Complete production flow, exercise real crypto/TCP + dedicated test-pipe + actual native UI dispatch seam; cumulative code review and full gates. |
+
+Each phase's document lists exact files/sections and baseline hashes. Files created or changed by an earlier phase have unknown future hashes; do not infer them. After each phase, record actual HEAD, all next-phase allowlist hashes, focused test receipts, and reviewer verdict in `tasks/task-plans/autonomous-pair01-phase-results.md` before requesting the next phase's write authorization. Initial review can accept the interface/design; next-phase execution binding must be refreshed from actual predecessor bytes. Final source binding includes accumulated phase deltas. Plans/results are documentation, outside the five-product-file count, and only the named plan/results files may be written.
+
+New cumulative product paths: `client/include/nstu/service_pairing_confirmation.hpp`, `client/include/nstu/agent_pairing_confirmation.hpp`, `client/src/service_pairing_confirmation.cpp`, `tests/service_pairing_confirmation_tests.cpp`, `server/app/pairing_request_view.hpp`. Existing cumulative product paths: `client/include/nstu/agent_protocol.hpp`, `client/src/agent_protocol.cpp`, `client/CMakeLists.txt`, `tests/CMakeLists.txt`, `client/service/main.cpp`, `client/agent/main.cpp`, `server/include/nstu/control_plane.hpp`, `server/src/control_plane.cpp`, and released pairing-render section of `server/app/main.cpp`. No other product paths allowed. Coordinator owns integration and any status/recovery-state changes; owner records its own phase results only.
+
+Build owner remains delivery_pairing; only own worktree `build/mingw`, `build/gate`, `build/pair01-*` are writable. Request exclusive root lease for BOTH full gates because unchanged script shares `/tmp/nstu-cfg.log`. No other checkout/output mutations. Baseline/scoped unit builds are safe; no launching production named pipe/client/service. Dedicated test IPC uses process-unique pipe names. Temporary test keyrings contain no operational credentials and are removed by fixtures.
+
+Verification commands use Git Bash with UCRT64 first: `cmake -S . -B build/mingw -G 'MinGW Makefiles' -DCMAKE_BUILD_TYPE=Debug`; `cmake --build build/mingw -j 8`; targeted CTest `nstu.service_pairing_confirmation` plus existing `nstu.client_pairing`, `nstu.ui_pairing`, `nstu.client_ipc`, `nstu.pairing_transport`; leased unpiped `scripts/verify-gate.sh` then `scripts/verify-gate.sh --strict`; `git diff --check`. No weakened assertions/gates. Record actual exits, tests/counts/warnings/log hashes. Integration is INDEV; real Windows human/runtime/physical lab/production acceptance remains separate. Commit identity only `khoasoma <songtu438@gmail.com>` after cumulative CODE_ACCEPT; no owner autonomous push/merge.

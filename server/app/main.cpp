@@ -36,6 +36,7 @@
 #include "interim_presentation.hpp"
 #include "brand_image.hpp"
 #include "focus_stream_observer.hpp"
+#include "pairing_request_view.hpp"
 #include "exam_fleet_presentation.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -4028,12 +4029,10 @@ void draw_room_name_field(DashboardState& state,
         "Để trống để dùng tên máy tính."));
 }
 
-// The operator's half of verified pairing. By the time a row appears here the
-// key exchange is done and the client has already proved it derived the same
-// secret, so what is left is the one thing arithmetic cannot settle: whether
-// the machine on the other end of that exchange is the machine the teacher is
-// standing next to. Comparing the six digits answers it, and nothing turns
-// into a key without it.
+// Show offered SAS digits before student confirmation so both screens can be
+// compared. Names remain unverified claims; a row becomes approvable only after
+// the verified client tag arrives. The teacher still independently compares
+// the actual student screen and deliberately approves before a key is issued.
 void draw_pairing_requests(DashboardState& state,
                            nstu::server::ServerControlPlane& control_plane) {
     ImGui::TextUnformatted(tr(state,
@@ -4045,7 +4044,7 @@ void draw_pairing_requests(DashboardState& state,
         "Chỉ duyệt khi mã trùng với mã "
         "hiển thị trên máy đó."));
     ImGui::Separator();
-    const auto pending = control_plane.pending_pairings();
+    const auto pending = control_plane.pairing_requests();
     if (pending.empty()) {
         ImGui::Dummy({scaled(656.0f), scaled(8.0f)});
         ImGui::TextDisabled("%s", tr(state, "Waiting for computers...",
@@ -4068,6 +4067,7 @@ void draw_pairing_requests(DashboardState& state,
                                 scaled(176.0f));
         ImGui::TableHeadersRow();
         for (const auto& request : pending) {
+            const auto view = nstu::ui::pairing_request_view(request);
             push_client_id(request.pairing_id);
             ImGui::TableNextRow(0, scaled(46.0f));
             ImGui::TableSetColumnIndex(0);
@@ -4076,6 +4076,9 @@ void draw_pairing_requests(DashboardState& state,
                 ImGui::SetTooltip("%s", request.address.c_str());
             }
             ImGui::TextDisabled("%s", request.client_uuid.c_str());
+            ImGui::TextDisabled("%s", view.awaiting_student
+                ? tr(state, "Waiting for student confirmation", "Đang chờ xác nhận từ học sinh")
+                : tr(state, "Ready for teacher approval", "Sẵn sàng để giáo viên duyệt"));
             ImGui::TableSetColumnIndex(1);
             if (g_heading_font != nullptr) {
                 ImGui::PushFont(g_heading_font);
@@ -4090,8 +4093,9 @@ void draw_pairing_requests(DashboardState& state,
                         static_cast<unsigned>(request.seconds_remaining));
             ImGui::TableSetColumnIndex(3);
             std::string error;
+            ImGui::BeginDisabled(!view.can_approve);
             if (ImGui::Button(tr(state, "Approve", "Duyệt"),
-                              {scaled(84.0f), scaled(30.0f)})) {
+                              {scaled(84.0f), scaled(30.0f)}) && view.can_approve) {
                 if (control_plane.approve_pairing(request.pairing_id,
                                                   &error)) {
                     state.pairing_status = request.hostname + " " +
@@ -4104,6 +4108,7 @@ void draw_pairing_requests(DashboardState& state,
                     state.pairing_status = error;
                 }
             }
+            ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::Button(tr(state, "Reject", "Từ chối"),
                               {scaled(84.0f), scaled(30.0f)})) {
