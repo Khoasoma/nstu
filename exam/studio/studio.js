@@ -748,6 +748,7 @@
       input.value = String(optIdx);
       input.checked = selected === optIdx;
       input.setAttribute("aria-label", `Option ${optIdx + 1}: ${optText}`);
+      input.addEventListener("focus", revealChoiceFocus);
       input.addEventListener("change", () => {
         if (!input.checked) return;
         previewAnswers[q.id] = optIdx;
@@ -1173,14 +1174,39 @@
     if (getComputedStyle(el("preview-view")).display === "none") return;
     choiceResizeFrame = window.requestAnimationFrame(() => {
       choiceResizeFrame = null;
-      const active = document.activeElement;
-      const q = currentExam.questions[previewIndex];
-      if (!q || q.isMatching || !["multiple_choice", "reading", "listening"].includes(q.type) ||
-          getComputedStyle(el("preview-view")).display === "none" || el("export-modal").classList.contains("open") ||
-          active?.tagName !== "INPUT" || active.type !== "radio" || !active.classList.contains("mc-option-input") ||
-          !el("p-mc-surface").contains(active) || !usableExportFocus(active)) return;
-      active.parentNode.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+      revealChoiceFocus();
     });
+  }
+
+  function revealChoiceFocus() {
+    const active = document.activeElement;
+    const q = currentExam.questions[previewIndex];
+    if (!q || q.isMatching || !["multiple_choice", "reading", "listening"].includes(q.type) ||
+        getComputedStyle(el("preview-view")).display === "none" || el("export-modal").classList.contains("open") ||
+        active?.tagName !== "INPUT" || active.type !== "radio" || !active.classList.contains("mc-option-input") ||
+        !el("p-mc-surface").contains(active) || !usableExportFocus(active)) return;
+    active.parentNode.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+  }
+
+  let previewTextResizeFrame = null;
+  function queuePreviewTextFocusReveal() {
+    if (previewTextResizeFrame !== null) window.cancelAnimationFrame(previewTextResizeFrame);
+    previewTextResizeFrame = null;
+    if (getComputedStyle(el("preview-view")).display === "none") return;
+    previewTextResizeFrame = window.requestAnimationFrame(() => {
+      previewTextResizeFrame = null;
+      revealPreviewTextFocus();
+    });
+  }
+
+  function revealPreviewTextFocus() {
+    const active = document.activeElement;
+    const q = currentExam.questions[previewIndex];
+    const field = q?.type === "essay" ? el("p-essay-input")
+      : q?.type === "short_answer" ? el("p-sa-input") : null;
+    if (!q || q.isMatching || active !== field || getComputedStyle(el("preview-view")).display === "none" ||
+        el("export-modal").classList.contains("open") || !el("preview-view").contains(active) || !usableExportFocus(active)) return;
+    active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
   }
 
   let numericDraftModel = null;
@@ -1554,6 +1580,9 @@
     window.addEventListener("resize", queueAuthoringFocusReveal);
     window.addEventListener("resize", queueMatchingFocusReveal);
     window.addEventListener("resize", queueChoiceFocusReveal);
+    window.addEventListener("resize", queuePreviewTextFocusReveal);
+    el("p-sa-input").addEventListener("focus", revealPreviewTextFocus);
+    el("p-essay-input").addEventListener("focus", revealPreviewTextFocus);
 
     // Add Question
     el("btn-add-question").addEventListener("click", () => {
