@@ -1154,6 +1154,7 @@ button { font-family: inherit; }
 }
 
 .mc-option-label {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -1171,6 +1172,26 @@ button { font-family: inherit; }
 .mc-option-label:hover {
   border-color: var(--border-medium);
   background-color: var(--bg-card);
+}
+
+.mc-option-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+
+.mc-option-label:has(.mc-option-input:focus-visible) {
+  outline: var(--nstu-controls-focus-ring) solid var(--border-focus);
+  outline-offset: var(--nstu-controls-border-width);
+}
+
+#p-mc-surface .mc-option-label {
+  scroll-margin: var(--nstu-spacing-xs);
 }
 
 .mc-option-label.checked {

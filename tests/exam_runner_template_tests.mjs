@@ -373,9 +373,10 @@ class ImportDomNode {
   set value(value) { this._value = String(value ?? ''); }
   get innerHTML() { return this._html; }
   set innerHTML(value) { this._html = String(value); for(const child of this.children)child.parentNode=null; this.children = []; this.queries.clear(); }
-  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name) }; }
+  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name), toggle: (name,force) => { const present=this.className.split(' ').includes(name),next=force===undefined?!present:!!force;if(next&&!present)this.className+=' '+name;if(!next)this.className=this.className.split(' ').filter(x=>x!==name).join(' ');return next; } }; }
   appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
   append(...children) { children.forEach(child => this.appendChild(child)); }
+  prepend(child) { this.children.unshift(child); child.parentNode = this; }
   querySelector(selector) {
     const find=node=>{for(const child of node.children){if(selector.startsWith('.')&&child.className.split(/\s+/).includes(selector.slice(1)))return child;const nested=find(child);if(nested)return nested;}return null;};
     const actual=find(this);if(actual)return actual;
@@ -572,7 +573,7 @@ async function actualImportHarness(reader) {
   const downloads = [], blobs = new Map();
   class DownloadURL extends URL { static createObjectURL(blob) { const url='blob:test-'+blobs.size;blobs.set(url,blob);return url; } static revokeObjectURL() {} }
   getNode('preview-view').style.display = 'none';
-  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.tagName=tag.toUpperCase();node.tabIndex=tag==='button'?0:-1;node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
+  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.tagName=tag.toUpperCase();node.tabIndex=['button','input'].includes(tag)?0:-1;node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
   const globals = { window:win, document: doc, atob, btoa,
     getComputedStyle:node=>({visibility:node.style.visibility||'visible',display:node.style.display||'block'}),
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
@@ -601,7 +602,8 @@ async function resizeHarness(){const h=await actualImportHarness();h.seed(false)
 let resizeCases=0;
 {
   const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueAuthoringFocusReveal').length,1,'one actual authoring resize listener is installed');
-  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');assert.equal(h.window.listeners.resize.length,2,'no duplicate resize registrations');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueChoiceFocusReveal').length,1,'one choice resize listener is installed');assert.equal(h.window.listeners.resize.length,3,'no duplicate resize registrations');
   const before=h.probe.inspect(),model=JSON.stringify(before.exam),answers=before.answers,stats=JSON.stringify(h.probe.stats),focusCalls=field.focusCalls;
   h.resize();h.resize();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'opaque RAF id0 must be cancelled');h.flushFrames();
   assert.equal(field.scrolls.length,1);assert.equal(field.scrolls[0].block,'nearest');assert.equal(field.scrolls[0].inline,'nearest');assert.equal(field.scrolls[0].behavior,'instant');
@@ -825,6 +827,67 @@ for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=tru
   const {h,field,surface,queue}=await matchingResizeHarness();queue();const next=h.node('p-target-list').children[0].children[1].querySelector('.target-select');next.focus();h.flushFrames();assert.equal(field.scrolls?.length||0,0);assert.equal(next.scrolls.length,1);assert.equal(h.document.activeElement,next);matchingResizeCases++;
 }
 console.log(`Studio actual matching resize lifecycle/guards/current focus: ${matchingResizeCases} cases passed`);
+
+// Native single-choice controls must project answers without replacing the focused radio.
+const choiceFixture=type=>({id:'choice-preview',title:'Choices',subject:'',durationSeconds:600,questions:[
+  {id:'choice-a',type,prompt:'Choose ế',options:['A "ế" <b>one</b>','B e\u0302\u0301','C']},
+  {id:'choice-b',type:'multiple_choice',prompt:'Other',options:['Other A','Other B']}]});
+const choiceRadio=(h,index)=>h.node('p-mc-surface').children[index].children[0];
+function choiceChange(radio){radio.checked=true;for(const callback of radio.listeners.change||[])callback({target:radio,currentTarget:radio});}
+let choiceKeyboardCases=0;
+for(const type of ['multiple_choice','reading','listening']){
+  const h=await numericHarness(choiceFixture(type)),state=h.probe.inspect(),before=JSON.stringify(state.exam);
+  h.node('btn-mode-preview').click();const surface=h.node('p-mc-surface');
+  assert.equal(surface.role,'radiogroup');assert.equal(surface['aria-labelledby'],'p-question-prompt');
+  assert.equal(Object.hasOwn(state.answers,'choice-a'),false,'Rendering does not initialize an answer');
+  for(let index=0;index<3;index++){
+    const radio=choiceRadio(h,index);assert.equal(radio.tagName,'INPUT');assert.equal(radio.type,'radio');assert.equal(radio.name,'nstu-preview-choice-choice-a');
+    assert.equal(radio.value,String(index));assert.equal(radio['aria-label'],`Option ${index+1}: ${state.exam.questions[0].options[index]}`);assert.equal(radio.checked,false);
+    assert.equal(surface.children[index].listeners.click?.length||0,0,'Native change owns selection; no legacy label-click path');
+  }
+  const labels=[...surface.children],radio=choiceRadio(h,1);radio.focus();const stats=JSON.stringify(h.probe.stats);choiceChange(radio);
+  assert.equal(state.answers['choice-a'],1);assert.equal(h.document.activeElement,radio);assert.equal(radio.isConnected,true);assert.deepEqual(surface.children,labels);
+  assert.equal(JSON.stringify(h.probe.stats),stats,'Selecting does not render');assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,state.answers);
+  assert.equal(choiceRadio(h,0).checked,false);assert.equal(radio.checked,true);assert.equal(surface.children[1].classList.contains('checked'),true);
+  choiceChange(choiceRadio(h,0));assert.equal(state.answers['choice-a'],0);assert.equal(choiceRadio(h,0).checked,true);assert.equal(radio.checked,false);
+  choiceChange(choiceRadio(h,0));assert.equal(state.answers['choice-a'],0);assert.deepEqual(surface.children,labels);
+  h.node('btn-p-next').click();assert.equal(Object.hasOwn(state.answers,'choice-b'),false);choiceChange(choiceRadio(h,1));assert.equal(state.answers['choice-b'],1);
+  h.node('btn-p-prev').click();assert.equal(choiceRadio(h,0).checked,true);assert.equal(state.answers['choice-b'],1);
+  h.node('btn-mode-editor').click();h.node('btn-mode-preview').click();assert.equal(choiceRadio(h,0).checked,true);assert.equal(JSON.stringify(state.exam),before);choiceKeyboardCases++;
+}
+{
+  const h=await numericHarness(choiceFixture('multiple_choice')),state=h.probe.inspect();state.answers['choice-a']=0;
+  const unrelated=h.node('btn-save-draft');unrelated.focus();h.node('btn-mode-preview').click();assert.equal(h.document.activeElement,unrelated,'Rendering does not focus a radio');
+  assert.equal(choiceRadio(h,0).checked,true);assert.equal(choiceRadio(h,1).checked,false);assert.match(h.node('p-mc-surface').children[0].innerHTML,/&lt;b&gt;one&lt;\/b&gt;/);
+  const input=choiceRadio(h,1);input.checked=false;for(const callback of input.listeners.change)callback({target:input});assert.equal(state.answers['choice-a'],0,'Unchecked change cannot clear or select a response');choiceKeyboardCases++;
+}
+{
+  const h=await numericHarness(choiceFixture('multiple_choice')),state=h.probe.inspect();state.exam.questions[0].options=[];
+  h.node('btn-mode-preview').click();assert.equal(h.node('p-mc-surface').children.length,0);assert.equal(Object.hasOwn(state.answers,'choice-a'),false);choiceKeyboardCases++;
+}
+{
+  const h=await numericHarness(choiceFixture('multiple_choice'));h.node('btn-mode-preview').click();choiceChange(choiceRadio(h,0));const state=h.probe.inspect(),before=JSON.stringify(state.exam);h.probe.save();
+  assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before,'Native choice responses do not alter the whole authoring Save');
+  const fresh={...choiceFixture('reading'),id:'fresh-choice'};await h.probe.load({name:'fresh.json',text:async()=>JSON.stringify(fresh)});
+  assert.equal(Object.hasOwn(h.probe.inspect().answers,'choice-a'),false);assert.equal(choiceRadio(h,0).checked,false);assert.equal(choiceRadio(h,1).checked,false);choiceKeyboardCases++;
+}
+console.log(`Studio actual single-choice native semantics/stable focus/response indices: ${choiceKeyboardCases} cases passed`);
+
+async function choiceResizeHarness(){const h=await numericHarness(choiceFixture('multiple_choice'));h.node('btn-mode-preview').click();const surface=h.node('p-mc-surface'),field=choiceRadio(h,2);field.focus();return{h,field,surface,label:field.parentNode,queue:()=>h.window.listeners.resize.find(callback=>callback.name==='queueChoiceFocusReveal')({type:'resize'})};}
+let choiceResizeCases=0;
+{
+  const {h,field,label,queue}=await choiceResizeHarness(),state=h.probe.inspect(),model=JSON.stringify(state.exam),stats=JSON.stringify(h.probe.stats),focus=field.focusCalls;
+  queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0]);h.flushFrames();
+  assert.equal(label.scrolls.length,1);assert.deepEqual({...label.scrolls[0]},{block:'nearest',inline:'nearest',behavior:'instant'});assert.equal(field.focusCalls,focus);assert.equal(h.document.activeElement,field);
+  assert.equal(JSON.stringify(state.exam),model);assert.equal(h.probe.inspect().answers,state.answers);assert.equal(JSON.stringify(h.probe.stats),stats);choiceResizeCases++;
+}
+for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({surface})=>surface.style.display='none',({h})=>h.node('preview-view').style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus(),({h})=>h.probe.inspect().exam.questions[0].isMatching=true,({h})=>h.probe.inspect().exam.questions[0].type='essay',({field})=>field.type='text']){
+  const ctx=await choiceResizeHarness();ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),model=JSON.stringify(state.exam),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.label.scrolls?.length||0,0);assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),model);assert.equal(ctx.h.probe.inspect().answers,state.answers);choiceResizeCases++;
+}
+{
+  const {h,field,label,queue}=await choiceResizeHarness();queue();const next=choiceRadio(h,0);next.focus();h.flushFrames();assert.equal(label.scrolls?.length||0,0);assert.equal(next.parentNode.scrolls.length,1);assert.equal(h.document.activeElement,next);choiceResizeCases++;
+}
+console.log(`Studio actual single-choice resize ownership/lifecycle/guards: ${choiceResizeCases} cases passed`);
 
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
