@@ -77,7 +77,8 @@
           </div>
           <div class="form-group">
             <label class="form-label" for="exam-duration">Time (Minutes)</label>
-            <input class="form-input" id="exam-duration" type="number" min="1" max="1440" value="60" required>
+            <input class="form-input" id="exam-duration" type="text" inputmode="numeric" value="60" required aria-describedby="exam-duration-error">
+            <span class="numeric-error" id="exam-duration-error" hidden></span>
           </div>
         </div>
         <div class="form-group">
@@ -121,9 +122,10 @@
               <span id="active-q-title">Question 1</span>
             </div>
             <div style="display: flex; gap: 8px;">
-              <div class="form-group" style="margin-bottom: 0; display: flex; align-items: center; gap: 6px;">
+              <div class="form-group numeric-field" style="margin-bottom: 0; display: flex; align-items: center; gap: 6px;">
                 <label class="form-label" style="margin-bottom: 0;" for="q-points">Points:</label>
-                <input class="form-input" id="q-points" type="number" min="1" max="100" value="4" style="width: 60px;">
+                <input class="form-input" id="q-points" type="text" inputmode="numeric" value="4" required aria-describedby="q-points-error" style="width: 60px;">
+                <span class="numeric-error" id="q-points-error" hidden></span>
               </div>
             </div>
           </div>
@@ -223,7 +225,8 @@
           <div id="essay-editor" style="display: none; margin-top: 16px;">
             <div class="form-group">
               <label class="form-label" for="q-essay-limit">Suggested Word Limit (Optional)</label>
-              <input class="form-input" id="q-essay-limit" type="number" min="10" max="2000" value="250" style="width: 140px;">
+              <input class="form-input" id="q-essay-limit" type="text" inputmode="numeric" value="250" aria-describedby="q-essay-limit-error" style="width: 140px;">
+              <span class="numeric-error" id="q-essay-limit-error" hidden></span>
             </div>
           </div>
 

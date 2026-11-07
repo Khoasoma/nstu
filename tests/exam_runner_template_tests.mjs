@@ -165,6 +165,7 @@ assert.ok([renderStart, renderEnd, addStart, addEnd, syncStart, syncEnd, origins
 const transitionNodes = new Map();
 function transitionNode(id = '') {
   const node = { value: '', children: [], listeners: {}, textContent: '',
+    setAttribute(name,value) { this[name]=String(value); },
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); },
     appendChild(child) { this.children.push(child); } };
   Object.defineProperty(node, 'innerHTML', { set(value) { this.html = value; this.children = []; }, get() { return this.html; } });
@@ -178,6 +179,7 @@ const transitions = vm.runInNewContext(`(() => {
   const previewAnswers = {}; // Existing addQuestion now reads retained Preview identities.
   const el = getNode, escapeHtml = value => value;
   const renderActiveQuestionForm = () => {}, showToast = () => {};
+  ${dialogSource}
   ${studioSource.slice(renderStart, renderEnd)}
   ${studioSource.slice(addStart, addEnd)}
   ${studioSource.slice(originsStart, originsEnd)}
@@ -522,6 +524,69 @@ async function actualImportHarness(reader) {
     seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
 }
 const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
+
+// A numeric renderer coercion, lost raw/rejection draft, or missing Export guard must fail these actual-controller tests.
+const numericFixture=()=>({id:'numeric-draft',title:'Numeric draft',subject:'',durationSeconds:600,questions:[
+  {id:'essay-a',type:'essay',prompt:'A',points:4,wordLimit:300},{id:'essay-b',type:'essay',prompt:'B',points:5,wordLimit:400}]});
+async function numericHarness(model=numericFixture()) { const h=await actualImportHarness();await h.probe.load({name:'numeric.json',text:async()=>JSON.stringify(model)});return h; }
+function numericInput(h,id,raw,valid=true,badInput=false){const node=h.node(id);node.value=raw;node.valueAsNumber=Number(raw);node.validity={valid,badInput};for(const callback of node.listeners.input||[])callback({target:node,currentTarget:node});}
+function numericNavigate(h){h.node('question-nav-list').children[1].click();h.node('question-nav-list').children[0].click();}
+let numericCases=0;
+for(const id of ['exam-duration','q-points','q-essay-limit']){
+  const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,'1e');numericNavigate(h);
+  assert.equal(h.node(id).value,'1e','navigation retains incomplete numeric text');assert.equal(JSON.stringify(h.probe.inspect().exam),before,'invalid raw text preserves prior model');
+  assert.equal(h.node(id)['aria-invalid'],'true');assert.equal(h.node(id+'-error').hidden,false);assert.match(h.node(id+'-error').textContent,/whole number/);
+  await h.probe.export();assert.equal(h.probe.stats.compile,0);assert.equal(h.node('btn-download-nstuexam').disabled,true);numericCases++;
+}
+for(const [id,key,scale,values] of [['exam-duration','durationSeconds',60,['1','1440',' 10 ','001']],['q-points','points',1,['1','100',' 10 ','001']],['q-essay-limit','wordLimit',1,['10','2000',' 10 ','0010']]]){
+  for(const raw of values){const h=await numericHarness();numericInput(h,id,raw);numericNavigate(h);assert.equal(h.node(id).value,raw);assert.equal((id==='exam-duration'?h.probe.inspect().exam:h.probe.inspect().exam.questions[0])[key],Number(raw)*scale);assert.equal(h.node(id)['aria-invalid'],'false');assert.equal(h.node(id+'-error').hidden,true);numericCases++;}
+}
+for(const [id,invalid] of [['exam-duration',['','0','1441','1.5','-1','+1','1e2','garbage','   ']],['q-points',['','0','101','1.5','-1','+1','1e2','garbage','   ']],['q-essay-limit',['9','2001','21.5','-10','+10','1e2','garbage','   ']]])for(const raw of invalid){
+  const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,raw);numericNavigate(h);assert.equal(h.node(id).value,raw);assert.equal(JSON.stringify(h.probe.inspect().exam),before);assert.equal(h.node(id)['aria-invalid'],'true');numericCases++;
+}
+{
+  const h=await numericHarness();numericInput(h,'q-essay-limit','',false,true);numericNavigate(h);
+  assert.equal(h.probe.inspect().exam.questions[0].wordLimit,300);assert.equal(h.node('q-essay-limit').value,'');assert.equal(h.node('q-essay-limit')['aria-invalid'],'true');
+  await h.probe.export();assert.equal(h.probe.stats.compile,0);numericInput(h,'q-essay-limit','');assert.equal(Object.hasOwn(h.probe.inspect().exam.questions[0],'wordLimit'),false);assert.equal(h.node('q-essay-limit')['aria-invalid'],'false');numericNavigate(h);assert.equal(h.node('q-essay-limit').value,'');numericCases++;
+}
+for(const [key,value] of [['points',0],['wordLimit',9.5]]){
+  const model=numericFixture();model.questions[1][key]=value;const h=await numericHarness(model);await h.probe.export();
+  assert.equal(h.probe.stats.compile,0,'unvisited imported numeric fields block Export');assert.equal(h.probe.inspect().exam.questions[1][key],value);assert.match(h.node('export-validation-status').innerHTML,/Question #2/);numericCases++;
+}
+{
+  const model=numericFixture();model.durationSeconds=600.25;const h=await numericHarness(model);assert.equal(h.node('exam-duration').value,String(600.25/60));
+  h.probe.sync();h.node('btn-mode-preview').click();h.node('btn-mode-editor').click();h.probe.save();const saved=JSON.parse(await h.downloads[0].blob.text());
+  assert.equal(saved.durationSeconds,600.25);assert.equal(h.probe.inspect().exam.durationSeconds,600.25);assert.equal(h.node('exam-duration').value,String(600.25/60));assert.equal(h.node('exam-duration')['aria-invalid'],'true');numericCases++;
+}
+{
+  const model=numericFixture();delete model.durationSeconds;delete model.questions[0].points;delete model.questions[0].wordLimit;const h=await numericHarness(model);
+  assert.equal(h.node('exam-duration').value,'60');assert.equal(h.node('q-points').value,'1');assert.equal(h.node('q-essay-limit').value,'');h.probe.sync();assert.equal(h.probe.inspect().exam.durationSeconds,3600);numericCases++;
+}
+{
+  const model=numericFixture();model.questions[1]={id:'short',type:'short_answer',prompt:'B',points:2,wordLimit:9.5};const h=await numericHarness(model);
+  h.node('question-nav-list').children[1].click();numericInput(h,'q-essay-limit','100');assert.equal(h.probe.inspect().exam.questions[1].wordLimit,9.5);await h.probe.export();assert.equal(h.probe.stats.compile,1,'inert nonessay wordLimit is not a numeric UI error');numericCases++;
+}
+{
+  const h=await numericHarness();numericInput(h,'q-points','0');h.probe.inspect().answers['essay-a']='Retained answer';const answers=h.probe.inspect().answers;
+  h.node('btn-mode-preview').click();h.node('btn-mode-editor').click();h.node('btn-studio-theme').click();assert.equal(h.node('q-points').value,'0');assert.equal(h.probe.inspect().answers,answers);
+  h.probe.save();const saved=JSON.parse(await h.downloads[0].blob.text());assert.equal(saved.questions[0].points,4);assert.equal(h.node('q-points').value,'0');
+  await h.probe.load({name:'bad.json',text:async()=>'{bad'});numericNavigate(h);assert.equal(h.node('q-points').value,'0');
+  const replacement=numericFixture();replacement.questions[0].points=7;await h.probe.load({name:'new.json',text:async()=>JSON.stringify(replacement)});assert.equal(h.node('q-points').value,'7');assert.equal(h.node('q-points')['aria-invalid'],'false');
+  numericInput(h,'exam-duration','1e');h.node('btn-load-sample').click();assert.equal(h.node('exam-duration').value,'60');assert.equal(h.node('exam-duration')['aria-invalid'],'false');numericCases++;
+}
+{
+  const h=await numericHarness();numericInput(h,'q-points','0');h.node('question-nav-list').children[0].listeners.click[0]({target:{closest:()=>true}});
+  h.node('select-add-type').value='essay';h.node('btn-add-question').click();assert.equal(h.node('q-points')['aria-invalid'],'false');assert.equal(h.node('q-points').value,'8');await h.probe.export();assert.equal(h.probe.stats.compile,1,'retired drafts do not poison a newly added question');numericCases++;
+}
+for(const retry of [false,true]){
+  const h=await numericHarness();let resolveBuild;h.zip.Writer.prototype.build=function(){return new Promise(resolve=>{resolveBuild=resolve;});};
+  const first=h.probe.export();for(let n=0;n<100&&!resolveBuild;n++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(typeof resolveBuild,'function');
+  numericInput(h,'q-points','0');if(retry)await h.probe.export();const status=h.node('export-validation-status').innerHTML;
+  resolveBuild({fileCount:5,totalBytes:100,archiveSha256:'captured-archive',contentSha256:'captured-content',blob:new Blob()});await first;
+  if(retry){assert.equal(h.node('export-validation-status').innerHTML,status);assert.equal(h.node('btn-download-nstuexam').disabled,true);}else{assert.match(h.node('export-validation-status').innerHTML,/Successfully/);assert.equal(h.node('btn-download-nstuexam').disabled,false);assert.equal(h.node('lbl-content-hash').textContent,'captured-content');}
+  assert.equal(h.downloads.length,0);numericCases++;
+}
+console.log(`Studio actual numeric draft retention, bounds, model and Export ownership: ${numericCases} cases passed`);
 
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;

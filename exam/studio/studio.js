@@ -132,7 +132,7 @@
     el("exam-id").value = currentExam.id || "";
     el("exam-title").value = currentExam.title || "";
     el("exam-subject").value = currentExam.subject || "";
-    el("exam-duration").value = Math.round((currentExam.durationSeconds || 3600) / 60);
+    renderNumericField("exam-duration");
     el("exam-allowed-origins").value = Array.isArray(currentExam.allowedOrigins)
       ? currentExam.allowedOrigins.join("\n")
       : "";
@@ -195,7 +195,7 @@
     if (!q) return;
 
     el("active-q-title").textContent = `Question ${activeQuestionIndex + 1}`;
-    el("q-points").value = q.points || 1;
+    renderNumericField("q-points", q);
     el("q-prompt").value = q.prompt || "";
     el("q-instruction").value = q.instruction || "";
 
@@ -236,7 +236,7 @@
     } else if (q.type === "short_answer") {
       el("q-sa-placeholder").value = q.answerPlaceholder || "";
     } else if (q.type === "essay") {
-      el("q-essay-limit").value = q.wordLimit ?? "";
+      renderNumericField("q-essay-limit", q);
     }
   }
 
@@ -989,11 +989,90 @@
     }
   }
 
+  let numericDraftModel = null;
+  let numericDraftOwners = new WeakMap();
+  const numericFields = {
+    "exam-duration": { label: "Duration", key: "durationSeconds", min: 1, max: 1440, scale: 60, fallback: 3600 },
+    "q-points": { label: "Points", key: "points", min: 1, max: 100, scale: 1, fallback: 1 },
+    "q-essay-limit": { label: "Word limit", key: "wordLimit", min: 10, max: 2000, scale: 1, optional: true }
+  };
+
+  function numericDraft(id, question) {
+    if (numericDraftModel !== currentExam) {
+      numericDraftModel = currentExam;
+      numericDraftOwners = new WeakMap();
+    }
+    const spec = numericFields[id];
+    const owner = id === "exam-duration" ? currentExam : question;
+    if (!owner || (id === "q-essay-limit" && owner.type !== "essay")) return null;
+    if (!numericDraftOwners.has(owner)) numericDraftOwners.set(owner, {});
+    const drafts = numericDraftOwners.get(owner);
+    if (!drafts[id]) {
+      const value = owner[spec.key] ?? spec.fallback;
+      drafts[id] = { raw: value === undefined ? "" : String(value / spec.scale), rejected: false };
+    }
+    return drafts[id];
+  }
+
+  function numericError(id, draft) {
+    const spec = numericFields[id];
+    if (spec.optional && draft.raw === "" && !draft.rejected) return "";
+    const value = Number(draft.raw);
+    return !draft.rejected && /^\d+$/.test(draft.raw.trim()) && Number.isInteger(value) &&
+      value >= spec.min && value <= spec.max ? ""
+      : `${spec.label} must be a whole number from ${spec.min} to ${spec.max}.`;
+  }
+
+  function showNumericError(id, draft) {
+    const message = numericError(id, draft);
+    el(id).setAttribute("aria-invalid", String(!!message));
+    const error = el(id + "-error");
+    error.textContent = message;
+    error.hidden = !message;
+  }
+
+  function renderNumericField(id, question) {
+    const draft = numericDraft(id, question);
+    if (!draft) return;
+    if (el(id).value !== draft.raw) el(id).value = draft.raw;
+    showNumericError(id, draft);
+  }
+
+  function captureNumericField(id, question, inputEvent = false) {
+    const draft = numericDraft(id, question);
+    if (!draft) return;
+    const node = el(id);
+    if (inputEvent || node.value !== draft.raw) {
+      draft.raw = node.value;
+      draft.rejected = node.validity?.valid === false || !!node.validity?.badInput;
+    }
+    if (!numericError(id, draft)) {
+      const spec = numericFields[id];
+      const owner = id === "exam-duration" ? currentExam : question;
+      if (spec.optional && draft.raw === "") delete owner[spec.key];
+      else owner[spec.key] = Number(draft.raw) * spec.scale;
+    }
+    showNumericError(id, draft);
+  }
+
+  function numericExportErrors() {
+    const errors = [];
+    const duration = numericError("exam-duration", numericDraft("exam-duration"));
+    if (duration) errors.push(duration);
+    currentExam.questions.forEach((q, index) => {
+      for (const id of q.type === "essay" ? ["q-points", "q-essay-limit"] : ["q-points"]) {
+        const error = numericError(id, numericDraft(id, q));
+        if (error) errors.push(`Question #${index + 1}: ${error}`);
+      }
+    });
+    return errors;
+  }
+
   function syncExamMetadata() {
     currentExam.id = el("exam-id").value.trim();
     currentExam.title = el("exam-title").value.trim();
     currentExam.subject = el("exam-subject").value.trim();
-    currentExam.durationSeconds = Math.max(60, parseInt(el("exam-duration").value, 10) * 60 || 3600);
+    captureNumericField("exam-duration");
     const origins = parseOriginsInput(el("exam-allowed-origins").value);
     if (origins.length > 0) {
       currentExam.allowedOrigins = origins;
@@ -1017,7 +1096,7 @@
     hashesBox.style.display = "none";
     btnDownload.disabled = true;
 
-    const errors = validateExam(currentExam);
+    const errors = validateExam(currentExam).concat(numericExportErrors());
     if (errors.length > 0) {
       statusBox.style.color = "var(--danger)";
       statusBox.innerHTML = `<strong>Validation Failed (${errors.length} errors):</strong><ul style="margin: 8px 0 0 18px;">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`;
@@ -1270,10 +1349,9 @@
     });
 
     // Question form bindings
-    el("q-points").addEventListener("change", (e) => {
-      const q = currentExam.questions[activeQuestionIndex];
-      if (q) q.points = parseInt(e.target.value, 10) || 1;
-    });
+    el("exam-duration").addEventListener("input", () => captureNumericField("exam-duration", undefined, true));
+    el("q-points").addEventListener("input", () => captureNumericField("q-points", currentExam.questions[activeQuestionIndex], true));
+    el("q-points").addEventListener("change", () => captureNumericField("q-points", currentExam.questions[activeQuestionIndex]));
 
     el("q-prompt").addEventListener("input", (e) => {
       const q = currentExam.questions[activeQuestionIndex];
@@ -1295,12 +1373,7 @@
     });
 
     el("q-essay-limit").addEventListener("input", (e) => {
-      const q = currentExam.questions[activeQuestionIndex];
-      if (!q || q.type !== "essay") return;
-      if (!e.target.validity.valid) return;
-      if (e.target.value === "") delete q.wordLimit;
-      else if (Number.isInteger(e.target.valueAsNumber))
-        q.wordLimit = e.target.valueAsNumber;
+      captureNumericField("q-essay-limit", currentExam.questions[activeQuestionIndex], true);
     });
 
     el("q-passage").addEventListener("input", (e) => {

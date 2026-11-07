@@ -535,6 +535,10 @@ button { font-family: inherit; }
   margin-top: 4px;
 }
 
+.numeric-field { flex-wrap: wrap; }
+.numeric-error { font-size: var(--nstu-typography-body); color: var(--danger); }
+.numeric-field .numeric-error { flex-basis: 100%; }
+
 /* Draggable Items Configuration */
 .token-config-grid {
   display: grid;
