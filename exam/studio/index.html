@@ -206,7 +206,7 @@
             </div>
             <div class="form-group">
               <label class="form-label" for="exam-duration">Time (Minutes)</label>
-              <input class="form-input" id="exam-duration" type="text" inputmode="numeric" value="60" required aria-describedby="exam-duration-error">
+              <input class="form-input" id="exam-duration" type="text" inputmode="decimal" value="60" required aria-describedby="exam-duration-error">
               <span class="numeric-error" id="exam-duration-error" hidden></span>
             </div>
           </div>
@@ -333,7 +333,7 @@
       </div>
       <div class="modal-body">
         <p style="font-size: 14px; color: var(--text-muted);">
-          Your exam will be validated against the official schema, bundled with the student kiosk runtime, and packaged into an offline <code>.nstuexam</code> container.
+          Export checks supported native manifest fields and bundles the student runtime into an offline <code>.nstuexam</code> container. Matching and authored audio/PDF media remain available in drafts and Preview; they cannot be exported yet.
         </p>
 
         <div id="export-validation-status" style="padding: 12px; border-radius: var(--radius-sm); font-size: 13px; background-color: var(--bg-input);">

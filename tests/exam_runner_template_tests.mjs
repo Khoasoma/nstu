@@ -147,7 +147,7 @@ assert.equal(fields.exam.questions[0].answerPlaceholder, authoredPlaceholder);
 assert.equal(fields.exam.questions[1].answerPlaceholder, 'Independent B');
 fields.setIndex(0); placeholderInput('');
 assert.equal(fields.exam.questions[0].answerPlaceholder, '');
-assert.equal(fields.manifest().questions[0].answerPlaceholder, undefined);
+assert.equal(fields.manifest().questions[0].answerPlaceholder, '', 'Export preserves explicitly empty placeholder');
 fields.setIndex(2); placeholderInput('Must not change essay data');
 assert.equal(fields.exam.questions[2].answerPlaceholder, 'Original C');
 fields.setIndex(999); placeholderInput('Missing target event');
@@ -398,17 +398,17 @@ function exportLifecycleHarness() {
     return nodes.get(id);
   };
   for(const id of ['btn-close-export','btn-cancel-export','btn-download-nstuexam']){const value=node(id);value.remove();value.tagName='BUTTON';node('export-modal').appendChild(value);}
-  const model = { id: 'old-export', title: 'Old content', questions: [] };
+  const model = { id: 'old-export', title: 'Old content', durationSeconds:600,
+    questions: [{id:'q1',type:'short_answer',prompt:'Original question',points:0}] };
   const exporter = vm.runInNewContext(`(() => {
     let currentExam = model;
     const el = getNode, syncExamMetadata = () => {},
-      validateExam = exam => exam.title ? [] : ['Invalid title'],
-      compileManifest = exam => ({ id: exam.id, title: exam.title }),
       verifiedBrandPng = async bytes => bytes, showToast = () => {}, escapeHtml = value => value;
+    ${studioSource.slice(studioSource.indexOf('  function validateOrigin('),compileEnd)}
     ${dialogSource}
     ${studioSource.slice(exportStart, exportEnd)}
     return { exportPackage };
-  })()`, { model, getNode: node, Uint8Array, window: { NSTU_RUNNER_TEMPLATE: {
+  })()`, { model, getNode: node, Uint8Array, TextEncoder, window: { NSTU_RUNNER_TEMPLATE: {
     indexHtml: 'HTML', stylesCss: 'CSS', appJs: 'JS', brandPngBase64: 'A'.repeat(228760) } },
     atob: () => 'PNG', btoa: () => 'A'.repeat(228760), NstuZip: { Writer: class {
       constructor() { this.entries = new Map(); }
@@ -467,6 +467,57 @@ function exportLifecycleHarness() {
   assert.equal(h.node('btn-download-nstuexam').disabled, true);
 }
 console.log('Studio asynchronous export ownership and manifest identity: 5 scenarios passed');
+
+// A lost schema value or admitted native-incompatible manifest must fail these literal contracts.
+const nativeContracts=vm.runInNewContext(`(() => {
+  ${studioSource.slice(studioSource.indexOf('  function validateOrigin('),compileEnd)}
+  return {compile:compileManifest,guard:validateExportContract,origin:validateOrigin};
+})()`,{TextEncoder});
+const nativeFixture=()=>({id:'native-v1',title:'Native contract',subject:'',durationSeconds:601,questions:[
+  {id:'q1',type:'short_answer',prompt:'Prompt',points:0}]});
+const projected=nativeFixture();Object.assign(projected,{subject:'',candidate:'',allowedOrigins:[],documents:[]});
+Object.assign(projected.questions[0],{instruction:'',passage:'',answerPlaceholder:'',wordLimit:1});
+assert.deepEqual(JSON.parse(JSON.stringify(nativeContracts.compile(projected))),{
+  id:'native-v1',title:'Native contract',subject:'',candidate:'',durationSeconds:601,allowedOrigins:[],documents:[],
+  questions:[{id:'q1',type:'short_answer',prompt:'Prompt',points:0,instruction:'',passage:'',answerPlaceholder:'',wordLimit:1}]});
+const absent=nativeFixture();delete absent.subject;delete absent.questions[0].points;
+assert.equal(nativeContracts.compile(absent).subject,'General');assert.equal(nativeContracts.compile(absent).questions[0].points,1);
+const mediaProjection=nativeFixture();Object.assign(mediaProjection.questions[0],{pdf:'',audio:''});
+assert.equal(nativeContracts.compile(mediaProjection).questions[0].pdf,'');assert.equal(nativeContracts.compile(mediaProjection).questions[0].audio,'');
+let exportContractCases=4;
+function admitNative(model,accepted,label){const before=JSON.stringify(model);const errors=nativeContracts.guard(model);
+  assert.equal(errors.length===0,accepted,label+': '+errors.join('; '));assert.equal(JSON.stringify(model),before,'admission is read-only');exportContractCases++;}
+for(const type of ['multiple_choice','short_answer','essay','listening','reading']){
+  const x=nativeFixture();x.questions[0].type=type;x.questions[0].options=['A','B'];admitNative(x,true,type);
+}
+for(const [key,min,max] of [['points',0,1000],['wordLimit',1,5000]])for(const value of [min,max,min-1,max+1,1.5,'1',null]){
+  const x=nativeFixture();x.questions[0][key]=value;admitNative(x,value===min||value===max,key+':'+value);
+}
+for(const value of [60,601,86400,59,86401,600.25,'600',null]){const x=nativeFixture();x.durationSeconds=value;admitNative(x,Number.isInteger(value)&&value>=60&&value<=86400,'duration');}
+for(const mutate of [x=>x.questions[0].isMatching=true,x=>x.questions[0].type='matching',x=>x.questions.push({...x.questions[0]}),
+  x=>x.questions=null,x=>x.questions[0]=null,x=>x.questions[0].options=['A'],x=>x.questions[0].options=['','B'],
+  x=>x.questions[0].options=Array(13).fill('A'),x=>x.subject=null,x=>x.candidate=7,x=>x.documents=[{id:'doc',url:'file.pdf'}],
+  x=>x.allowedOrigins=['exam.test','exam.test'],x=>x.allowedOrigins=null]){
+  const x=nativeFixture();mutate(x);admitNative(x,false,'shape/media/type');
+}
+for(const key of ['pdf','audio'])for(const value of ['',null,'media/file']){const x=nativeFixture();x.questions[0][key]=value;admitNative(x,false,'declared media');}
+for(const [field,accepted,rejected] of [['prompt','ế'.repeat(2666)+'ab','ế'.repeat(2667)],
+  ['passage','ế'.repeat(21845)+'a','ế'.repeat(21845)+'ab']]){
+  for(const [text,ok] of [[accepted,true],[rejected,false]]){const x=nativeFixture();x.questions[0][field]=text;admitNative(x,ok,field+' UTF8 byte boundary');}
+}
+for(const type of ['short_answer','essay','reading'])for(const text of ['ế'.repeat(666)+'ab','ế'.repeat(667),'']){
+  const x=nativeFixture();x.questions[0].type=type;x.questions[0].options=[text,'B'];admitNative(x,text.length>0&&Buffer.byteLength(text)<=2000,'all supplied option bytes');
+}
+for(const field of ['title','subject','candidate','prompt','instruction','passage','answerPlaceholder'])for(const bad of ['\ud800','\udc00']){
+  const x=nativeFixture();(field==='title'||field==='subject'||field==='candidate'?x:x.questions[0])[field]=bad;admitNative(x,false,'lone surrogate:'+field);
+}
+for(const count of [256,257,500]){const x=nativeFixture();x.questions=Array.from({length:count},(_,i)=>({id:'q'+i,type:'short_answer',prompt:'P'}));admitNative(x,count===256,'native array boundary');}
+for(const [origin,ok] of [['//exam.test',true],['HTTPS://Exam.test:65535/path?x=1',true],['exam.test:00001/#x',true],
+  ['https://exam.test/đề',false],['https://exam.test/path name',false],['exam.test:0',false],['exam.test:65536',false],
+  ['exam.test:000001',false],['https://exam.test/@x',false],['-exam.test',false],['a..test',false],['ftp://exam.test',false]]){
+  assert.equal(nativeContracts.origin(origin),ok,origin);exportContractCases++;
+}
+console.log(`Studio literal projection/native shape/UTF8/origin admission: ${exportContractCases} cases passed`);
 
 // Run the whole actual controller and renderers; only DOM/platform I/O are boundaries.
 
@@ -573,13 +624,13 @@ let numericCases=0;
 for(const id of ['exam-duration','q-points','q-essay-limit']){
   const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,'1e');numericNavigate(h);
   assert.equal(h.node(id).value,'1e','navigation retains incomplete numeric text');assert.equal(JSON.stringify(h.probe.inspect().exam),before,'invalid raw text preserves prior model');
-  assert.equal(h.node(id)['aria-invalid'],'true');assert.equal(h.node(id+'-error').hidden,false);assert.match(h.node(id+'-error').textContent,/whole number/);
+  assert.equal(h.node(id)['aria-invalid'],'true');assert.equal(h.node(id+'-error').hidden,false);assert.match(h.node(id+'-error').textContent,id==='exam-duration'?/whole seconds/:/whole number/);
   await h.probe.export();assert.equal(h.probe.stats.compile,0);assert.equal(h.node('btn-download-nstuexam').disabled,true);numericCases++;
 }
-for(const [id,key,scale,values] of [['exam-duration','durationSeconds',60,['1','1440',' 10 ','001']],['q-points','points',1,['1','100',' 10 ','001']],['q-essay-limit','wordLimit',1,['10','2000',' 10 ','0010']]]){
+for(const [id,key,scale,values] of [['exam-duration','durationSeconds',60,['1','1440',' 10 ','001','1.5']],['q-points','points',1,['0','1000',' 101 ','001']],['q-essay-limit','wordLimit',1,['1','5000',' 2001 ','0010']]]){
   for(const raw of values){const h=await numericHarness();numericInput(h,id,raw);numericNavigate(h);assert.equal(h.node(id).value,raw);assert.equal((id==='exam-duration'?h.probe.inspect().exam:h.probe.inspect().exam.questions[0])[key],Number(raw)*scale);assert.equal(h.node(id)['aria-invalid'],'false');assert.equal(h.node(id+'-error').hidden,true);numericCases++;}
 }
-for(const [id,invalid] of [['exam-duration',['','0','1441','1.5','-1','+1','1e2','garbage','   ']],['q-points',['','0','101','1.5','-1','+1','1e2','garbage','   ']],['q-essay-limit',['9','2001','21.5','-10','+10','1e2','garbage','   ']]])for(const raw of invalid){
+for(const [id,invalid] of [['exam-duration',['','0','1441','1.501','-1','+1','1e2','garbage','   ']],['q-points',['','-1','1001','1.5','-2','+1','1e2','garbage','   ']],['q-essay-limit',['0','5001','21.5','-10','+10','1e2','garbage','   ']]])for(const raw of invalid){
   const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,raw);numericNavigate(h);assert.equal(h.node(id).value,raw);assert.equal(JSON.stringify(h.probe.inspect().exam),before);assert.equal(h.node(id)['aria-invalid'],'true');numericCases++;
 }
 {
@@ -587,7 +638,7 @@ for(const [id,invalid] of [['exam-duration',['','0','1441','1.5','-1','+1','1e2'
   assert.equal(h.probe.inspect().exam.questions[0].wordLimit,300);assert.equal(h.node('q-essay-limit').value,'');assert.equal(h.node('q-essay-limit')['aria-invalid'],'true');
   await h.probe.export();assert.equal(h.probe.stats.compile,0);numericInput(h,'q-essay-limit','');assert.equal(Object.hasOwn(h.probe.inspect().exam.questions[0],'wordLimit'),false);assert.equal(h.node('q-essay-limit')['aria-invalid'],'false');numericNavigate(h);assert.equal(h.node('q-essay-limit').value,'');numericCases++;
 }
-for(const [key,value] of [['points',0],['wordLimit',9.5]]){
+for(const [key,value] of [['points',-1],['wordLimit',9.5]]){
   const model=numericFixture();model.questions[1][key]=value;const h=await numericHarness(model);await h.probe.export();
   assert.equal(h.probe.stats.compile,0,'unvisited imported numeric fields block Export');assert.equal(h.probe.inspect().exam.questions[1][key],value);assert.match(h.node('export-validation-status').innerHTML,/Question #2/);numericCases++;
 }
@@ -602,29 +653,79 @@ for(const [key,value] of [['points',0],['wordLimit',9.5]]){
 }
 {
   const model=numericFixture();model.questions[1]={id:'short',type:'short_answer',prompt:'B',points:2,wordLimit:9.5};const h=await numericHarness(model);
-  h.node('question-nav-list').children[1].click();numericInput(h,'q-essay-limit','100');assert.equal(h.probe.inspect().exam.questions[1].wordLimit,9.5);await h.probe.export();assert.equal(h.probe.stats.compile,1,'inert nonessay wordLimit is not a numeric UI error');numericCases++;
+  h.node('question-nav-list').children[1].click();numericInput(h,'q-essay-limit','100');assert.equal(h.probe.inspect().exam.questions[1].wordLimit,9.5);await h.probe.export();assert.equal(h.probe.stats.compile,0,'inert nonessay wordLimit is retained but fails native integer contract');numericCases++;
 }
 {
-  const h=await numericHarness();numericInput(h,'q-points','0');h.probe.inspect().answers['essay-a']='Retained answer';const answers=h.probe.inspect().answers;
-  h.node('btn-mode-preview').click();h.node('btn-mode-editor').click();h.node('btn-studio-theme').click();assert.equal(h.node('q-points').value,'0');assert.equal(h.probe.inspect().answers,answers);
-  h.probe.save();const saved=JSON.parse(await h.downloads[0].blob.text());assert.equal(saved.questions[0].points,4);assert.equal(h.node('q-points').value,'0');
-  await h.probe.load({name:'bad.json',text:async()=>'{bad'});numericNavigate(h);assert.equal(h.node('q-points').value,'0');
+  const h=await numericHarness();numericInput(h,'q-points','-1');h.probe.inspect().answers['essay-a']='Retained answer';const answers=h.probe.inspect().answers;
+  h.node('btn-mode-preview').click();h.node('btn-mode-editor').click();h.node('btn-studio-theme').click();assert.equal(h.node('q-points').value,'-1');assert.equal(h.probe.inspect().answers,answers);
+  h.probe.save();const saved=JSON.parse(await h.downloads[0].blob.text());assert.equal(saved.questions[0].points,4);assert.equal(h.node('q-points').value,'-1');
+  await h.probe.load({name:'bad.json',text:async()=>'{bad'});numericNavigate(h);assert.equal(h.node('q-points').value,'-1');
   const replacement=numericFixture();replacement.questions[0].points=7;await h.probe.load({name:'new.json',text:async()=>JSON.stringify(replacement)});assert.equal(h.node('q-points').value,'7');assert.equal(h.node('q-points')['aria-invalid'],'false');
   numericInput(h,'exam-duration','1e');h.node('btn-load-sample').click();assert.equal(h.node('exam-duration').value,'60');assert.equal(h.node('exam-duration')['aria-invalid'],'false');numericCases++;
 }
 {
-  const h=await numericHarness();numericInput(h,'q-points','0');h.node('question-nav-list').children[0].listeners.click[0]({target:{closest:()=>true}});
+  const h=await numericHarness();numericInput(h,'q-points','-1');h.node('question-nav-list').children[0].listeners.click[0]({target:{closest:()=>true}});
   h.node('select-add-type').value='essay';h.node('btn-add-question').click();assert.equal(h.node('q-points')['aria-invalid'],'false');assert.equal(h.node('q-points').value,'8');await h.probe.export();assert.equal(h.probe.stats.compile,1,'retired drafts do not poison a newly added question');numericCases++;
 }
 for(const retry of [false,true]){
   const h=await numericHarness();let resolveBuild;h.zip.Writer.prototype.build=function(){return new Promise(resolve=>{resolveBuild=resolve;});};
   const first=h.probe.export();for(let n=0;n<100&&!resolveBuild;n++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(typeof resolveBuild,'function');
-  numericInput(h,'q-points','0');if(retry)await h.probe.export();const status=h.node('export-validation-status').innerHTML;
+  numericInput(h,'q-points','-1');if(retry)await h.probe.export();const status=h.node('export-validation-status').innerHTML;
   resolveBuild({fileCount:5,totalBytes:100,archiveSha256:'captured-archive',contentSha256:'captured-content',blob:new Blob()});await first;
   if(retry){assert.equal(h.node('export-validation-status').innerHTML,status);assert.equal(h.node('btn-download-nstuexam').disabled,true);}else{assert.match(h.node('export-validation-status').innerHTML,/Successfully/);assert.equal(h.node('btn-download-nstuexam').disabled,false);assert.equal(h.node('lbl-content-hash').textContent,'captured-content');}
   assert.equal(h.downloads.length,0);numericCases++;
 }
 console.log(`Studio actual numeric draft retention, bounds, model and Export ownership: ${numericCases} cases passed`);
+
+let exportControllerCases=0;
+for(const seconds of [62,601,86400]){
+  const x=numericFixture();x.durationSeconds=seconds;const h=await numericHarness(x);
+  const raw=String(seconds/60);assert.equal(h.node('exam-duration').value,raw);
+  h.probe.sync();h.node('btn-mode-preview').click();h.node('btn-mode-editor').click();h.probe.save();
+  assert.equal(JSON.parse(await h.downloads[0].blob.text()).durationSeconds,seconds,'unchanged imported integer seconds stay exact');
+  await h.probe.export();assert.equal(h.node('btn-download-nstuexam').disabled,false);h.node('btn-download-nstuexam').onclick();
+  const entries=await new h.zip.Reader(await h.downloads[1].blob.arrayBuffer()).readEntries();const manifest=JSON.parse(new TextDecoder().decode(entries.find(e=>e.path==='manifest.json').bytes));
+  assert.equal(manifest.durationSeconds,seconds);exportControllerCases++;
+}
+{
+  const x=numericFixture();x.durationSeconds=62;const h=await numericHarness(x);numericInput(h,'exam-duration','1.0333333333333333');
+  assert.equal(h.node('exam-duration')['aria-invalid'],'true');assert.equal(h.probe.inspect().exam.durationSeconds,62);
+  await h.probe.export();assert.equal(h.probe.stats.compile,0,'changed text does not get imported-seed tolerance');exportControllerCases++;
+}
+for(const mutate of [x=>x.questions[0].isMatching=true,x=>x.questions[0].audio='',x=>x.questions[0].pdf='',
+  x=>x.documents=[{id:'doc',url:'file.pdf'}],x=>x.questions=Array.from({length:257},(_,i)=>({id:'q'+i,type:'short_answer',prompt:'P',points:0}))]){
+  const x=nativeFixture();mutate(x);const h=await numericHarness(x),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  let constructed=0;const Writer=h.zip.Writer;h.zip.Writer=class extends Writer{constructor(){super();constructed++;}};
+  await h.probe.export();assert.equal(h.probe.stats.compile,0);assert.equal(constructed,0,'rejection precedes ZIP construction');
+  assert.equal(h.node('btn-download-nstuexam').disabled,true);assert.equal(h.node('btn-download-nstuexam').onclick,null);
+  assert.equal(h.node('lbl-archive-hash').textContent,'-');assert.equal(h.downloads.length,0);assert.equal(h.probe.inspect().answers,answers);
+  assert.equal(h.probe.inspect().exam,state.exam);assert.equal(JSON.stringify(state.exam),before);
+  h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before,'rejected data remains fully saveable');exportControllerCases++;
+}
+for(const byteLimit of [131072,131073]){
+  // Independent literal manifest; tune only an authored ASCII passage, with no compiler-derived expectation.
+  const x={id:'byte-boundary',title:'Boundary',subject:'',durationSeconds:62,documents:[],questions:Array.from({length:5},(_,i)=>({
+    id:'q'+i,type:'essay',prompt:'P',points:0,instruction:'',passage:i<4?'x'.repeat(30000):''}))};
+  x.questions[4].passage='x'.repeat(byteLimit-Buffer.byteLength(JSON.stringify(x,null,2)));
+  assert.equal(Buffer.byteLength(JSON.stringify(x,null,2)),byteLimit);assert.ok(x.questions[4].passage.length<30000);
+  const h=await numericHarness(x);let constructed=0;const Writer=h.zip.Writer;h.zip.Writer=class extends Writer{constructor(){super();constructed++;}};
+  const before=JSON.stringify(h.probe.inspect().exam);await h.probe.export();assert.equal(h.probe.stats.compile,1);
+  assert.equal(constructed,byteLimit===131072?1:0,'actual serialized byte admission precedes ZIP');assert.equal(JSON.stringify(h.probe.inspect().exam),before);
+  assert.equal(h.node('btn-download-nstuexam').disabled,byteLimit!==131072);
+  if(byteLimit===131072){h.node('btn-download-nstuexam').onclick();const entries=await new h.zip.Reader(await h.downloads[0].blob.arrayBuffer()).readEntries();
+    const bytes=entries.find(e=>e.path==='manifest.json').bytes;assert.equal(bytes.byteLength,131072);assert.deepEqual(JSON.parse(new TextDecoder().decode(bytes)),x);
+  }else{assert.match(h.node('export-validation-status').innerHTML,/131072/);assert.equal(h.downloads.length,0);}
+  exportControllerCases++;
+}
+{
+  const h=await numericHarness(nativeFixture());let resolveBuild;h.zip.Writer.prototype.build=function(){return new Promise(resolve=>resolveBuild=resolve);};
+  const first=h.probe.export();for(let i=0;i<100&&!resolveBuild;i++)await new Promise(resolve=>setTimeout(resolve,10));assert.equal(typeof resolveBuild,'function');
+  h.probe.inspect().exam.questions[0].pdf='';await h.probe.export();const status=h.node('export-validation-status').innerHTML;
+  resolveBuild({fileCount:5,totalBytes:100,archiveSha256:'stale',contentSha256:'stale',blob:new Blob()});await first;
+  assert.equal(h.node('export-validation-status').innerHTML,status);assert.equal(h.node('btn-download-nstuexam').disabled,true);
+  assert.equal(h.node('lbl-archive-hash').textContent,'-');exportControllerCases++;
+}
+console.log(`Studio actual Export limits, whole-second seeds, rejection/custody/Save: ${exportControllerCases} cases passed`);
 
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
