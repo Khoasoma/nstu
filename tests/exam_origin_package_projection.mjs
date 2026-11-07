@@ -64,11 +64,10 @@ for (const property of ['unexpected', 'AllowedOrigins']) {
     manifest: JSON.stringify({ ...exported, [property]: [] }) });
 }
 cases.push({ name: 'malformed-json', kind: 'invalid-conformance', accepted: false, manifest: '{' });
-// These producer/native differences are intentional evidence, not widened host policy.
-assert.equal(validateOrigin('//exam.test'), false);
-assert.equal(validateOrigin('https://exam.test/đề'), true);
-assert.equal(validateOrigin('https://exam.test/path name'), true);
+// Studio must preserve the existing native/stager syntax contract.
+assert.equal(validateOrigin('//exam.test'), true);
+assert.equal(validateOrigin('https://exam.test/đề'), false);
+assert.equal(validateOrigin('https://exam.test/path name'), false);
 process.stdout.write(JSON.stringify({ cases, signedManifest: JSON.stringify(exported),
   invalidOriginManifest: JSON.stringify({ ...exported, allowedOrigins: ['ftp://exam.test'] }),
-  producerNativeDifferences: ['Studio rejects // prefix; native accepts it.',
-    'Studio accepts non-ASCII/space suffixes; native rejects the entire string.'] }));
+  producerNativeDifferences: [] }));
