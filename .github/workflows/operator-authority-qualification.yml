@@ -1,0 +1,71 @@
+name: Operator authority qualification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  operator-authority-msvc-release:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Bind current source and qualification limits
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($path in @(
+              'server/include/nstu/windows_operator_authorization.hpp',
+              'server/src/windows_operator_authorization.cpp',
+              'tools/operator-authority-probe/CMakeLists.txt',
+              'tools/operator-authority-probe/tests.cpp')) {
+            Get-FileHash -Algorithm SHA256 -LiteralPath $path
+          }
+          Write-Output 'Standalone qualification only. Synthetic grants are not deployed roles.'
+          Write-Output 'Native session/token observations do not establish allowed-role or installed broker authority.'
+          Write-Output 'Native setup/assertion failures remain failures; no fixture skip or policy fallback.'
+      - name: Configure actual provider for MSVC x64
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S tools/operator-authority-probe -B build/auth01-msvc-release -G "Visual Studio 17 2022" -A x64 -DNSTU_ENABLE_WERROR=ON
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $metadata = Get-ChildItem -LiteralPath build/auth01-msvc-release/CMakeFiles -Recurse -Filter CMakeCXXCompiler.cmake -File |
+            ForEach-Object { Get-Content -Raw -LiteralPath $_.FullName }
+          if (-not ($metadata -match 'set\(CMAKE_CXX_COMPILER_ID "MSVC"\)')) {
+            throw 'Required standalone MSVC compiler was not configured.'
+          }
+          $cache = Get-Content -Raw -LiteralPath build/auth01-msvc-release/CMakeCache.txt
+          if ($cache -notmatch 'NSTU_ENABLE_WERROR:BOOL=ON') {
+            throw 'Required standalone WERROR is not enabled.'
+          }
+      - name: Build actual provider and checks in Release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build build/auth01-msvc-release --config Release --parallel 2 --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Require and run every standalone suite
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $listing = ctest --test-dir build/auth01-msvc-release -C Release --show-only=json-v1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $discovered = (($listing -join [Environment]::NewLine) | ConvertFrom-Json).tests.name
+          foreach ($required in @(
+              'auth01.injected_unit',
+              'auth01.native_read_only',
+              'auth01.native_owned_restrictions',
+              'auth01.native_query_errors')) {
+            if (@($discovered | Where-Object { $_ -ceq $required }).Count -ne 1) {
+              throw "Required actual standalone suite missing or duplicated: $required"
+            }
+          }
+          ctest --test-dir build/auth01-msvc-release -C Release --output-on-failure -V
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
