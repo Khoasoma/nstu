@@ -981,6 +981,9 @@ button { font-family: inherit; }
 
 /* The Draggable Chip */
 .drag-chip {
+  font-family: inherit;
+  line-height: inherit;
+  text-align: left;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -1077,6 +1080,23 @@ button { font-family: inherit; }
   border-style: solid;
   border-color: var(--border-medium);
   background-color: var(--bg-card);
+}
+
+.target-select {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+#p-matching-surface :is(.drag-chip, .target-select, .chip-remove-btn) {
+  scroll-margin: var(--nstu-spacing-xs);
 }
 
 .slot-placeholder-text {

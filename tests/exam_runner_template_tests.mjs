@@ -372,11 +372,15 @@ class ImportDomNode {
   get value() { return this._value; }
   set value(value) { this._value = String(value ?? ''); }
   get innerHTML() { return this._html; }
-  set innerHTML(value) { this._html = String(value); this.children = []; this.queries.clear(); }
+  set innerHTML(value) { this._html = String(value); for(const child of this.children)child.parentNode=null; this.children = []; this.queries.clear(); }
   get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name) }; }
   appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
   append(...children) { children.forEach(child => this.appendChild(child)); }
-  querySelector(selector) { if (!this.queries.has(selector)) this.queries.set(selector, new ImportDomNode(selector)); return this.queries.get(selector); }
+  querySelector(selector) {
+    const find=node=>{for(const child of node.children){if(selector.startsWith('.')&&child.className.split(/\s+/).includes(selector.slice(1)))return child;const nested=find(child);if(nested)return nested;}return null;};
+    const actual=find(this);if(actual)return actual;
+    if (!this.queries.has(selector)) this.queries.set(selector, new ImportDomNode(selector)); return this.queries.get(selector);
+  }
   addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
   setAttribute(name, value) { this[name] = String(value); }
   getBoundingClientRect() { return { left: 0, width: 1000 }; }
@@ -568,7 +572,7 @@ async function actualImportHarness(reader) {
   const downloads = [], blobs = new Map();
   class DownloadURL extends URL { static createObjectURL(blob) { const url='blob:test-'+blobs.size;blobs.set(url,blob);return url; } static revokeObjectURL() {} }
   getNode('preview-view').style.display = 'none';
-  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
+  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.tagName=tag.toUpperCase();node.tabIndex=tag==='button'?0:-1;node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
   const globals = { window:win, document: doc, atob, btoa,
     getComputedStyle:node=>({visibility:node.style.visibility||'visible',display:node.style.display||'block'}),
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
@@ -596,7 +600,8 @@ const importFixture = () => ({ id:'new-draft', title:'New title', durationSecond
 async function resizeHarness(){const h=await actualImportHarness();h.seed(false);const editor=h.node('editor-view');editor.style.display='grid';const field=h.node('q-points');field.remove();editor.appendChild(field);field.value='12.';field.selectionStart=1;field.selectionEnd=2;field.focus();return{h,editor,field};}
 let resizeCases=0;
 {
-  const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.length,1,'one actual authoring resize listener is installed');
+  const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueAuthoringFocusReveal').length,1,'one actual authoring resize listener is installed');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');assert.equal(h.window.listeners.resize.length,2,'no duplicate resize registrations');
   const before=h.probe.inspect(),model=JSON.stringify(before.exam),answers=before.answers,stats=JSON.stringify(h.probe.stats),focusCalls=field.focusCalls;
   h.resize();h.resize();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'opaque RAF id0 must be cancelled');h.flushFrames();
   assert.equal(field.scrolls.length,1);assert.equal(field.scrolls[0].block,'nearest');assert.equal(field.scrolls[0].inline,'nearest');assert.equal(field.scrolls[0].behavior,'instant');
@@ -778,6 +783,48 @@ for(const [type,matching] of [['essay',false],['short_answer',false],['multiple_
   assert.equal(h.node('q-points').value,'1e');assert.equal(h.node('q-points')['aria-invalid'],'true');assert.equal(h.probe.inspect().exam.questions[0].points,0);previewPointCases++;
 }
 console.log(`Studio actual Preview point captions/defaults/model/Save/answer/raw identity: ${previewPointCases} cases passed`);
+
+const matchingKeyboardFixture=()=>({id:'matching-keyboard',title:'Matching keyboard',subject:'',durationSeconds:62,questions:[
+  {id:'match-a',type:'reading',isMatching:true,prompt:'Match',points:0,options:['Heading A','Heading B','Heading C'],matchingTargets:['Target A','Target B','Target C'],passage:'Passage'},
+  {id:'match-b',type:'reading',isMatching:true,prompt:'Other',points:1,options:['Other A','Other B'],matchingTargets:['Other target'],passage:'Other passage'}]});
+let matchingKeyboardCases=0;
+{
+  const h=await numericHarness(matchingKeyboardFixture());h.node('btn-mode-preview').click();
+  const state=h.probe.inspect(),model=JSON.stringify(state.exam),answers=state.answers,assignment=answers['match-a'];
+  const token=i=>h.node('p-token-tray').children.find(n=>Number(n.dataset.tokenIdx)===i),slot=i=>h.node('p-target-list').children[i].children[1],target=i=>slot(i).querySelector('.target-select');
+  assert.equal(token(0).tagName,'BUTTON','Matching headings must be native keyboard buttons');assert.equal(token(0).type,'button');
+  assert.equal(target(0).tagName,'BUTTON','Matching targets must have separate native activation');assert.equal(target(0).type,'button');matchingKeyboardCases++;
+  token(0).focus();token(0).click();assert.equal(token(0)['aria-pressed'],'true');assert.equal(h.document.activeElement,token(0));matchingKeyboardCases++;
+  token(0).click();assert.equal(token(0)['aria-pressed'],'false');assert.equal(h.document.activeElement,token(0));matchingKeyboardCases++;
+  token(0).click();target(0).focus();slot(0).click();assert.equal(assignment[0],0);assert.equal(h.document.activeElement,target(0));assert.equal(h.probe.inspect().token,null);matchingKeyboardCases++;
+  token(1).focus();token(1).click();target(0).focus();slot(0).click();assert.equal(assignment[0],1);assert(token(0));assert.equal(h.document.activeElement,target(0));matchingKeyboardCases++;
+  const removal=slot(0).querySelector('.chip-remove-btn');assert.equal(removal.tagName,'BUTTON');assert.equal(removal['aria-label'],'Remove heading from target 1: Target A');removal.focus();removal.click();assert.equal(Object.hasOwn(assignment,'0'),false);assert.equal(h.document.activeElement,target(0));matchingKeyboardCases++;
+  const same=target(0);same.focus();slot(0).click();assert.equal(target(0),same);assert.equal(h.document.activeElement,same);matchingKeyboardCases++;
+  for(let i=0;i<3;i++){token(i).focus();token(i).click();target(i).focus();slot(i).click();assert.equal(assignment[i],i);assert.equal(h.document.activeElement,target(i));matchingKeyboardCases++;}
+  assert.equal(h.node('p-token-tray').children.length,0);assert.match(h.node('p-token-tray').innerHTML,/All headings have been placed/);matchingKeyboardCases++;
+  h.probe.place(2,0);assert.equal(assignment[2],0);assert.equal(Object.hasOwn(assignment,'0'),false);assert(token(2));matchingKeyboardCases++;
+  h.node('btn-p-next').click();assert.equal(Object.keys(answers['match-b']).length,0);h.node('btn-p-prev').click();assert.equal(answers['match-a'],assignment);assert.equal(assignment[2],0);matchingKeyboardCases++;
+  h.node('btn-mode-editor').click();numericInput(h,'q-points','1e');h.node('btn-mode-preview').click();assert.equal(answers['match-a'],assignment);h.node('btn-mode-editor').click();assert.equal(h.node('q-points').value,'1e');
+  assert.equal(h.probe.inspect().exam,state.exam);assert.equal(JSON.stringify(state.exam),model);assert.equal(h.probe.inspect().answers,answers);h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),model);matchingKeyboardCases++;
+  await h.probe.export();assert.equal(h.probe.stats.compile,0);assert.equal(h.node('btn-download-nstuexam').disabled,true);matchingKeyboardCases++;
+}
+console.log(`Studio actual matching native controls/placement/removal/focus/data: ${matchingKeyboardCases} cases passed`);
+
+async function matchingResizeHarness(){const h=await numericHarness(matchingKeyboardFixture());h.node('btn-mode-preview').click();const surface=h.node('p-matching-surface');for(const id of ['p-token-tray','p-target-list']){const node=h.node(id);node.remove();surface.appendChild(node);}const field=h.node('p-target-list').children[2].children[1].querySelector('.target-select');field.focus();return{h,field,surface,queue:()=>h.window.listeners.resize.find(callback=>callback.name==='queueMatchingFocusReveal')({type:'resize'})};}
+let matchingResizeCases=0;
+{
+  const {h,field,queue}=await matchingResizeHarness(),state=h.probe.inspect(),model=JSON.stringify(state.exam),stats=JSON.stringify(h.probe.stats),focus=field.focusCalls;
+  queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'matching RAF id0 is cancellable');h.flushFrames();
+  assert.equal(field.scrolls.length,1);assert.deepEqual(JSON.parse(JSON.stringify(field.scrolls[0])),{block:'nearest',inline:'nearest',behavior:'instant'});assert.equal(h.document.activeElement,field);assert.equal(field.focusCalls,focus);
+  assert.equal(JSON.stringify(state.exam),model);assert.equal(h.probe.inspect().answers,state.answers);assert.equal(JSON.stringify(h.probe.stats),stats);queue();h.flushFrames();assert.equal(field.scrolls.length,2);assert.deepEqual(h.window.cancelled,[0]);matchingResizeCases++;
+}
+for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({surface})=>surface.style.display='none',({h})=>h.node('preview-view').style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus(),({h})=>h.probe.inspect().exam.questions[0].isMatching=false]){
+  const ctx=await matchingResizeHarness();ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),model=JSON.stringify(state.exam),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.field.scrolls?.length||0,0);assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),model);assert.equal(ctx.h.probe.inspect().answers,state.answers);matchingResizeCases++;
+}
+{
+  const {h,field,surface,queue}=await matchingResizeHarness();queue();const next=h.node('p-target-list').children[0].children[1].querySelector('.target-select');next.focus();h.flushFrames();assert.equal(field.scrolls?.length||0,0);assert.equal(next.scrolls.length,1);assert.equal(h.document.activeElement,next);matchingResizeCases++;
+}
+console.log(`Studio actual matching resize lifecycle/guards/current focus: ${matchingResizeCases} cases passed`);
 
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
