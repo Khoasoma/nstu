@@ -1035,16 +1035,77 @@
      ======================================================================== */
 
   async function handleImportFile(file) {
+    // Admission is read-only: do not touch the current draft or Preview until
+    // every renderer-consumed field of the candidate is safe to use.
+    const admit = (candidate) => {
+      const object = (value, path) => {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error(`${path} must be an object.`);
+        }
+      };
+      const text = (value, path, maximum) => {
+        if (typeof value !== "string") throw new Error(`${path} must be text.`);
+        const iterator = value[Symbol.iterator]();
+        let count = 0;
+        while (!iterator.next().done) {
+          if (++count > maximum) throw new Error(`${path} exceeds its text limit.`);
+        }
+      };
+      const optionalText = (value, fields, prefix) => {
+        for (const [key, maximum] of Object.entries(fields)) {
+          if (Object.hasOwn(value, key)) text(value[key], `${prefix}.${key}`, maximum);
+        }
+      };
+      const numeric = (value, key, prefix) => {
+        if (Object.hasOwn(value, key) &&
+            (typeof value[key] !== "number" || !Number.isFinite(value[key]))) {
+          throw new Error(`${prefix}.${key} must be a finite number.`);
+        }
+      };
+      const list = (value, path, maximum, textMaximum) => {
+        if (!Array.isArray(value) || value.length > maximum) {
+          throw new Error(`${path} must be a bounded text list.`);
+        }
+        value.forEach((item, index) => text(item, `${path}[${index}]`, textMaximum));
+      };
+      const validId = value => typeof value === "string" && /^[a-zA-Z0-9._-]{1,96}$/.test(value);
+      object(candidate, "Manifest");
+      if (!validId(candidate.id)) throw new Error("Manifest.id is invalid.");
+      optionalText(candidate, { title: 240, subject: 120 }, "Manifest");
+      numeric(candidate, "durationSeconds", "Manifest");
+      if (Object.hasOwn(candidate, "allowedOrigins")) list(candidate.allowedOrigins, "Manifest.allowedOrigins", 32, 253);
+      if (!Array.isArray(candidate.questions) || candidate.questions.length === 0 || candidate.questions.length > 500) {
+        throw new Error("Manifest.questions must contain 1–500 question records.");
+      }
+      const ids = new Set();
+      const types = new Set(["multiple_choice", "short_answer", "essay", "listening", "reading"]);
+      candidate.questions.forEach((q, index) => {
+        const path = `questions[${index}]`;
+        object(q, path);
+        if (!validId(q.id) || ids.has(q.id) || q.id in {}) {
+          throw new Error(`${path}.id is invalid or conflicts with another answer identity.`);
+        }
+        ids.add(q.id);
+        if (!types.has(q.type)) throw new Error(`${path}.type is not supported.`);
+        if (Object.hasOwn(q, "isMatching") && typeof q.isMatching !== "boolean") {
+          throw new Error(`${path}.isMatching must be a boolean.`);
+        }
+        optionalText(q, { prompt: 8000, instruction: 4000, passage: 30000, answerPlaceholder: 240, audio: 8000 }, path);
+        numeric(q, "points", path);
+        numeric(q, "wordLimit", path);
+        // These authoring row budgets deliberately do not apply the canonical
+        // runtime's 12-option constraint to editable matching/draft data.
+        if (q.isMatching || Object.hasOwn(q, "options")) list(q.options, `${path}.options`, 500, 2000);
+        if (Object.hasOwn(q, "matchingTargets")) list(q.matchingTargets, `${path}.matchingTargets`, 500, 2000);
+      });
+    };
     try {
+      let candidate;
+      let success;
       if (file.name.endsWith(".json")) {
         const text = await file.text();
-        const data = JSON.parse(text);
-        if (!data.id || !data.questions) throw new Error("Invalid manifest JSON structure.");
-        currentExam = data;
-        activeQuestionIndex = 0;
-        resetPreviewState();
-        renderEditor();
-        showToast("Manifest imported successfully", "success");
+        candidate = JSON.parse(text);
+        success = "Manifest imported successfully";
       } else if (file.name.endsWith(".nstuexam") || file.name.endsWith(".zip")) {
         const buffer = await file.arrayBuffer();
         const reader = new NstuZip.Reader(buffer);
@@ -1052,15 +1113,17 @@
         const manifestEntry = entries.find(e => e.path === "manifest.json");
         if (!manifestEntry) throw new Error("Package does not contain manifest.json.");
         const text = new TextDecoder().decode(manifestEntry.bytes);
-        const data = JSON.parse(text);
-        currentExam = data;
-        activeQuestionIndex = 0;
-        resetPreviewState();
-        renderEditor();
-        showToast(`Imported .nstuexam package (${entries.length} files)`, "success");
+        candidate = JSON.parse(text);
+        success = `Imported .nstuexam package (${entries.length} files)`;
       } else {
         throw new Error("Please select a .nstuexam or .json file.");
       }
+      admit(candidate);
+      currentExam = candidate;
+      activeQuestionIndex = 0;
+      resetPreviewState();
+      renderEditor();
+      showToast(success, "success");
     } catch (err) {
       showToast("Import failed: " + err.message, "error");
     }

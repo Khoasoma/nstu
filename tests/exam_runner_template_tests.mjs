@@ -340,7 +340,7 @@ for (const file of [
 }
 replacementNode('preview-view').style.display = 'flex';
 replacements.seedPreview(); const previewRendersBefore = replacements.inspect().previewRenders;
-await replacements.importFile({ name: 'active.json', text: async () => JSON.stringify({ id: 'active-replacement', questions: [{ id: 'shared', prompt: 'New active Preview' }] }) });
+await replacements.importFile({ name: 'active.json', text: async () => JSON.stringify({ id: 'active-replacement', questions: [{ id: 'shared', type: 'short_answer', prompt: 'New active Preview' }] }) });
 assertFreshPreview('active-replacement');
 assert.equal(replacements.inspect().previewRenders, previewRendersBefore + 1);
 const unchangedPreview = replacements.inspect();
@@ -426,3 +426,179 @@ function exportLifecycleHarness() {
   assert.equal(h.node('btn-download-nstuexam').disabled, true);
 }
 console.log('Studio asynchronous export ownership and manifest identity: 5 scenarios passed');
+
+// Run the whole actual controller and renderers; only DOM/platform I/O are boundaries.
+class ImportDomNode {
+  constructor(id = '') { this.id = id; this.children = []; this.style = {}; this.dataset = {}; this.listeners = {}; this.className = ''; this._html = ''; this._value = ''; this.textContent = ''; this.queries = new Map(); }
+  get value() { return this._value; }
+  set value(value) { this._value = String(value ?? ''); }
+  get innerHTML() { return this._html; }
+  set innerHTML(value) { this._html = String(value); this.children = []; this.queries.clear(); }
+  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name) }; }
+  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
+  append(...children) { children.forEach(child => this.appendChild(child)); }
+  querySelector(selector) { if (!this.queries.has(selector)) this.queries.set(selector, new ImportDomNode(selector)); return this.queries.get(selector); }
+  addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+  setAttribute(name, value) { this[name] = String(value); }
+  getBoundingClientRect() { return { left: 0, width: 1000 }; }
+  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); }
+  click() { (this.listeners.click || []).forEach(listener => listener({ target: this, preventDefault() {}, stopPropagation() {} })); }
+}
+
+const zipSource = await readFile(new URL('exam/studio/zip.js', root), 'utf8');
+const importInstrumentation = `
+  const importStats = { reset:0, editor:0, preview:0, matching:0, mc:0, forms:[] };
+  const originalImportReset=resetPreviewState, originalImportEditor=renderEditor,
+    originalImportPreview=renderPreview, originalImportMatching=renderPreviewMatching,
+    originalImportMc=renderPreviewMc, originalImportForm=renderActiveQuestionForm;
+  resetPreviewState=()=>{importStats.reset++;return originalImportReset();};
+  renderEditor=()=>{importStats.editor++;return originalImportEditor();};
+  renderPreview=()=>{importStats.preview++;return originalImportPreview();};
+  renderPreviewMatching=q=>{importStats.matching++;return originalImportMatching(q);};
+  renderPreviewMc=q=>{importStats.mc++;return originalImportMc(q);};
+  renderActiveQuestionForm=()=>{importStats.forms.push(currentExam.questions[activeQuestionIndex]?.type);return originalImportForm();};
+  window.importProbe={
+    load:handleImportFile, stats:importStats,
+    inspect:()=>({exam:currentExam,active:activeQuestionIndex,index:previewIndex,answers:previewAnswers,token:selectedTokenForPlacement}),
+    seed:(exam,answers,open)=>{currentExam=exam;activeQuestionIndex=1;previewIndex=0;previewAnswers=answers;selectedTokenForPlacement=1;el('preview-view').style.display=open?'flex':'none';renderEditor();if(open)renderPreview();Object.assign(importStats,{reset:0,editor:0,preview:0,matching:0,mc:0,forms:[]});},
+    place:(target,token)=>assignTokenToSlot(currentExam.questions[previewIndex],target,token),
+    prototypeKeys:()=>Object.getOwnPropertyNames(Object.prototype).join('|')
+  };
+`;
+async function actualImportHarness(reader) {
+  const nodes = new Map(), getNode = id => { if (!nodes.has(id)) nodes.set(id, new ImportDomNode(id)); return nodes.get(id); };
+  getNode('preview-view').style.display = 'none';
+  const globals = { window: { addEventListener() {} }, document: { readyState: 'complete', documentElement: { dataset: {} }, getElementById: getNode, createElement: () => new ImportDomNode(), addEventListener() {} },
+    localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
+    TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
+    crypto: (await import('node:crypto')).webcrypto, URL, location: { origin:'http://studio.test' } };
+  const context = vm.createContext(globals);
+  vm.runInContext(zipSource, context); context.NstuZip = globals.window.NstuZip;
+  if (reader) context.NstuZip = { ...context.NstuZip, Reader: reader };
+  const marker = studioSource.indexOf('  // Start application on DOM ready');
+  assert(marker > 0);
+  vm.runInContext(studioSource.slice(0,marker) + importInstrumentation + studioSource.slice(marker), context);
+  const old = { id:'old-draft', title:'Stored title', durationSeconds:600, extra:{ keep:'inert' }, questions:[
+    {id:'old-match',type:'reading',prompt:'Old matching',isMatching:true,options:['Old A','Old B'],matchingTargets:['A','B']},
+    {id:'old-short',type:'short_answer',prompt:'Old short'}] };
+  const answers = {'old-match':{0:0},'old-short':'old answer'};
+  return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip,
+    seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
+}
+const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
+const jsonImport = value => ({ name:'fixture.json', text:async()=>JSON.stringify(value) });
+async function storedImport(h, value, literal) {
+  const writer = new h.zip.Writer(); writer.add('manifest.json',literal ?? JSON.stringify(value));
+  const archive=await writer.build(); return {name:'fixture.nstuexam',arrayBuffer:()=>archive.blob.arrayBuffer()};
+}
+async function rejectedImport(value, format, open, specialFile) {
+  const h=await actualImportHarness(); const before=h.seed(open), oldQuestions=before.exam.questions, oldExtra=before.exam.extra,
+    oldQuestion=before.exam.questions[0], oldOptions=oldQuestion.options, oldTargets=oldQuestion.matchingTargets, oldAssignment=before.answers['old-match'];
+  const modelContent=JSON.stringify(before.exam), answerContent=JSON.stringify(before.answers);
+  const nav=h.node('question-nav-list').children.slice(), raw=['exam-id','exam-title','exam-duration','exam-allowed-origins'].map(id=>h.node(id).value);
+  const feedback=h.node('toast-container').children.slice(), proto=h.probe.prototypeKeys();
+  const file=specialFile || (format==='json'?jsonImport(value):await storedImport(h,value));
+  await h.probe.load(file); const after=h.probe.inspect();
+  assert.equal(after.exam,before.exam,'failed admission preserves the model identity');
+  assert.equal(after.exam.questions,oldQuestions); assert.equal(after.exam.questions[0],oldQuestion); assert.equal(after.exam.extra,oldExtra);
+  assert.equal(after.exam.questions[0].options,oldOptions); assert.equal(after.exam.questions[0].matchingTargets,oldTargets);
+  assert.equal(after.answers,before.answers); assert.equal(after.answers['old-match'],oldAssignment);
+  assert.equal(JSON.stringify(after.exam),modelContent); assert.equal(JSON.stringify(after.answers),answerContent);
+  assert.equal(after.active,1); assert.equal(after.index,0); assert.equal(after.token,1);
+  assert.deepEqual(h.node('question-nav-list').children,nav); assert.deepEqual(['exam-id','exam-title','exam-duration','exam-allowed-origins'].map(id=>h.node(id).value),raw);
+  assert.equal(h.probe.stats.reset,0); assert.equal(h.probe.stats.editor,0); assert.equal(h.probe.stats.preview,0);
+  assert.equal(h.node('toast-container').children.length,feedback.length+1); assert.equal(h.node('toast-container').children[0],feedback[0]);
+  assert.match(h.node('toast-container').children.at(-1).className,/error/);
+  assert.equal(h.probe.prototypeKeys(),proto); if(open)h.probe.place(0,1); assert.equal(h.probe.prototypeKeys(),proto);
+}
+
+const invalidImportCases = [
+  () => null, () => [],
+  x => {x.questions={truthy:true};return x;}, x => {x.questions=[];return x;},
+  x => {x.questions=[null];return x;}, x => {x.questions=[[]];return x;},
+  x => {delete x.questions[0].type;return x;}, x => {x.questions[0].type='"><img>';return x;},
+  x => {x.id='bad id';return x;}, x => {x.questions[0].id='bad id';return x;},
+  x => {x.questions.push({...x.questions[0]});return x;},
+  ...['title','subject'].flatMap(key=>[null,{},false,1,[]].map(v=>x=>{x[key]=v;return x;})),
+  ...['prompt','instruction','passage','answerPlaceholder','audio'].flatMap(key=>[null,{},false,1,[]].map(v=>x=>{x.questions[0][key]=v;return x;})),
+  ...['durationSeconds','points','wordLimit'].flatMap(key=>[null,{},false,'12',[]].map(v=>x=>{(key==='durationSeconds'?x:x.questions[0])[key]=v;return x;})),
+  ...['options','matchingTargets'].flatMap(key=>[null,{},'text',[null],[1]].map(v=>x=>{x.questions[0][key]=v;return x;})),
+  x=>{x.allowedOrigins='';return x;}, x=>{x.allowedOrigins=[false];return x;},
+  x=>{x.questions[0].isMatching='yes';return x;},
+  x=>{x.questions[0].isMatching=true;return x;},
+  x=>{x.questions.push({id:'later',type:42});return x;},
+  ...['__proto__','constructor','toString','valueOf'].flatMap(id=>[false,true].map(matching=>x=>{x.questions[0]={id,type:'reading',isMatching:matching,options:['A','B'],matchingTargets:['T']};return x;}))
+];
+let rejectedCases=0;
+for(const mutate of invalidImportCases)for(const format of ['json','zip'])for(const open of [false,true]) {
+  await rejectedImport(mutate(importFixture()),format,open);rejectedCases++;
+}
+for(const format of ['json','zip'])for(const open of [false,true]) {
+  const file=format==='json'?{name:'bad.json',text:async()=>'{bad'}:await storedImport(await actualImportHarness(),null,'{bad');
+  await rejectedImport(null,format,open,file);rejectedCases++;
+  await rejectedImport(null,format,open,{name:format==='json'?'read.json':'read.zip',text:async()=>{throw new Error('read failure');},arrayBuffer:async()=>{throw new Error('read failure');}});rejectedCases++;
+}
+for(const open of [false,true]) {
+  const h=await actualImportHarness(), writer=new h.zip.Writer();writer.add('unrelated.txt','no manifest');const archive=await writer.build();
+  await rejectedImport(null,'zip',open,{name:'missing.zip',arrayBuffer:()=>archive.blob.arrayBuffer()});rejectedCases++;
+  await rejectedImport(null,'json',open,{name:'infinite.json',text:async()=>'{"id":"finite-test","durationSeconds":1e400,"questions":[{"id":"q","type":"essay"}]}'});rejectedCases++;
+}
+let acceptedCases=0;
+for(const type of ['multiple_choice','short_answer','essay','listening','reading'])for(const format of ['json','zip'])for(const open of [false,true]) {
+  const h=await actualImportHarness();h.seed(open);const x=importFixture();x.questions[0].type=type;x.questions[0].options=['A','B'];
+  const file=format==='json'?jsonImport(x):await storedImport(h,x);await h.probe.load(file);const state=h.probe.inspect();
+  assert.equal(state.exam.id,x.id);assert.equal(state.active,0);assert.equal(state.index,0);assert.equal(state.token,null);
+  assert.equal(h.probe.stats.reset,1);assert.equal(h.probe.stats.editor,1);assert.equal(h.probe.stats.preview,open?1:0);
+  assert.equal(h.probe.stats.forms[0],type);assert.equal(h.node('question-nav-list').children.length,1);
+  assert.equal(h.node('q-prompt').value,'New prompt');
+  if(['multiple_choice','listening','reading'].includes(type)) {
+    assert.equal(h.node('mc-option-list').children.length,2);assert.match(h.node('mc-option-list').children[0].innerHTML,/value="A"/);
+    if(open){assert.equal(h.probe.stats.mc,1);assert.equal(h.node('p-mc-surface').children.length,2);assert.match(h.node('p-mc-surface').children[1].innerHTML,/B/);}
+  }
+  if(open){assert.equal(h.node('p-question-prompt').textContent,'New prompt');assert.equal(h.node('p-question-badge').textContent,type.toUpperCase());}
+  acceptedCases++;
+}
+for(const format of ['json','zip'])for(const open of [false,true]) {
+  const h=await actualImportHarness();h.seed(open);const x={id:'empty-safe',questions:[{id:'match-safe',type:'reading',isMatching:true,options:[]}]};
+  await h.probe.load(format==='json'?jsonImport(x):await storedImport(h,x));const state=h.probe.inspect();assert.equal(state.exam.id,x.id);assert.equal(h.probe.stats.reset,1);
+  assert.equal(state.exam.questions[0].matchingTargets.length,0);if(open){assert.equal(Object.keys(state.answers).length,1);assert.equal(Object.keys(state.answers['match-safe']).length,0);}
+  acceptedCases++;
+}
+for(const points of [0,101,1000,1.25])for(const limit of [1,9,2001,5000,9.5]) {
+  const h=await actualImportHarness();h.seed(true);const x=importFixture();x.durationSeconds=600.25;x.questions[0].type='essay';x.questions[0].points=points;x.questions[0].wordLimit=limit;x.questions[0].prompt='ế\u0301𝄞';x.unknown={keep:'untouched'};
+  await h.probe.load(jsonImport(x));const q=h.probe.inspect().exam.questions[0];assert.equal(q.points,points);assert.equal(q.wordLimit,limit);assert.equal(q.prompt,x.questions[0].prompt);assert.equal(h.probe.inspect().exam.durationSeconds,600.25);assert.equal(h.probe.inspect().exam.unknown.keep,'untouched');acceptedCases++;
+}
+async function acceptedImport(value,format,open) {
+  const h=await actualImportHarness();const before=h.seed(open);
+  await h.probe.load(format==='json'?jsonImport(value):await storedImport(h,value));const after=h.probe.inspect();
+  assert.notEqual(after.exam,before.exam);assert.equal(after.exam.id,value.id);assert.equal(h.probe.stats.reset,1);assert.equal(h.probe.stats.editor,1);assert.equal(h.probe.stats.preview,open?1:0);
+  assert.equal(h.node('question-nav-list').children.length,value.questions.length);
+  return {h,after};
+}
+const textImportBounds=[['title',240,true],['subject',120,true],['prompt',8000,false],['instruction',4000,false],['passage',30000,false],['answerPlaceholder',240,false],['audio',8000,false]];
+for(const [key,maximum,top] of textImportBounds)for(const format of ['json','zip'])for(const open of [false,true]) {
+  const x=importFixture(), text='𝄞'.repeat(maximum);(top?x:x.questions[0])[key]=text;
+  const {after}=await acceptedImport(x,format,open);assert.equal((top?after.exam:after.exam.questions[0])[key],text);acceptedCases++;
+  (top?x:x.questions[0])[key]+='𝄞';await rejectedImport(x,format,open);rejectedCases++;
+}
+for(const format of ['json','zip'])for(const open of [false,true]) {
+  const x=importFixture();x.id='a'.repeat(96);x.questions[0].id='b'.repeat(96);await acceptedImport(x,format,open);acceptedCases++;
+  x.id+='a';await rejectedImport(x,format,open);rejectedCases++;
+  x.id='valid';x.questions[0].id+='b';await rejectedImport(x,format,open);rejectedCases++;
+  const many=importFixture();many.questions=Array.from({length:500},(_,index)=>({id:'q'+index,type:'short_answer'}));await acceptedImport(many,format,open);acceptedCases++;
+  many.questions.push({id:'over',type:'short_answer'});await rejectedImport(many,format,open);rejectedCases++;
+  const origins=importFixture();origins.allowedOrigins=Array.from({length:32},()=> '𝄞'.repeat(253));await acceptedImport(origins,format,open);acceptedCases++;
+  origins.allowedOrigins.push('');await rejectedImport(origins,format,open);rejectedCases++;
+  origins.allowedOrigins=['𝄞'.repeat(254)];await rejectedImport(origins,format,open);rejectedCases++;
+  const matching=importFixture();Object.assign(matching.questions[0],{type:'reading',isMatching:true,options:Array(500).fill('𝄞'.repeat(2000)),matchingTargets:Array(500).fill('𝄞'.repeat(2000))});
+  const {h,after}=await acceptedImport(matching,format,open);assert.equal(after.exam.questions[0].options.length,500);assert.equal(after.exam.questions[0].matchingTargets.length,500);if(open){h.probe.place(0,0);assert.equal(after.answers['new-q'][0],0);}acceptedCases++;
+  matching.questions[0].options.push('');await rejectedImport(matching,format,open);rejectedCases++;
+  matching.questions[0].options=['𝄞'.repeat(2001)];await rejectedImport(matching,format,open);rejectedCases++;
+  matching.questions[0].options=['','A'];matching.questions[0].matchingTargets.push('');await rejectedImport(matching,format,open);rejectedCases++;
+  matching.questions[0].matchingTargets=['𝄞'.repeat(2001)];await rejectedImport(matching,format,open);rejectedCases++;
+  matching.questions[0].matchingTargets=[''];matching.questions[0].prompt='';matching.title='';matching.subject='';matching.allowedOrigins=[''];
+  const empty=await acceptedImport(matching,format,open);assert.equal(empty.after.exam.questions[0].options[0],'');acceptedCases++;
+  const inert=importFixture();inert.id='__proto__';inert.candidate={ignored:'inert'};inert.documents=[null];inert.questions[0].pdf={ignored:'inert'};inert.questions[0].authoringExtension={keep:'literal'};
+  const retained=await acceptedImport(inert,format,open);assert.equal(JSON.stringify(retained.after.exam),JSON.stringify(inert));acceptedCases++;
+}
+console.log(`Studio actual import/render admission: ${rejectedCases} negative and ${acceptedCases} positive cases passed`);
