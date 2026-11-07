@@ -1,0 +1,493 @@
+name: Standalone Native UIA MSVC
+
+on:
+  push:
+    paths:
+      - 'tools/native-uia-probe/**'
+      - '.github/workflows/native-uia-msvc.yml'
+  pull_request:
+    paths:
+      - 'tools/native-uia-probe/**'
+      - '.github/workflows/native-uia-msvc.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-uia-msvc:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Verify frozen standalone inputs
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
+          New-Item -ItemType Directory -Path $evidenceDir | Out-Null
+          $inputs = [ordered]@{
+            status = 'RUNNING'
+            startedUtc = [DateTime]::UtcNow.ToString('o')
+            checkoutSha = $null
+            workflowSha256 = (Get-FileHash -LiteralPath '.github/workflows/native-uia-msvc.yml' -Algorithm SHA256).Hash
+            event = $env:GITHUB_EVENT_NAME
+            runId = $env:GITHUB_RUN_ID
+            attempt = $env:GITHUB_RUN_ATTEMPT
+            sourceHashes = [ordered]@{}
+            expectedSourceHashes = [ordered]@{
+              'tools/native-uia-probe/main.cpp' = '04D64CA99477CA1A4CE26C8DC017CD3F085C5D56B7FA8E2139937D0907A7E5E6'
+              'tools/native-uia-probe/tests.cpp' = 'F0AF05868F66B1B6ECE6C9DD85823872352DD6BC67C5C2D4373CD07A415B6121'
+              'tools/native-uia-probe/CMakeLists.txt' = 'FE634D458EDC8634AFE826B820323E2CB440C5758AA67E69A2C42499AAE76493'
+              'tools/native-uia-probe/README.md' = '309A6EB16479C7B5EBC603C7961AE3848670F67518D7469204986977F6A5E67E'
+            }
+            expectedTests = @(
+              @{ name = 'native_uia_own_window'; mode = '--self-test'; timeout = 90 }
+              @{ name = 'native_uia_fault_paths'; mode = '--fault-test'; timeout = 75 }
+              @{ name = 'native_uia_delayed_start'; mode = '--regression-idle'; timeout = 30 }
+              @{ name = 'native_uia_event_exception'; mode = '--regression-event'; timeout = 30 }
+              @{ name = 'native_uia_diagnostic_lock'; mode = '--regression-diagnostic'; timeout = 30 }
+              @{ name = 'native_uia_retained_metadata'; mode = '--regression-metadata'; timeout = 30 }
+              @{ name = 'native_uia_retirement_containment'; mode = '--retirement-test'; timeout = 30 }
+              @{ name = 'native_uia_focus_isolated'; mode = '--focus-isolated-test'; timeout = 30 }
+              @{ name = 'native_uia_focus_direct_interleave'; mode = '--focus-competing-test'; timeout = 30 }
+              @{ name = 'native_uia_focus_os_interleave'; mode = '--focus-os-interleave-test'; timeout = 30 }
+            )
+            MSVC_COMPILE = 'NOT_RUN'
+            CI_OWN_WINDOW = 'NOT_RUN'
+            ROOT_MSVC_DIAGNOSTIC = 'PENDING_SEPARATE_ROOT_ADMISSION'
+            ACTUAL_NSTU_PHYSICAL = 'NOT_TESTED'
+          }
+          try {
+            $head = & git rev-parse HEAD
+            $headExit = $LASTEXITCODE
+            if ($headExit -ne 0 -or $head -notmatch '^[0-9a-f]{40}$') { throw 'Cannot identify checkout commit' }
+            $inputs.checkoutSha = $head
+            if ($head -ne $env:GITHUB_SHA) { throw 'Checkout commit differs from workflow event SHA' }
+            foreach ($entry in $inputs.expectedSourceHashes.GetEnumerator()) {
+              $actual = (Get-FileHash -LiteralPath $entry.Key -Algorithm SHA256).Hash
+              $inputs.sourceHashes[$entry.Key] = $actual
+              if ($actual -ne $entry.Value) { throw "Frozen source mismatch: $($entry.Key)" }
+            }
+            $text = Get-Content -LiteralPath 'tools/native-uia-probe/tests.cpp' -Raw
+            if ($text -notmatch '#ifdef NDEBUG\s+#error Release checks must remain active\s+#endif') {
+              throw 'Existing tests.cpp active-assertion compile guard missing'
+            }
+            $inputs.activeAssertionGuard = 'tools/native-uia-probe/tests.cpp'
+            $inputs.status = 'PASS'
+          } catch {
+            $inputs.status = 'FAIL'
+            $inputs.error = $_.Exception.Message
+            throw
+          } finally {
+            $inputs | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidenceDir 'inputs.json') -Encoding utf8
+          }
+
+      - name: Compile actual standalone MSVC Release and bind artifact
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release'
+          $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
+          $inputs = Get-Content -LiteralPath (Join-Path $evidenceDir 'inputs.json') -Raw | ConvertFrom-Json
+          $compile = [ordered]@{
+            status = 'RUNNING'; phase = 'toolchain'; configureExit = $null; buildExit = $null
+            startedUtc = [DateTime]::UtcNow.ToString('o'); checkoutSha = $inputs.checkoutSha
+            workflowSha256 = $inputs.workflowSha256; sourceHashes = $inputs.sourceHashes
+            imageOS = $env:ImageOS; imageVersion = $env:ImageVersion
+            OS = [Environment]::OSVersion.VersionString
+            warningDiagnosticLineCount = $null; warningDiagnostics = @(); D9025LineCount = $null
+            warningPolicy = 'Unchanged /W4 /WX; retain every diagnostic including NDEBUG override D9025'
+          }
+          try {
+            if ($inputs.status -ne 'PASS') { throw 'Frozen inputs not verified' }
+            & cmake --version *> (Join-Path $evidenceDir 'cmake-version.log')
+            $cmakeVersionExit = $LASTEXITCODE
+            if ($cmakeVersionExit -ne 0) { throw 'CMake version unavailable' }
+            $cmakeVersionText = Get-Content -LiteralPath (Join-Path $evidenceDir 'cmake-version.log') -Raw
+            $versionMatch = [regex]::Match($cmakeVersionText, 'cmake version (\d+\.\d+\.\d+)')
+            if (-not $versionMatch.Success -or [version]$versionMatch.Groups[1].Value -lt [version]'3.25') {
+              throw 'CMake 3.25 or newer required'
+            }
+            $compile.cmakeVersion = $versionMatch.Groups[1].Value
+            & ctest --version *> (Join-Path $evidenceDir 'ctest-version.log')
+            $ctestVersionExit = $LASTEXITCODE
+            if ($ctestVersionExit -ne 0) { throw 'CTest version unavailable' }
+            $compile.ctestVersion = (Get-Content -LiteralPath (Join-Path $evidenceDir 'ctest-version.log') -Raw).Trim()
+            $uia = Get-Item -LiteralPath (Join-Path $env:SystemRoot 'System32/UIAutomationCore.dll')
+            $compile.UIAutomationCore = @{ version = $uia.VersionInfo.FileVersion; sha256 = (Get-FileHash -LiteralPath $uia.FullName -Algorithm SHA256).Hash }
+
+            $compile.phase = 'configure'
+            & cmake -S tools/native-uia-probe -B $buildDir -G 'Visual Studio 17 2022' -A x64 -T host=x64 `
+              -DCMAKE_CONFIGURATION_TYPES=Release *> (Join-Path $evidenceDir 'configure.log')
+            $compile.configureExit = $LASTEXITCODE
+            if ($compile.configureExit -ne 0) { throw "Standalone configure failed: $($compile.configureExit)" }
+            $compile.phase = 'settings'
+            $cache = Get-Content -LiteralPath (Join-Path $buildDir 'CMakeCache.txt') -Raw
+            if ($cache -notmatch '(?m)^CMAKE_GENERATOR:INTERNAL=Visual Studio 17 2022\r?$' -or
+                $cache -notmatch '(?m)^CMAKE_GENERATOR_PLATFORM:INTERNAL=x64\r?$' -or
+                $cache -notmatch '(?m)^CMAKE_CONFIGURATION_TYPES:[^=]+=Release\r?$') { throw 'Wrong generator, target or configuration' }
+            $compilerFiles = @(Get-ChildItem -LiteralPath (Join-Path $buildDir 'CMakeFiles') -Filter CMakeCXXCompiler.cmake -Recurse -File)
+            if ($compilerFiles.Count -ne 1) { throw 'MSVC compiler identity missing or ambiguous' }
+            $compilerText = Get-Content -LiteralPath $compilerFiles[0].FullName -Raw
+            if ($compilerText -notmatch 'set\(CMAKE_CXX_COMPILER_ID "MSVC"\)') { throw 'Compiler is not MSVC' }
+            $compilerMatch = [regex]::Match($compilerText, 'set\(CMAKE_CXX_COMPILER "([^"]+)"\)')
+            if (-not $compilerMatch.Success) { throw 'MSVC compiler path unavailable' }
+            $cl = Get-Item -LiteralPath $compilerMatch.Groups[1].Value
+            if ($cl.Name -ne 'cl.exe' -or $cl.FullName -notmatch '[\\/]Hostx64[\\/]x64[\\/]cl\.exe$') { throw 'MSVC host/target are not x64' }
+            $compile.compiler = @{ path = $cl.FullName; version = $cl.VersionInfo.FileVersion; sha256 = (Get-FileHash -LiteralPath $cl.FullName -Algorithm SHA256).Hash }
+            $projectPath = Join-Path $buildDir 'nstu-native-uia-probe.vcxproj'
+            [xml]$project = Get-Content -LiteralPath $projectPath -Raw
+            $translationUnits = @($project.SelectNodes('//*[local-name()="ClCompile" and @Include]') |
+              ForEach-Object { [IO.Path]::GetFileName($_.GetAttribute('Include')) } | Sort-Object)
+            if ($translationUnits.Count -ne 2 -or ($translationUnits -join ',') -ne 'main.cpp,tests.cpp') {
+              throw 'Actual frozen main.cpp and tests.cpp target compilation not verified'
+            }
+            $releaseGroups = @($project.SelectNodes('//*[local-name()="ItemDefinitionGroup"]') | Where-Object { $_.Condition -match 'Release\|x64' })
+            if ($releaseGroups.Count -ne 1) { throw 'Release x64 compile configuration ambiguous' }
+            $settings = $releaseGroups[0].ClCompile
+            $options = [string]$settings.AdditionalOptions
+            $undefined = [string]$settings.UndefinePreprocessorDefinitions
+            if ([string]$settings.WarningLevel -ne 'Level4' -or [string]$settings.TreatWarningAsError -ne 'true' -or
+                [string]$settings.LanguageStandard -ne 'stdcpp20' -or [string]$settings.RuntimeLibrary -ne 'MultiThreaded' -or
+                [string]$settings.Optimization -ne 'MaxSpeed' -or
+                ([string]$settings.ConformanceMode -ne 'true' -and $options -notmatch '/permissive-') -or
+                $options -notmatch '/utf-8' -or ($undefined -notmatch '(^|;)NDEBUG(;|$)' -and $options -notmatch '/UNDEBUG')) {
+              throw 'Strict MSVC/Release/static-CRT/active-assertion settings not verified'
+            }
+            $compile.settings = @{ WarningLevel = [string]$settings.WarningLevel; TreatWarningAsError = [string]$settings.TreatWarningAsError
+              LanguageStandard = [string]$settings.LanguageStandard; RuntimeLibrary = [string]$settings.RuntimeLibrary
+              Optimization = [string]$settings.Optimization; ConformanceMode = [string]$settings.ConformanceMode
+              AdditionalOptions = $options; UndefinePreprocessorDefinitions = $undefined }
+            $compile.translationUnits = $translationUnits
+            $compile.activeAssertionsProof = 'Existing tests.cpp compile guard; target NDEBUG undefinition applies to both frozen translation units'
+            $compile.WindowsSDK = $project.SelectSingleNode('//*[local-name()="WindowsTargetPlatformVersion"]').InnerText
+            $compile.PlatformToolset = @($project.SelectNodes('//*[local-name()="PlatformToolset"]') | ForEach-Object { $_.InnerText } | Sort-Object -Unique)
+            if ([string]::IsNullOrWhiteSpace($compile.WindowsSDK) -or $compile.PlatformToolset.Count -ne 1 -or
+                $compile.PlatformToolset[0] -ne 'v143') { throw 'Actual VS2022 SDK/toolset not verified' }
+            Copy-Item -LiteralPath $projectPath -Destination (Join-Path $evidenceDir 'nstu-native-uia-probe.vcxproj')
+            Copy-Item -LiteralPath $compilerFiles[0].FullName -Destination (Join-Path $evidenceDir 'CMakeCXXCompiler.cmake')
+
+            $compile.phase = 'build'
+            & cmake --build $buildDir --config Release --parallel -- /v:normal /nologo *> (Join-Path $evidenceDir 'build.log')
+            $compile.buildExit = $LASTEXITCODE
+            if ($compile.buildExit -ne 0) { throw "Strict MSVC build failed: $($compile.buildExit)" }
+            $compile.phase = 'binary'
+            $exe = Get-Item -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe')
+            $dumpbin = Join-Path $cl.DirectoryName 'dumpbin.exe'
+            if (-not (Test-Path -LiteralPath $dumpbin -PathType Leaf)) { throw 'Verified MSVC dumpbin missing' }
+            & $dumpbin /headers $exe.FullName *> (Join-Path $evidenceDir 'pe-headers.log')
+            $headersExit = $LASTEXITCODE
+            if ($headersExit -ne 0) { throw 'PE header inspection failed' }
+            & $dumpbin /imports $exe.FullName *> (Join-Path $evidenceDir 'pe-imports.log')
+            $importsExit = $LASTEXITCODE
+            if ($importsExit -ne 0) { throw 'PE import inspection failed' }
+            if ((Get-Content -LiteralPath (Join-Path $evidenceDir 'pe-headers.log') -Raw) -notmatch '8664 machine \(x64\)') { throw 'Executable is not PE x64' }
+            $importText = Get-Content -LiteralPath (Join-Path $evidenceDir 'pe-imports.log') -Raw
+            $imports = @([regex]::Matches($importText, '(?im)^\s*([a-z0-9_.-]+\.dll)\s*$') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+            if ($imports.Count -eq 0 -or $imports -notcontains 'UIAutomationCore.dll') { throw 'System UIA imports not verified' }
+            foreach ($dll in $imports) {
+              if ($dll -match '^(msvcp|vcruntime|ucrtbase|api-ms-win-crt)') { throw "Dynamic CRT import contradicts static CRT: $dll" }
+              if ($dll -notmatch '^(api|ext)-ms-win-' -and -not (Test-Path -LiteralPath (Join-Path $env:SystemRoot "System32/$dll") -PathType Leaf)) {
+                throw "Non-system direct import: $dll"
+              }
+            }
+            $compile.imports = $imports
+            $compile.binary = @{ sha256 = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash; size = $exe.Length }
+            $packageDir = Join-Path $evidenceDir 'msvc-probe'
+            New-Item -ItemType Directory -Path (Join-Path $packageDir 'source') | Out-Null
+            Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $packageDir 'nstu-native-uia-probe.exe')
+            foreach ($entry in $inputs.sourceHashes.PSObject.Properties) {
+              $copy = Join-Path $packageDir ('source/' + [IO.Path]::GetFileName($entry.Name))
+              Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $entry.Name) -Destination $copy
+              if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -ne $entry.Value) { throw 'Packaged source drift' }
+            }
+            if ((Get-FileHash -LiteralPath (Join-Path $packageDir 'nstu-native-uia-probe.exe') -Algorithm SHA256).Hash -ne $compile.binary.sha256) { throw 'Packaged executable drift' }
+            $compile.status = 'PASS'
+            $compile.phase = 'complete'
+          } catch {
+            $compile.status = 'FAIL'
+            $compile.error = $_.Exception.Message
+            throw
+          } finally {
+            $buildLog = Join-Path $evidenceDir 'build.log'
+            if (Test-Path -LiteralPath $buildLog) {
+              $buildText = Get-Content -LiteralPath $buildLog -Raw
+              $compile.warningDiagnostics = @($buildText -split '\r?\n' | Where-Object { $_ -match '\bwarning\s+[A-Z]+\d+\s*:' })
+              $compile.warningDiagnosticLineCount = $compile.warningDiagnostics.Count
+              $compile.D9025LineCount = @($compile.warningDiagnostics | Where-Object { $_ -match '\bD9025\b' }).Count
+              $compile.zeroWarningDiagnosticLinesObserved = $compile.warningDiagnosticLineCount -eq 0
+              $compile.buildLogSha256 = (Get-FileHash -LiteralPath $buildLog -Algorithm SHA256).Hash
+            }
+            $compile.completedUtc = [DateTime]::UtcNow.ToString('o')
+            $compile | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $evidenceDir 'compile.json') -Encoding utf8
+            if ($compile.status -eq 'PASS') {
+              $manifest = [ordered]@{ checkoutSha = $inputs.checkoutSha; workflowSha256 = $inputs.workflowSha256
+                runId = $inputs.runId; attempt = $inputs.attempt; sourceHashes = $inputs.sourceHashes
+                executable = 'msvc-probe/nstu-native-uia-probe.exe'; binary = $compile.binary
+                MSVC_COMPILE = 'PASS'; compiler = $compile.compiler; settings = $compile.settings
+                translationUnits = $compile.translationUnits; activeAssertionsProof = $compile.activeAssertionsProof
+                WindowsSDK = $compile.WindowsSDK; PlatformToolset = $compile.PlatformToolset
+                OS = $compile.OS; UIAutomationCore = $compile.UIAutomationCore; imports = $compile.imports
+                warningDiagnosticLineCount = $compile.warningDiagnosticLineCount; warningDiagnostics = $compile.warningDiagnostics
+                D9025LineCount = $compile.D9025LineCount; compileReceiptSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'compile.json') -Algorithm SHA256).Hash
+                ROOT_MSVC_DIAGNOSTIC = 'PENDING_SEPARATE_ROOT_ADMISSION'; ACTUAL_NSTU_PHYSICAL = 'NOT_TESTED' }
+              $manifest | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $evidenceDir 'msvc-probe/manifest.json') -Encoding utf8
+            }
+          }
+
+      - name: Require observed own CI desktop context
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
+          $context = [ordered]@{ status = 'RUNNING'; CI_OWN_WINDOW = 'NOT_RUN'; userInteractive = [Environment]::UserInteractive
+            sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId; desktopOpened = $false; desktopError = $null
+            desktopClosed = $false; OS = [Environment]::OSVersion.VersionString }
+          try {
+            Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class NativeProbeCiDesktop {
+            [DllImport("user32.dll", SetLastError=true)]
+            public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+            [DllImport("user32.dll", SetLastError=true)]
+            [return: MarshalAs(UnmanagedType.Bool)]
+            public static extern bool CloseDesktop(IntPtr desktop);
+          }
+          '@
+            $desktop = [NativeProbeCiDesktop]::OpenInputDesktop(0, $false, 1)
+            $context.desktopOpened = $desktop -ne [IntPtr]::Zero
+            $context.desktopError = if ($context.desktopOpened) { 0 } else { [Runtime.InteropServices.Marshal]::GetLastWin32Error() }
+            if ($context.desktopOpened) { $context.desktopClosed = [NativeProbeCiDesktop]::CloseDesktop($desktop) }
+            if (-not $context.userInteractive -or $context.sessionId -le 0 -or -not $context.desktopOpened -or -not $context.desktopClosed) {
+              throw 'CI own-window context unavailable; runtime unqualified'
+            }
+            $context.status = 'ELIGIBLE_NOT_QUALIFIED'
+          } catch {
+            $context.status = 'FAIL'
+            $context.CI_OWN_WINDOW = 'NOT_RUN_CONTEXT_REJECTED'
+            $context.error = $_.Exception.Message
+            throw
+          } finally {
+            $context | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceDir 'context.json') -Encoding utf8
+          }
+
+      - name: Verify all ten exact CTest registrations
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release'
+          $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
+          $inputs = Get-Content -LiteralPath (Join-Path $evidenceDir 'inputs.json') -Raw | ConvertFrom-Json
+          $receipt = [ordered]@{ status = 'RUNNING'; inventoryExit = $null; count = $null }
+          try {
+            & ctest --test-dir $buildDir -C Release --show-only=json-v1 > (Join-Path $evidenceDir 'test-inventory.json')
+            $receipt.inventoryExit = $LASTEXITCODE
+            if ($receipt.inventoryExit -ne 0) { throw 'CTest inventory failed' }
+            $inventory = Get-Content -LiteralPath (Join-Path $evidenceDir 'test-inventory.json') -Raw | ConvertFrom-Json
+            $receipt.count = @($inventory.tests).Count
+            if ($receipt.count -ne 10 -or @($inventory.tests.name | Sort-Object -Unique).Count -ne 10) { throw 'CTest cohort missing or duplicated' }
+            $exe = (Resolve-Path -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe')).Path
+            foreach ($expected in $inputs.expectedTests) {
+              $matchingTests = @($inventory.tests | Where-Object { $_.name -eq $expected.name })
+              if ($matchingTests.Count -ne 1) { throw "Missing exact test: $($expected.name)" }
+              $test = $matchingTests[0]
+              if (@($test.command).Count -ne 2 -or $test.command[1] -ne $expected.mode -or
+                  -not [string]::Equals([IO.Path]::GetFullPath($test.command[0]), $exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'CTest command differs from exact built probe/mode' }
+              $timeouts = @($test.properties | Where-Object { $_.name -eq 'TIMEOUT' })
+              if ($timeouts.Count -ne 1 -or [double]$timeouts[0].value -ne $expected.timeout) { throw 'CTest timeout changed' }
+              if (@($test.properties | Where-Object { $_.name -eq 'SKIP_RETURN_CODE' -or
+                    ($_.name -in @('DISABLED', 'WILL_FAIL') -and $_.value) }).Count) { throw 'CTest skip or nonzero override present' }
+            }
+            $receipt.status = 'PASS'
+          } catch {
+            $receipt.status = 'FAIL'; $receipt.error = $_.Exception.Message; throw
+          } finally {
+            $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceDir 'inventory-check.json') -Encoding utf8
+          }
+
+      - name: Execute ten native cases once and validate complete evidence
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $buildDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release'
+          $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
+          $inputs = Get-Content -LiteralPath (Join-Path $evidenceDir 'inputs.json') -Raw | ConvertFrom-Json
+          $compile = Get-Content -LiteralPath (Join-Path $evidenceDir 'compile.json') -Raw | ConvertFrom-Json
+          $result = [ordered]@{ status = 'RUNNING'; CI_OWN_WINDOW = 'RUNNING'; testExit = $null; results = @()
+            ROOT_MSVC_DIAGNOSTIC = 'PENDING_SEPARATE_ROOT_ADMISSION'; ACTUAL_NSTU_PHYSICAL = 'NOT_TESTED' }
+          try {
+            & ctest --test-dir $buildDir -C Release --parallel 1 --stop-on-failure --no-tests=error --verbose `
+              --output-log (Join-Path $evidenceDir 'ctest.log') --output-junit (Join-Path $evidenceDir 'ctest-junit.xml')
+            $result.testExit = $LASTEXITCODE
+            if ($result.testExit -ne 0) { throw "Real Native UIA CTest failure: $($result.testExit)" }
+            [xml]$junit = Get-Content -LiteralPath (Join-Path $evidenceDir 'ctest-junit.xml') -Raw
+            $cases = @($junit.SelectNodes('//*[local-name()="testcase"]'))
+            if ($cases.Count -ne 10 -or @($cases | ForEach-Object { $_.GetAttribute('name') } | Sort-Object -Unique).Count -ne 10 -or
+                $junit.SelectNodes('//*[local-name()="skipped" or local-name()="failure" or local-name()="error"]').Count) { throw 'JUnit does not prove ten executed successful cases' }
+            if (-not (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log') -PathType Leaf)) { throw 'Complete CTest temporary output missing' }
+            $outputs = @{}
+            foreach ($expected in $inputs.expectedTests) {
+              $case = @($cases | Where-Object { $_.GetAttribute('name') -eq $expected.name })
+              if ($case.Count -ne 1 -or -not $case[0].HasAttribute('time')) { throw 'Missing named result/duration' }
+              $outputNode = $case[0].SelectSingleNode('*[local-name()="system-out"]')
+              if (-not $outputNode -or -not $outputNode.InnerText.Trim()) { throw 'Native case output missing' }
+              $outputs[$expected.name] = $outputNode.InnerText
+              $result.results += @{ name = $expected.name; status = 'PASS'; seconds = [double]::Parse($case[0].GetAttribute('time'), [Globalization.CultureInfo]::InvariantCulture) }
+            }
+
+            # Adjudicate only the native focus evidence actually printed by the frozen source.
+            function Read-NativeFocusEpoch([string]$text) {
+              $lines = $text -split '\r?\n'
+              $headers = @($lines | Where-Object { $_ -match '^DIAGNOSTIC epoch=' })
+              if ($headers.Count -ne 1) { throw 'Missing or ambiguous final diagnostic epoch' }
+              $fields = @{}
+              foreach ($match in [regex]::Matches($headers[0], '(\w+)=(\d+)')) { $fields[$match.Groups[1].Value] = [long]$match.Groups[2].Value }
+              foreach ($key in @('epoch', 'generation', 'target', 'complete', 'valid', 'armed', 'disarm_confirmed', 'removal', 'pop_seq', 'post_pump', 'target_mutated')) {
+                if (-not $fields.ContainsKey($key)) { throw 'Incomplete final diagnostic fields' }
+              }
+              if ($fields.epoch -le 0 -or $fields.generation -le 0 -or $fields.target -le 0 -or $fields.complete -ne 1 -or
+                  $fields.valid -ne 1 -or $fields.armed -ne 0 -or $fields.disarm_confirmed -ne 1 -or
+                  $fields.removal -ne 1 -or $fields.target_mutated -ne 0) { throw 'Final identity/completeness/disarm/cancellation evidence invalid' }
+              $csvHeaders = @($lines | Where-Object { $_ -match '^seq,pump,token,actor,candidateOS,' })
+              if ($csvHeaders.Count -ne 1) { throw 'Full focus CSV header missing' }
+              $csvLines = @($lines | Where-Object { $_ -match '^\d+,\d+,\d+,' })
+              $rows = @(($csvHeaders[0] + "`n" + ($csvLines -join "`n")) | ConvertFrom-Csv)
+              if ($rows.Count -eq 0 -or $rows.Count -gt 256) { throw 'Focus trace absent or oversized' }
+              $sequence = 0L
+              foreach ($row in $rows) { ++$sequence; if ([long]$row.seq -ne $sequence) { throw 'Lost or noncontiguous focus records' } }
+              $targetRows = @($rows | Where-Object { [long]$_.token -eq $fields.target })
+              $cancel = @($targetRows | Where-Object { [int]$_.phase -eq 5 -and [int]$_.completion -eq 2 -and [long]$_.hr -eq -2146233083 })
+              $pop = @($targetRows | Where-Object { [int]$_.phase -eq 7 -and [long]$_.seq -eq $fields.pop_seq })
+              if ($cancel.Count -ne 1 -or $pop.Count -ne 1 -or [long]$cancel[0].seq -ge [long]$pop[0].seq -or
+                  @($targetRows | Where-Object { [int]$_.phase -eq 6 }).Count -or
+                  @($targetRows | Where-Object { [int]$_.phase -eq 2 -and [long]$_.actor -eq 1 }).Count -ne 1) { throw 'Exact target admission/cancellation/pop/nonmutation missing' }
+              $cover = @($rows | Where-Object { [int]$_.phase -eq 11 -and [long]$_.seq -eq $fields.post_pump -and
+                [long]$_.pump -eq [long]$pop[0].pump -and [long]$_.seq -gt [long]$pop[0].seq -and
+                [long]$_.firstPop -le [long]$pop[0].seq -and [long]$_.lastPop -ge [long]$pop[0].seq })
+              if ($cover.Count -ne 1 -or @($rows | Where-Object { [int]$_.phase -eq 0 -and [int]$_.stage -eq 13 }).Count -ne 1) { throw 'Covering final pump/epoch-end missing' }
+              return @{ fields = $fields; rows = $rows; cancellationSequence = [long]$cancel[0].seq }
+            }
+            $focus = @{}
+            foreach ($name in @('native_uia_own_window', 'native_uia_focus_isolated', 'native_uia_focus_direct_interleave', 'native_uia_focus_os_interleave')) {
+              $focus[$name] = Read-NativeFocusEpoch $outputs[$name]
+            }
+            $isolated = $focus.native_uia_focus_isolated
+            $baseline = @($isolated.rows | Where-Object { [int]$_.phase -eq 0 -and [int]$_.stage -eq 5 })
+            $latch = @($isolated.rows | Where-Object { [int]$_.phase -eq 0 -and [int]$_.stage -eq 6 })
+            $assertion = @($isolated.rows | Where-Object { [int]$_.phase -eq 0 -and [int]$_.stage -eq 12 })
+            $end = @($isolated.rows | Where-Object { [int]$_.phase -eq 0 -and [int]$_.stage -eq 13 })
+            if ($baseline.Count -ne 1 -or $latch.Count -ne 1 -or $assertion.Count -ne 1 -or $end.Count -ne 1 -or
+                [int]$baseline[0].host -ne 1 -or [int]$baseline[0].after -ne 1 -or [int]$baseline[0].total -ne 0 -or
+                [int]$latch[0].host -ne 1 -or [int]$latch[0].after -ne 1 -or [int]$latch[0].total -ne 0 -or
+                [int]$end[0].host -ne 1 -or [int]$end[0].after -ne 1 -or $isolated.fields.other_valid -ne 0 -or
+                $isolated.fields.unplanned -ne 0 -or [long]$assertion[0].seq -le [long]$latch[0].seq -or
+                @($isolated.rows | Where-Object { [long]$_.seq -gt [long]$latch[0].seq -and [long]$_.seq -le [long]$assertion[0].seq -and
+                  [int]$_.phase -eq 12 -and [int]$_.host -eq 0 }).Count) { throw 'Isolated focused baseline/latch/final or contamination evidence failed' }
+            $direct = $focus.native_uia_focus_direct_interleave
+            $competitors = @($direct.rows | Where-Object { [long]$_.token -ne $direct.fields.target -and [long]$_.actor -eq 2 -and
+              [int]$_.origin -eq 3 -and [int]$_.action -eq 2 -and [int]$_.phase -eq 6 -and [int]$_.held -eq 1 -and
+              [int]$_.expired -eq 0 -and [long]$_.hr -eq 0 -and [int]$_.before -eq 1 -and [int]$_.after -eq 2 -and
+              [long]$_.seq -lt $direct.cancellationSequence })
+            if ($direct.fields.other_valid -ne 1 -or $competitors.Count -ne 1) { throw 'Direct valid competing mutation not evidenced' }
+            $competitorCompletion = @($direct.rows | Where-Object { [long]$_.token -eq [long]$competitors[0].token -and
+              [long]$_.actor -eq 2 -and [int]$_.phase -eq 4 -and [int]$_.completion -eq 1 -and [long]$_.hr -eq 0 -and
+              [int]$_.held -eq 1 -and [int]$_.expired -eq 0 -and [long]$_.seq -gt [long]$competitors[0].seq -and
+              [long]$_.seq -lt $direct.cancellationSequence })
+            if ($competitorCompletion.Count -ne 1) { throw 'Direct competitor actual completion missing' }
+
+            $os = $focus.native_uia_focus_os_interleave
+            $osLabel = [regex]::Match($outputs.native_uia_focus_os_interleave, 'CONTROLLED OS Value result=(-?\d+) Value_evidence=(consistent-success|consistent-timeout)')
+            if (-not $osLabel.Success) { throw 'OS Value result inconclusive or missing' }
+            $actual = [long]$osLabel.Groups[1].Value
+            $begin = @($os.rows | Where-Object { [int]$_.phase -eq 0 -and [long]$_.actor -eq 3 -and [int]$_.origin -eq 1 -and [int]$_.stage -eq 1 })
+            $returned = @($os.rows | Where-Object { [int]$_.phase -eq 0 -and [long]$_.actor -eq 3 -and [int]$_.origin -eq 1 -and [int]$_.stage -eq 2 })
+            if ($begin.Count -ne 1 -or $returned.Count -ne 1 -or [long]$returned[0].hr -ne $actual -or
+                [long]$begin[0].seq -ge [long]$returned[0].seq) { throw 'Actual OS call interval/HRESULT missing' }
+            $submitted = @($os.rows | Where-Object { [int]$_.phase -eq 1 -and [int]$_.action -eq 1 -and [int]$_.node -eq 2 -and
+              [long]$_.candidateOS -eq 3 -and [long]$_.seq -gt [long]$begin[0].seq -and [long]$_.seq -lt [long]$returned[0].seq })
+            if ($submitted.Count -ne 1) { throw 'OS actual Value token missing or ambiguous' }
+            $valueRows = @($os.rows | Where-Object { [long]$_.token -eq [long]$submitted[0].token })
+            if (@($valueRows | Where-Object { [int]$_.action -ne 1 -or [int]$_.node -ne 2 -or [long]$_.candidateOS -ne 3 -or
+                ([int]$_.phase -ge 1 -and [int]$_.phase -le 6 -and
+                  ([long]$_.seq -le [long]$begin[0].seq -or [long]$_.seq -ge [long]$returned[0].seq)) -or
+                [int]$_.phase -eq 3 }).Count) { throw 'Value token context/path inconsistent' }
+            $queued = @($valueRows | Where-Object { [int]$_.phase -eq 2 })
+            $completed = @($valueRows | Where-Object { [int]$_.phase -eq 4 -and [int]$_.completion -eq 1 -and [long]$_.hr -eq 0 -and [int]$_.expired -eq 0 })
+            $mutated = @($valueRows | Where-Object { [int]$_.phase -eq 6 -and [long]$_.hr -eq 0 -and [int]$_.expired -eq 0 })
+            $canceled = @($valueRows | Where-Object { [int]$_.phase -eq 5 -and [int]$_.completion -eq 2 -and [long]$_.hr -eq -2146233083 })
+            if ($actual -eq 0 -and $osLabel.Groups[2].Value -eq 'consistent-success') {
+              if ($completed.Count -ne 1 -or $mutated.Count -ne 1 -or
+                  @($valueRows | Where-Object { [int]$_.phase -eq 5 }).Count -or
+                  @($valueRows | Where-Object { [int]$_.phase -eq 4 }).Count -ne 1 -or
+                  @($valueRows | Where-Object { [int]$_.phase -eq 6 }).Count -ne 1 -or $queued.Count -gt 1 -or
+                  [long]$submitted[0].seq -ge [long]$mutated[0].seq -or [long]$mutated[0].seq -ge [long]$completed[0].seq -or
+                  [long]$completed[0].seq -ge [long]$returned[0].seq) { throw 'Actual successful Value history inconsistent' }
+              if ($queued.Count -eq 1 -and ([long]$queued[0].seq -le [long]$submitted[0].seq -or [long]$queued[0].seq -ge [long]$mutated[0].seq)) { throw 'Value queued admission inconsistent' }
+              if ($queued.Count -eq 0 -and ([long]$submitted[0].caller -ne [long]$submitted[0].executing -or
+                  [long]$completed[0].executing -ne [long]$submitted[0].executing)) { throw 'Value direct execution not evidenced' }
+            } elseif ($actual -eq -2146233083 -and $osLabel.Groups[2].Value -eq 'consistent-timeout') {
+              if ($queued.Count -ne 1 -or $canceled.Count -ne 1 -or
+                  @($valueRows | Where-Object { [int]$_.phase -eq 5 }).Count -ne 1 -or
+                  @($valueRows | Where-Object { [int]$_.phase -in @(4, 6) }).Count -or
+                  [long]$submitted[0].seq -ge [long]$queued[0].seq -or [long]$queued[0].seq -ge [long]$canceled[0].seq -or
+                  [long]$canceled[0].seq -ge [long]$returned[0].seq) { throw 'Actual queued Value timeout history inconsistent' }
+            } else { throw 'Actual OS Value result and oracle disagree' }
+            $result.focusEvidence = @{ isolated = $isolated.fields; direct = $direct.fields; OS = $os.fields
+              osValueResult = $actual; osValueOracle = $osLabel.Groups[2].Value; osAssociation = 'candidate interval consistent' }
+            foreach ($entry in $inputs.sourceHashes.PSObject.Properties) {
+              if ((Get-FileHash -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $entry.Name) -Algorithm SHA256).Hash -ne $entry.Value) { throw 'Source changed during runtime' }
+            }
+            if ((Get-FileHash -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe') -Algorithm SHA256).Hash -ne $compile.binary.sha256) { throw 'Executable changed during runtime' }
+            $result.status = 'PASS'; $result.CI_OWN_WINDOW = 'PASS'
+          } catch {
+            $result.status = 'FAIL'; $result.CI_OWN_WINDOW = 'FAIL'; $result.error = $_.Exception.Message; throw
+          } finally {
+            $result.completedUtc = [DateTime]::UtcNow.ToString('o')
+            $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $evidenceDir 'test-result.json') -Encoding utf8
+          }
+
+      - name: Preserve phase results and complete logs
+        if: always()
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
+          New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
+          $temporary = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release/Testing/Temporary'
+          if (Test-Path -LiteralPath $temporary -PathType Container) {
+            Copy-Item -LiteralPath $temporary -Destination (Join-Path $evidenceDir 'ctest-temporary') -Recurse
+          }
+          $final = [ordered]@{ MSVC_COMPILE = 'NOT_RUN'; CI_OWN_WINDOW = 'NOT_RUN'
+            ROOT_MSVC_DIAGNOSTIC = 'PENDING_SEPARATE_ROOT_ADMISSION'; ACTUAL_NSTU_PHYSICAL = 'NOT_TESTED'
+            checkoutSha = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT
+            evidence = @(); warningDiagnosticLineCount = $null; D9025LineCount = $null }
+          $compilePath = Join-Path $evidenceDir 'compile.json'
+          if (Test-Path -LiteralPath $compilePath) {
+            $compile = Get-Content -LiteralPath $compilePath -Raw | ConvertFrom-Json
+            $final.MSVC_COMPILE = $compile.status
+            $final.warningDiagnosticLineCount = $compile.warningDiagnosticLineCount
+            $final.D9025LineCount = $compile.D9025LineCount
+          }
+          $contextPath = Join-Path $evidenceDir 'context.json'
+          if (Test-Path -LiteralPath $contextPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $contextPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
+          $testPath = Join-Path $evidenceDir 'test-result.json'
+          if (Test-Path -LiteralPath $testPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $testPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
+          foreach ($file in Get-ChildItem -LiteralPath $evidenceDir -Recurse -File) {
+            $final.evidence += @{ path = [IO.Path]::GetRelativePath($evidenceDir, $file.FullName); sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash; size = $file.Length }
+          }
+          $final | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidenceDir 'final-status.json') -Encoding utf8
+          if ($final.MSVC_COMPILE -eq 'PASS' -and $final.CI_OWN_WINDOW -eq 'PASS') {
+            "Standalone Native UIA MSVC Release compile qualified; ten CI own-window cases passed at this recorded runner context. Compiler diagnostic lines: $($final.warningDiagnosticLineCount), including D9025: $($final.D9025LineCount). Root-owned MSVC diagnostic adjudication pending the exact artifact. Actual NSTU / AT / TextPattern / IME / DPI / physical NOT TESTED." >> $env:GITHUB_STEP_SUMMARY
+          } else {
+            "Standalone Native UIA evidence: MSVC_COMPILE=$($final.MSVC_COMPILE), CI_OWN_WINDOW=$($final.CI_OWN_WINDOW). Compiler diagnostic lines: $($final.warningDiagnosticLineCount), including D9025: $($final.D9025LineCount). Failed/unexecuted phases remain unqualified. Actual NSTU / AT / physical NOT TESTED." >> $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload qualification evidence and exact MSVC probe package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-uia-msvc-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/native-uia-msvc-evidence/
+          if-no-files-found: error
+          retention-days: 14
