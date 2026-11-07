@@ -940,7 +940,7 @@ button { font-family: inherit; }
 }
 
 .question-instruction-text {
-  font-size: 13px;
+  font-size: var(--nstu-typography-body);
   color: var(--text-muted);
   font-style: italic;
 }
@@ -992,8 +992,8 @@ button { font-family: inherit; }
   color: var(--text-main);
   border: 1px solid var(--border-medium);
   border-radius: var(--radius-sm);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--nstu-typography-body);
+  font-weight: var(--nstu-typography-weight-semibold);
   cursor: grab;
   user-select: none;
   transition: transform 0.15s ease, opacity 0.15s ease;
@@ -1100,7 +1100,7 @@ button { font-family: inherit; }
 }
 
 .slot-placeholder-text {
-  font-size: 12px;
+  font-size: var(--nstu-typography-body);
   color: var(--text-faint);
   font-style: italic;
   pointer-events: none;
@@ -1116,8 +1116,8 @@ button { font-family: inherit; }
   border: 1px solid var(--primary);
   border-radius: var(--radius-sm);
   color: var(--text-main);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--nstu-typography-body);
+  font-weight: var(--nstu-typography-weight-semibold);
   animation: snapIn 0.15s ease-out;
 }
 
