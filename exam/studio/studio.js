@@ -116,7 +116,7 @@
       renderPreview();
     } else {
       previewView.style.display = "none";
-      editorView.style.display = "flex";
+      editorView.style.display = "grid";
       btnPreview.classList.remove("active");
       btnEditor.classList.add("active");
       renderEditor();
@@ -132,7 +132,7 @@
     el("exam-id").value = currentExam.id || "";
     el("exam-title").value = currentExam.title || "";
     el("exam-subject").value = currentExam.subject || "";
-    el("exam-duration").value = Math.round((currentExam.durationSeconds || 3600) / 60);
+    renderNumericField("exam-duration");
     el("exam-allowed-origins").value = Array.isArray(currentExam.allowedOrigins)
       ? currentExam.allowedOrigins.join("\n")
       : "";
@@ -164,24 +164,31 @@
       }
 
       item.innerHTML = `
-        <div class="nav-item-left">
+        <button class="nav-item-left question-select" type="button" aria-current="${idx === activeQuestionIndex}" aria-label="${escapeHtml(questionButtonName(q, idx))}">
           <span class="nav-item-index">${idx + 1}</span>
           <span class="nav-item-type-badge ${badgeType}">${badgeLabel}</span>
           <span class="nav-item-title">${escapeHtml(q.prompt || "Untitled Question")}</span>
-        </div>
+        </button>
         <div class="nav-item-actions">
-          <button class="icon-btn delete" type="button" title="Delete question" data-delete="${idx}">🗑️</button>
+          <button class="icon-btn delete" type="button" title="Delete question" aria-label="Delete question ${idx + 1}" data-delete="${idx}">🗑️</button>
         </div>
       `;
 
       item.addEventListener("click", (e) => {
+        const previousFocus = document.activeElement;
+        const railOwnedFocus = item.contains(previousFocus);
         syncExamMetadata();
         if (e.target.closest("[data-delete]")) {
           deleteQuestion(idx);
-          return;
+        } else {
+          activeQuestionIndex = idx;
+          renderEditor();
         }
-        activeQuestionIndex = idx;
-        renderEditor();
+        if (railOwnedFocus && !previousFocus.isConnected) {
+          const selected = el("question-nav-list").children[activeQuestionIndex]?.querySelector(".question-select");
+          selected?.focus({ preventScroll: true });
+          selected?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        }
       });
 
       navList.appendChild(item);
@@ -190,12 +197,20 @@
     renderActiveQuestionForm();
   }
 
+  function questionButtonName(q, index) {
+    const type = q.isMatching ? "Matching" : {
+      multiple_choice: "Multiple choice", short_answer: "Short answer",
+      essay: "Essay", listening: "Listening", reading: "Reading"
+    }[q.type];
+    return `Question ${index + 1}: ${type}. ${q.prompt || "Untitled Question"}`;
+  }
+
   function renderActiveQuestionForm() {
     const q = currentExam.questions[activeQuestionIndex];
     if (!q) return;
 
     el("active-q-title").textContent = `Question ${activeQuestionIndex + 1}`;
-    el("q-points").value = q.points || 1;
+    renderNumericField("q-points", q);
     el("q-prompt").value = q.prompt || "";
     el("q-instruction").value = q.instruction || "";
 
@@ -236,7 +251,7 @@
     } else if (q.type === "short_answer") {
       el("q-sa-placeholder").value = q.answerPlaceholder || "";
     } else if (q.type === "essay") {
-      el("q-essay-limit").value = q.wordLimit ?? "";
+      renderNumericField("q-essay-limit", q);
     }
   }
 
@@ -438,7 +453,7 @@
 
     // Header info
     el("p-question-badge").textContent = q.isMatching ? "IELTS Matching" : q.type.toUpperCase();
-    el("p-question-points").textContent = `${q.points || 1} points`;
+    el("p-question-points").textContent = `${q.points ?? 1} points`;
     el("p-question-prompt").textContent = q.prompt || "";
     el("p-question-instruction").textContent = q.instruction || "";
 
@@ -540,10 +555,13 @@
     q.options.forEach((optText, tokenIdx) => {
       if (placedTokenIndices.has(tokenIdx)) return; // Already placed in a slot
 
-      const chip = document.createElement("div");
+      const chip = document.createElement("button");
       chip.className = "drag-chip";
+      chip.type = "button";
       chip.draggable = true;
       chip.dataset.tokenIdx = tokenIdx;
+      chip.setAttribute("aria-label", `Heading ${tokenIdx + 1}: ${optText}`);
+      chip.setAttribute("aria-pressed", String(selectedTokenForPlacement === tokenIdx));
       chip.innerHTML = `
         <span class="chip-handle-icon">⠿</span>
         <span>${escapeHtml(optText)}</span>
@@ -566,12 +584,14 @@
 
       // Click to select (fallback for trackpad / touch)
       chip.addEventListener("click", () => {
+        const previousFocus = chip.contains(document.activeElement) ? document.activeElement : null;
         if (selectedTokenForPlacement === tokenIdx) {
           selectedTokenForPlacement = null;
         } else {
           selectedTokenForPlacement = tokenIdx;
         }
         renderPreviewMatching(q);
+        restoreMatchingFocus(q, "token", tokenIdx, previousFocus);
       });
 
       tray.appendChild(chip);
@@ -598,25 +618,43 @@
       slot.dataset.targetIdx = targetIdx;
 
       const assignedTokenIdx = currentAssignments[targetIdx];
+      const activation = document.createElement("button");
+      activation.type = "button";
+      activation.className = "target-select";
+      const hasAssignment = assignedTokenIdx !== undefined && assignedTokenIdx !== null;
+      const tokenText = hasAssignment ? q.options[assignedTokenIdx] || "" : "";
+      activation.setAttribute("aria-label", `Target ${targetIdx + 1}: ${tgtLabel}. ${hasAssignment ? `Assigned heading ${assignedTokenIdx + 1}: ${tokenText}` : "Unassigned"}`);
 
       if (assignedTokenIdx !== undefined && assignedTokenIdx !== null) {
         // Slot is filled
         slot.classList.add("filled");
-        const tokenText = q.options[assignedTokenIdx] || "";
-        slot.innerHTML = `
-          <div class="placed-chip">
-            <span>${escapeHtml(tokenText)}</span>
-            <button class="chip-remove-btn" type="button" title="Remove heading back to tray">✕</button>
-          </div>
-        `;
-        slot.querySelector(".chip-remove-btn").addEventListener("click", (e) => {
+        const placed = document.createElement("div");
+        placed.className = "placed-chip";
+        const text = document.createElement("span");
+        text.textContent = tokenText;
+        activation.appendChild(text);
+        const removal = document.createElement("button");
+        removal.className = "chip-remove-btn";
+        removal.type = "button";
+        removal.title = "Remove heading back to tray";
+        removal.textContent = "✕";
+        removal.setAttribute("aria-label", `Remove heading from target ${targetIdx + 1}: ${tgtLabel}`);
+        removal.addEventListener("click", (e) => {
+          const previousFocus = slot.contains(document.activeElement) ? document.activeElement : null;
           e.stopPropagation();
           delete currentAssignments[targetIdx];
           renderPreviewMatching(q);
+          restoreMatchingFocus(q, "target", targetIdx, previousFocus);
         });
+        placed.append(activation, removal);
+        slot.appendChild(placed);
       } else {
         // Slot is empty
-        slot.innerHTML = `<span class="slot-placeholder-text">Drop heading here or click to assign</span>`;
+        const placeholder = document.createElement("span");
+        placeholder.className = "slot-placeholder-text";
+        placeholder.textContent = "Drop heading here or click to assign";
+        activation.appendChild(placeholder);
+        slot.appendChild(activation);
       }
 
       // Drag Over / Leave
@@ -632,17 +670,21 @@
 
       // Drop
       slot.addEventListener("drop", (e) => {
+        const active = document.activeElement;
+        const previousFocus = tray.contains(active) || targetList.contains(active) ? active : null;
         e.preventDefault();
         slot.classList.remove("drag-over");
         const tokenIdxStr = e.dataTransfer.getData("text/plain");
         if (tokenIdxStr !== "") {
           const tIdx = parseInt(tokenIdxStr, 10);
           assignTokenToSlot(q, targetIdx, tIdx);
+          restoreMatchingFocus(q, "target", targetIdx, previousFocus);
         }
       });
 
       // Click to place
       slot.addEventListener("click", () => {
+        const previousFocus = slot.contains(document.activeElement) ? document.activeElement : null;
         if (selectedTokenForPlacement !== null) {
           assignTokenToSlot(q, targetIdx, selectedTokenForPlacement);
           selectedTokenForPlacement = null;
@@ -651,11 +693,26 @@
           delete currentAssignments[targetIdx];
           renderPreviewMatching(q);
         }
+        restoreMatchingFocus(q, "target", targetIdx, previousFocus);
       });
 
       row.append(labelBox, slot);
       targetList.appendChild(row);
     });
+  }
+
+  function restoreMatchingFocus(q, kind, index, previousFocus) {
+    if (!previousFocus || previousFocus.isConnected || previousFocus.ownerDocument !== document ||
+        currentExam.questions[previewIndex] !== q || getComputedStyle(el("preview-view")).display === "none" ||
+        el("export-modal").classList.contains("open")) return;
+    const target = kind === "token"
+      ? Array.from(el("p-token-tray").children).find(node => Number(node.dataset.tokenIdx) === index)
+      : Array.from(el("p-target-list").children).map(row => row.children[1])
+        .find(node => Number(node?.dataset.targetIdx) === index)?.querySelector(".target-select");
+    if (usableExportFocus(target)) {
+      target.focus({ preventScroll: true });
+      target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    }
   }
 
   function assignTokenToSlot(q, targetIdx, tokenIdx) {
@@ -673,19 +730,33 @@
   function renderPreviewMc(q) {
     const surface = el("p-mc-surface");
     surface.innerHTML = "";
+    surface.setAttribute("role", "radiogroup");
+    surface.setAttribute("aria-labelledby", "p-question-prompt");
     const selected = previewAnswers[q.id];
 
     (q.options || []).forEach((optText, optIdx) => {
       const label = document.createElement("label");
       label.className = `mc-option-label ${selected === optIdx ? "checked" : ""}`;
       label.innerHTML = `
-        <div class="mc-radio-circle"></div>
+        <div class="mc-radio-circle" aria-hidden="true"></div>
         <span>${escapeHtml(optText)}</span>
       `;
-      label.addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.className = "mc-option-input";
+      input.name = `nstu-preview-choice-${q.id}`;
+      input.value = String(optIdx);
+      input.checked = selected === optIdx;
+      input.setAttribute("aria-label", `Option ${optIdx + 1}: ${optText}`);
+      input.addEventListener("change", () => {
+        if (!input.checked) return;
         previewAnswers[q.id] = optIdx;
-        renderPreviewMc(q);
+        Array.from(surface.children).forEach((option, index) => {
+          option.classList.toggle("checked", index === optIdx);
+          option.querySelector(".mc-option-input").checked = index === optIdx;
+        });
       });
+      label.prepend(input);
       surface.appendChild(label);
     });
   }
@@ -750,10 +821,13 @@
 
   function validateOrigin(origin) {
     if (typeof origin !== "string" || origin.length < 1 || origin.length > 253) return false;
+    if (!/^[\x21-\x7e]+$/.test(origin)) return false;
     if (origin.includes("@")) return false; // no userinfo
     let host = origin;
     if (/^https?:\/\//i.test(host)) {
       host = host.replace(/^https?:\/\//i, "");
+    } else if (host.startsWith("//")) {
+      host = host.substring(2);
     } else if (host.includes("://")) {
       return false; // unsupported scheme
     }
@@ -837,32 +911,107 @@
     return errors;
   }
 
+  // Authoring keeps its full model. This boundary admits only values the current
+  // schema, stager and native JsonReader can consume without data substitution.
+  function validateExportContract(exam) {
+    const errors = [];
+    const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+    const text = (value, path, min, max, maxBytes = 65536) => {
+      if (typeof value !== "string") { errors.push(`${path} must be text.`); return; }
+      if (value.length < min || value.length > max) errors.push(`${path} must contain ${min}–${max} characters.`);
+      // TextEncoder replaces lone surrogates; native JSON decoding rejects them.
+      for (let i = 0; i < value.length; i++) {
+        const unit = value.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) { errors.push(`${path} contains an unpaired Unicode surrogate.`); return; }
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+          errors.push(`${path} contains an unpaired Unicode surrogate.`); return;
+        }
+      }
+      if (new TextEncoder().encode(value).byteLength > maxBytes) errors.push(`${path} exceeds the native ${maxBytes} UTF-8 byte limit.`);
+    };
+    const integer = (value, path, min, max) => {
+      if (!Number.isInteger(value) || value < min || value > max) errors.push(`${path} must be an integer from ${min} to ${max}.`);
+    };
+    const identifier = (value, path) => {
+      if (typeof value !== "string" || !/^[a-zA-Z0-9._-]{1,96}$/.test(value)) errors.push(`${path} must be a valid 1–96 character ID.`);
+    };
+    if (!object(exam)) return ["Assessment must be an object."];
+    identifier(exam.id, "Package ID");
+    text(exam.title, "Assessment title", 1, 240);
+    integer(exam.durationSeconds, "Duration (seconds)", 60, 86400);
+    for (const [key, max] of [["subject", 120], ["candidate", 160]]) {
+      if (Object.hasOwn(exam, key)) text(exam[key], key, 0, max);
+    }
+    if (Object.hasOwn(exam, "allowedOrigins")) {
+      if (!Array.isArray(exam.allowedOrigins) || exam.allowedOrigins.length > 32) errors.push("Allowed origins must be a list of at most 32 entries.");
+      else {
+        const seen = new Set();
+        exam.allowedOrigins.forEach((origin, index) => {
+          if (!validateOrigin(origin) || seen.has(origin)) errors.push(`Allowed origin #${index + 1} is invalid or duplicated.`);
+          seen.add(origin);
+        });
+      }
+    }
+    if (Object.hasOwn(exam, "documents") && (!Array.isArray(exam.documents) || exam.documents.length !== 0)) {
+      errors.push("Export cannot bundle authored documents. Keep them in the draft until media packaging is supported.");
+    }
+    if (!Array.isArray(exam.questions) || exam.questions.length < 1 || exam.questions.length > 256) {
+      errors.push("The current native reader supports 1–256 questions per Export. Authoring and Save retain up to 500.");
+      return errors;
+    }
+    const ids = new Set();
+    exam.questions.forEach((q, index) => {
+      const path = `Question #${index + 1}`;
+      if (!object(q)) { errors.push(`${path} must be an object.`); return; }
+      identifier(q.id, `${path} ID`);
+      if (ids.has(q.id)) errors.push(`${path} has a duplicate ID.`);
+      ids.add(q.id);
+      if (!["multiple_choice", "short_answer", "essay", "listening", "reading"].includes(q.type)) errors.push(`${path} has an unsupported native type.`);
+      if (q.isMatching === true) errors.push(`${path}: Matching is available in draft Preview but unsupported by the native runtime.`);
+      for (const key of ["audio", "pdf"]) {
+        if (Object.hasOwn(q, key)) errors.push(`${path}: Export cannot bundle declared ${key} media, including blank paths.`);
+      }
+      text(q.prompt, `${path} prompt`, 1, 8000, 8000);
+      for (const [key, max] of [["instruction", 4000], ["passage", 30000], ["answerPlaceholder", 240]]) {
+        if (Object.hasOwn(q, key)) text(q[key], `${path} ${key}`, 0, max);
+      }
+      if (Object.hasOwn(q, "points")) integer(q.points, `${path} points`, 0, 1000);
+      if (Object.hasOwn(q, "wordLimit")) integer(q.wordLimit, `${path} word limit`, 1, 5000);
+      const needsOptions = ["multiple_choice", "listening", "reading"].includes(q.type);
+      if (Object.hasOwn(q, "options") || needsOptions) {
+        if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 12) errors.push(`${path} options must contain 2–12 entries.`);
+        else q.options.forEach((option, n) => text(option, `${path} option #${n + 1}`, 1, 2000, 2000));
+      }
+    });
+    return errors;
+  }
+
   function compileManifest(exam) {
     // Generate clean manifest matching manifest.schema.json
     const manifest = {
       id: exam.id,
       title: exam.title,
-      subject: exam.subject || "General",
+      subject: Object.hasOwn(exam, "subject") ? exam.subject : "General",
       durationSeconds: exam.durationSeconds,
-      documents: exam.documents || [],
+      documents: Object.hasOwn(exam, "documents") ? exam.documents : [],
       questions: exam.questions.map(q => {
         const item = {
           id: q.id,
           type: q.type,
           prompt: q.prompt,
-          instruction: q.instruction || "",
-          points: Number(q.points) || 1
+          instruction: Object.hasOwn(q, "instruction") ? q.instruction : "",
+          points: Object.hasOwn(q, "points") ? q.points : 1
         };
-        if (q.passage) item.passage = q.passage;
-        if (q.options && q.options.length > 0) item.options = q.options;
-        if (q.audio) item.audio = q.audio;
-        if (q.wordLimit) item.wordLimit = Number(q.wordLimit);
-        if (q.answerPlaceholder) item.answerPlaceholder = q.answerPlaceholder;
+        for (const key of ["passage", "options", "audio", "pdf", "wordLimit", "answerPlaceholder"]) {
+          if (Object.hasOwn(q, key)) item[key] = q[key];
+        }
         return item;
       })
     };
-    if (Array.isArray(exam.allowedOrigins) && exam.allowedOrigins.length > 0) {
-      manifest.allowedOrigins = exam.allowedOrigins;
+    for (const key of ["candidate", "allowedOrigins"]) {
+      if (Object.hasOwn(exam, key)) manifest[key] = exam[key];
     }
     return manifest;
   }
@@ -922,11 +1071,212 @@
     return text;
   }
 
+  let exportDialogOpener = null;
+
+  function usableExportFocus(node) {
+    return !!node && node.ownerDocument === document && node.isConnected &&
+      node !== document.body && node !== document.documentElement &&
+      !node.closest("[hidden], [inert]") && !node.matches(":disabled") &&
+      node.tabIndex >= 0 && node.getClientRects().length > 0 &&
+      !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
+  }
+
+  function exportDialogButtons() {
+    const modal = el("export-modal");
+    return Array.from(modal.querySelectorAll("button")).filter(node =>
+      modal.contains(node) && usableExportFocus(node));
+  }
+
+  function focusExportDialog() {
+    const cancel = el("btn-cancel-export");
+    if (usableExportFocus(cancel) && el("export-modal").contains(cancel)) {
+      cancel.focus();
+      if (document.activeElement === cancel) return;
+    }
+    const first = exportDialogButtons()[0];
+    if (first) first.focus();
+    if (!first || document.activeElement !== first) el("export-modal").focus();
+  }
+
+  function openExportDialog(event) {
+    const modal = el("export-modal");
+    if (!modal.classList.contains("open")) {
+      exportDialogOpener = [event?.currentTarget, document.activeElement, el("btn-export-pkg")]
+        .find(node => usableExportFocus(node) && !modal.contains(node)) || null;
+    }
+    modal.inert = false;
+    modal.classList.add("open");
+    focusExportDialog();
+  }
+
+  function closeExportDialog() {
+    const modal = el("export-modal");
+    if (!modal.classList.contains("open")) return;
+    modal.classList.remove("open");
+    modal.inert = true;
+    const opener = exportDialogOpener;
+    exportDialogOpener = null;
+    const canReturn = usableExportFocus(opener);
+    if (canReturn) opener.focus();
+    if ((!canReturn || document.activeElement !== opener) && usableExportFocus(el("btn-export-pkg"))) {
+      el("btn-export-pkg").focus();
+    }
+  }
+
+  function handleExportDialogKey(event) {
+    if (!el("export-modal").classList.contains("open") || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.key === "Escape" && !event.shiftKey) {
+      event.preventDefault();
+      closeExportDialog();
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      const buttons = exportDialogButtons();
+      const index = buttons.indexOf(document.activeElement);
+      const next = index < 0 ? (event.shiftKey ? buttons.length - 1 : 0)
+        : (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+      (buttons[next] || el("export-modal")).focus();
+    }
+  }
+
+  let authoringResizeFrame = null;
+  function queueAuthoringFocusReveal() {
+    if (authoringResizeFrame !== null) window.cancelAnimationFrame(authoringResizeFrame);
+    authoringResizeFrame = window.requestAnimationFrame(() => {
+      authoringResizeFrame = null;
+      const editor = el("editor-view");
+      const active = document.activeElement;
+      if (getComputedStyle(editor).display === "none" || el("export-modal").classList.contains("open") ||
+          !editor.contains(active) || !usableExportFocus(active)) return;
+      active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    });
+  }
+
+  let matchingResizeFrame = null;
+  function queueMatchingFocusReveal() {
+    if (matchingResizeFrame !== null) window.cancelAnimationFrame(matchingResizeFrame);
+    matchingResizeFrame = null;
+    if (getComputedStyle(el("preview-view")).display === "none") return;
+    matchingResizeFrame = window.requestAnimationFrame(() => {
+      matchingResizeFrame = null;
+      const active = document.activeElement;
+      if (getComputedStyle(el("preview-view")).display === "none" ||
+          !currentExam.questions[previewIndex]?.isMatching || el("export-modal").classList.contains("open") ||
+          !el("p-matching-surface").contains(active) || !usableExportFocus(active)) return;
+      active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    });
+  }
+
+  let choiceResizeFrame = null;
+  function queueChoiceFocusReveal() {
+    if (choiceResizeFrame !== null) window.cancelAnimationFrame(choiceResizeFrame);
+    choiceResizeFrame = null;
+    if (getComputedStyle(el("preview-view")).display === "none") return;
+    choiceResizeFrame = window.requestAnimationFrame(() => {
+      choiceResizeFrame = null;
+      const active = document.activeElement;
+      const q = currentExam.questions[previewIndex];
+      if (!q || q.isMatching || !["multiple_choice", "reading", "listening"].includes(q.type) ||
+          getComputedStyle(el("preview-view")).display === "none" || el("export-modal").classList.contains("open") ||
+          active?.tagName !== "INPUT" || active.type !== "radio" || !active.classList.contains("mc-option-input") ||
+          !el("p-mc-surface").contains(active) || !usableExportFocus(active)) return;
+      active.parentNode.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    });
+  }
+
+  let numericDraftModel = null;
+  let numericDraftOwners = new WeakMap();
+  const numericFields = {
+    "exam-duration": { label: "Duration", key: "durationSeconds", min: 1, max: 1440, scale: 60, fallback: 3600 },
+    "q-points": { label: "Points", key: "points", min: 0, max: 1000, scale: 1, fallback: 1 },
+    "q-essay-limit": { label: "Word limit", key: "wordLimit", min: 1, max: 5000, scale: 1, optional: true }
+  };
+
+  function numericDraft(id, question) {
+    if (numericDraftModel !== currentExam) {
+      numericDraftModel = currentExam;
+      numericDraftOwners = new WeakMap();
+    }
+    const spec = numericFields[id];
+    const owner = id === "exam-duration" ? currentExam : question;
+    if (!owner || (id === "q-essay-limit" && owner.type !== "essay")) return null;
+    if (!numericDraftOwners.has(owner)) numericDraftOwners.set(owner, {});
+    const drafts = numericDraftOwners.get(owner);
+    if (!drafts[id]) {
+      const value = owner[spec.key] ?? spec.fallback;
+      drafts[id] = { raw: value === undefined ? "" : String(value / spec.scale), rejected: false };
+      if (id === "exam-duration") {
+        drafts[id].seededRaw = drafts[id].raw;
+        drafts[id].seededSeconds = value;
+      }
+    }
+    return drafts[id];
+  }
+
+  function numericError(id, draft) {
+    const spec = numericFields[id];
+    if (spec.optional && draft.raw === "" && !draft.rejected) return "";
+    if (id === "exam-duration") {
+      const seconds = draft.raw === draft.seededRaw ? draft.seededSeconds : Number(draft.raw) * 60;
+      return !draft.rejected && /^\d+(?:\.\d+)?$/.test(draft.raw.trim()) && Number.isInteger(seconds) &&
+        seconds >= 60 && seconds <= 86400 ? "" : "Duration must convert to whole seconds from 60 to 86400 (1–1440 minutes).";
+    }
+    const value = Number(draft.raw);
+    return !draft.rejected && /^\d+$/.test(draft.raw.trim()) && Number.isInteger(value) &&
+      value >= spec.min && value <= spec.max ? ""
+      : `${spec.label} must be a whole number from ${spec.min} to ${spec.max}.`;
+  }
+
+  function showNumericError(id, draft) {
+    const message = numericError(id, draft);
+    el(id).setAttribute("aria-invalid", String(!!message));
+    const error = el(id + "-error");
+    error.textContent = message;
+    error.hidden = !message;
+  }
+
+  function renderNumericField(id, question) {
+    const draft = numericDraft(id, question);
+    if (!draft) return;
+    if (el(id).value !== draft.raw) el(id).value = draft.raw;
+    showNumericError(id, draft);
+  }
+
+  function captureNumericField(id, question, inputEvent = false) {
+    const draft = numericDraft(id, question);
+    if (!draft) return;
+    const node = el(id);
+    if (inputEvent || node.value !== draft.raw) {
+      draft.raw = node.value;
+      draft.rejected = node.validity?.valid === false || !!node.validity?.badInput;
+    }
+    if (!numericError(id, draft)) {
+      const spec = numericFields[id];
+      const owner = id === "exam-duration" ? currentExam : question;
+      if (spec.optional && draft.raw === "") delete owner[spec.key];
+      else owner[spec.key] = id === "exam-duration" && draft.raw === draft.seededRaw
+        ? draft.seededSeconds : Number(draft.raw) * spec.scale;
+    }
+    showNumericError(id, draft);
+  }
+
+  function numericExportErrors() {
+    const errors = [];
+    const duration = numericError("exam-duration", numericDraft("exam-duration"));
+    if (duration) errors.push(duration);
+    currentExam.questions.forEach((q, index) => {
+      for (const id of q.type === "essay" ? ["q-points", "q-essay-limit"] : ["q-points"]) {
+        const error = numericError(id, numericDraft(id, q));
+        if (error) errors.push(`Question #${index + 1}: ${error}`);
+      }
+    });
+    return errors;
+  }
+
   function syncExamMetadata() {
     currentExam.id = el("exam-id").value.trim();
     currentExam.title = el("exam-title").value.trim();
     currentExam.subject = el("exam-subject").value.trim();
-    currentExam.durationSeconds = Math.max(60, parseInt(el("exam-duration").value, 10) * 60 || 3600);
+    captureNumericField("exam-duration");
     const origins = parseOriginsInput(el("exam-allowed-origins").value);
     if (origins.length > 0) {
       currentExam.allowedOrigins = origins;
@@ -936,22 +1286,24 @@
   }
 
   let exportGeneration = 0;
-  async function exportPackage() {
+  async function exportPackage(event) {
     const generation = ++exportGeneration;
     syncExamMetadata();
 
-    const modal = el("export-modal");
     const statusBox = el("export-validation-status");
     const hashesBox = el("export-hashes");
     const btnDownload = el("btn-download-nstuexam");
 
-    modal.classList.add("open");
+    openExportDialog(event);
     statusBox.style.color = "var(--text-main)";
     statusBox.innerHTML = "⏳ Validating exam schema and compiling package...";
     hashesBox.style.display = "none";
     btnDownload.disabled = true;
+    btnDownload.onclick = null;
+    for (const id of ["lbl-archive-hash", "lbl-content-hash", "lbl-stage-command"]) el(id).textContent = "-";
 
-    const errors = validateExam(currentExam);
+    const errors = validateExportContract(currentExam);
+    if (errors.length === 0) errors.push(...validateExam(currentExam), ...numericExportErrors());
     if (errors.length > 0) {
       statusBox.style.color = "var(--danger)";
       statusBox.innerHTML = `<strong>Validation Failed (${errors.length} errors):</strong><ul style="margin: 8px 0 0 18px;">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`;
@@ -961,6 +1313,9 @@
     try {
       const manifestObj = compileManifest(currentExam);
       const manifestJson = JSON.stringify(manifestObj, null, 2);
+      if (new TextEncoder().encode(manifestJson).byteLength > 131072) {
+        throw new Error("Manifest exceeds the current native reader's 131072 UTF-8 byte limit. The complete draft can still be saved.");
+      }
       const packageId = manifestObj.id;
 
       const zip = new NstuZip.Writer();
@@ -1035,16 +1390,77 @@
      ======================================================================== */
 
   async function handleImportFile(file) {
+    // Admission is read-only: do not touch the current draft or Preview until
+    // every renderer-consumed field of the candidate is safe to use.
+    const admit = (candidate) => {
+      const object = (value, path) => {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new Error(`${path} must be an object.`);
+        }
+      };
+      const text = (value, path, maximum) => {
+        if (typeof value !== "string") throw new Error(`${path} must be text.`);
+        const iterator = value[Symbol.iterator]();
+        let count = 0;
+        while (!iterator.next().done) {
+          if (++count > maximum) throw new Error(`${path} exceeds its text limit.`);
+        }
+      };
+      const optionalText = (value, fields, prefix) => {
+        for (const [key, maximum] of Object.entries(fields)) {
+          if (Object.hasOwn(value, key)) text(value[key], `${prefix}.${key}`, maximum);
+        }
+      };
+      const numeric = (value, key, prefix) => {
+        if (Object.hasOwn(value, key) &&
+            (typeof value[key] !== "number" || !Number.isFinite(value[key]))) {
+          throw new Error(`${prefix}.${key} must be a finite number.`);
+        }
+      };
+      const list = (value, path, maximum, textMaximum) => {
+        if (!Array.isArray(value) || value.length > maximum) {
+          throw new Error(`${path} must be a bounded text list.`);
+        }
+        value.forEach((item, index) => text(item, `${path}[${index}]`, textMaximum));
+      };
+      const validId = value => typeof value === "string" && /^[a-zA-Z0-9._-]{1,96}$/.test(value);
+      object(candidate, "Manifest");
+      if (!validId(candidate.id)) throw new Error("Manifest.id is invalid.");
+      optionalText(candidate, { title: 240, subject: 120 }, "Manifest");
+      numeric(candidate, "durationSeconds", "Manifest");
+      if (Object.hasOwn(candidate, "allowedOrigins")) list(candidate.allowedOrigins, "Manifest.allowedOrigins", 32, 253);
+      if (!Array.isArray(candidate.questions) || candidate.questions.length === 0 || candidate.questions.length > 500) {
+        throw new Error("Manifest.questions must contain 1–500 question records.");
+      }
+      const ids = new Set();
+      const types = new Set(["multiple_choice", "short_answer", "essay", "listening", "reading"]);
+      candidate.questions.forEach((q, index) => {
+        const path = `questions[${index}]`;
+        object(q, path);
+        if (!validId(q.id) || ids.has(q.id) || q.id in {}) {
+          throw new Error(`${path}.id is invalid or conflicts with another answer identity.`);
+        }
+        ids.add(q.id);
+        if (!types.has(q.type)) throw new Error(`${path}.type is not supported.`);
+        if (Object.hasOwn(q, "isMatching") && typeof q.isMatching !== "boolean") {
+          throw new Error(`${path}.isMatching must be a boolean.`);
+        }
+        optionalText(q, { prompt: 8000, instruction: 4000, passage: 30000, answerPlaceholder: 240, audio: 8000 }, path);
+        numeric(q, "points", path);
+        numeric(q, "wordLimit", path);
+        // These authoring row budgets deliberately do not apply the canonical
+        // runtime's 12-option constraint to editable matching/draft data.
+        if (q.isMatching || Object.hasOwn(q, "options")) list(q.options, `${path}.options`, 500, 2000);
+        if (Object.hasOwn(q, "matchingTargets")) list(q.matchingTargets, `${path}.matchingTargets`, 500, 2000);
+      });
+    };
     try {
+      let candidate;
+      let success;
       if (file.name.endsWith(".json")) {
         const text = await file.text();
-        const data = JSON.parse(text);
-        if (!data.id || !data.questions) throw new Error("Invalid manifest JSON structure.");
-        currentExam = data;
-        activeQuestionIndex = 0;
-        resetPreviewState();
-        renderEditor();
-        showToast("Manifest imported successfully", "success");
+        candidate = JSON.parse(text);
+        success = "Manifest imported successfully";
       } else if (file.name.endsWith(".nstuexam") || file.name.endsWith(".zip")) {
         const buffer = await file.arrayBuffer();
         const reader = new NstuZip.Reader(buffer);
@@ -1052,15 +1468,17 @@
         const manifestEntry = entries.find(e => e.path === "manifest.json");
         if (!manifestEntry) throw new Error("Package does not contain manifest.json.");
         const text = new TextDecoder().decode(manifestEntry.bytes);
-        const data = JSON.parse(text);
-        currentExam = data;
-        activeQuestionIndex = 0;
-        resetPreviewState();
-        renderEditor();
-        showToast(`Imported .nstuexam package (${entries.length} files)`, "success");
+        candidate = JSON.parse(text);
+        success = `Imported .nstuexam package (${entries.length} files)`;
       } else {
         throw new Error("Please select a .nstuexam or .json file.");
       }
+      admit(candidate);
+      currentExam = candidate;
+      activeQuestionIndex = 0;
+      resetPreviewState();
+      renderEditor();
+      showToast(success, "success");
     } catch (err) {
       showToast("Import failed: " + err.message, "error");
     }
@@ -1069,16 +1487,15 @@
   function saveDraft() {
     syncExamMetadata();
 
-    const manifestObj = compileManifest(currentExam);
-    const jsonStr = JSON.stringify(manifestObj, null, 2);
+    const jsonStr = JSON.stringify(currentExam, null, 2);
     const blob = new Blob([jsonStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${currentExam.id}-manifest.json`;
+    a.download = `${currentExam.id}-draft.json`;
     a.click();
     URL.revokeObjectURL(url);
-    showToast("Manifest draft downloaded", "success");
+    showToast("Authoring draft downloaded", "success");
   }
 
   function escapeHtml(str) {
@@ -1131,8 +1548,12 @@
     el("btn-export-pkg").addEventListener("click", exportPackage);
 
     // Modal controls
-    el("btn-close-export").addEventListener("click", () => el("export-modal").classList.remove("open"));
-    el("btn-cancel-export").addEventListener("click", () => el("export-modal").classList.remove("open"));
+    el("btn-close-export").addEventListener("click", closeExportDialog);
+    el("btn-cancel-export").addEventListener("click", closeExportDialog);
+    document.addEventListener("keydown", handleExportDialogKey);
+    window.addEventListener("resize", queueAuthoringFocusReveal);
+    window.addEventListener("resize", queueMatchingFocusReveal);
+    window.addEventListener("resize", queueChoiceFocusReveal);
 
     // Add Question
     el("btn-add-question").addEventListener("click", () => {
@@ -1141,17 +1562,19 @@
     });
 
     // Question form bindings
-    el("q-points").addEventListener("change", (e) => {
-      const q = currentExam.questions[activeQuestionIndex];
-      if (q) q.points = parseInt(e.target.value, 10) || 1;
-    });
+    el("exam-duration").addEventListener("input", () => captureNumericField("exam-duration", undefined, true));
+    el("q-points").addEventListener("input", () => captureNumericField("q-points", currentExam.questions[activeQuestionIndex], true));
+    el("q-points").addEventListener("change", () => captureNumericField("q-points", currentExam.questions[activeQuestionIndex]));
 
     el("q-prompt").addEventListener("input", (e) => {
       const q = currentExam.questions[activeQuestionIndex];
       if (q) {
         q.prompt = e.target.value;
         const navItem = el("question-nav-list").children[activeQuestionIndex];
-        if (navItem) navItem.querySelector(".nav-item-title").textContent = e.target.value || "Untitled Question";
+        if (navItem) {
+          navItem.querySelector(".nav-item-title").textContent = e.target.value || "Untitled Question";
+          navItem.querySelector(".question-select")?.setAttribute("aria-label", questionButtonName(q, activeQuestionIndex));
+        }
       }
     });
 
@@ -1166,12 +1589,7 @@
     });
 
     el("q-essay-limit").addEventListener("input", (e) => {
-      const q = currentExam.questions[activeQuestionIndex];
-      if (!q || q.type !== "essay") return;
-      if (!e.target.validity.valid) return;
-      if (e.target.value === "") delete q.wordLimit;
-      else if (Number.isInteger(e.target.valueAsNumber))
-        q.wordLimit = e.target.valueAsNumber;
+      captureNumericField("q-essay-limit", currentExam.questions[activeQuestionIndex], true);
     });
 
     el("q-passage").addEventListener("input", (e) => {

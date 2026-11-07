@@ -1,0 +1,16 @@
+# Reviewed UI DS01B: native token adapter
+
+Root is the sole product writer/build owner in feature/reviewed-desktop-ui-20261107. The older checkout/Focus edits remain preserved. Admission pins precede edits in private DS01B_NATIVE_SOURCE_ADMISSION_R1.json. Exactly three files: server/app/interim_presentation.hpp, tests/interim_presentation_tests.cpp, this plan. Read-only dependencies are approved config/ui-desktop-tokens.json and DS01-generated server/app/ui_desktop_tokens.hpp. Start implementation only after DS01 independent CODE_ACCEPT/commit and this plan's independent PLAN_ACCEPT; revalidate all source/dependency hashes first.
+
+Replace duplicated native palette numbers with compile-time projection of the generated semantic roles. Preserve existing ColorRole names and ordinal order; append action_text before count. Preserve Palette/kLightPalette/kDarkPalette/interim_color/apply_interim_style APIs. Use an explicit constexpr projection list in existing ordinal order; no numeric colors remain in the adapter. Map spacing/radius and source-backed shell/dialog/grid/media/type constants to generated constants (title20, radii4/5/8, toolbar46, status26, exact JSON snapshotAspect). Expose generated controls34/32/28, icon16/stroke1.7, border1/focus2 in a controls namespace for later screen consumers. Existing screen-specific widths/breakpoints absent from emitted schema remain untouched. Existing frame/cell padding and all ImGui color slot assignments remain unchanged; per-widget control sizing/composition, flat panes and action_text consumers belong to later slices. This is complete token wiring, not complete revised native UI acceptance.
+
+Keep style reset and exactly one ScaleAllSizes pass. No handler, auth, backend, role, selection, state, caption, service, policy or main.cpp edit is admitted. No native executable is launched during this foundation slice; full runtime UIA/Narrator/NVDA/IME/window/multi-DPI acceptance is separately required before integration/release.
+
+Verification sequence:
+
+- [ ] Add a focused failing runtime assertion for the approved title/radius/palette values, record RED against the old adapter, then implement generated projection/mapping.
+- [ ] Verify every role's two palette values against an independently named approved JSON-derived table, including distinct action_text and filled accent pairs; verify mapped metrics and added controls against approved literal values. Retain every existing contrast/40-swap/reset/absolute-scale assertion. Add action_text contrast on actual neutral style surfaces.
+- [ ] Build nstu_interim_presentation_tests and run CTest nstu.interim_presentation; build nstu-server; run generator --check/8 token checks plus full fast and strict gates with pinned sources/log hashes.
+- [ ] Independent nonauthor exacthash code review accepts before staging only these three files and committing with khoasoma <songtu438@gmail.com>. No main merge, release, runtime or visual acceptance inference.
+
+After this slice, adapt Studio CSS consumers in a separate reviewed scope, then implement Studio authoring and functional preservation scopes. Source-backed runtime/privacy/SAS/ACK/UWF assertions stay authoritative throughout.

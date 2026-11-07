@@ -1,12 +1,13 @@
 #pragma once
 
 #include "imgui.h"
+#include "ui_desktop_tokens.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 
-// Presentation tokens from the approved NSTU interim UI handoff. This layer
+// Presentation adapter for the reviewed generated desktop tokens. This layer
 // accepts only ImGui style and appearance; it cannot change operational state.
 namespace nstu::ui {
 
@@ -14,27 +15,34 @@ enum class ColorRole : std::size_t {
     canvas, window, surface, raised, control, hover, pressed, border,
     input_border, text, muted, disabled, accent, accent_hover, on_accent,
     selected, selected_text, focus, success, success_bg, warning, warning_bg,
-    danger, danger_bg, offline, offline_bg, info, info_bg, media, count,
+    danger, danger_bg, offline, offline_bg, info, info_bg, media, action_text, count,
 };
 
 using Palette =
     std::array<std::uint32_t, static_cast<std::size_t>(ColorRole::count)>;
 
-inline constexpr Palette kLightPalette{
-    0xF5F6F8, 0xEFF1F4, 0xFFFFFF, 0xFFFFFF, 0xF1F3F6, 0xE8EBF0,
-    0xDDE2E9, 0xD6DAE0, 0x808994, 0x22262B, 0x5F6670, 0x858C96,
-    0x23659C, 0x1E5687, 0xFFFFFF, 0xE4EEF7, 0x1C598D, 0x2779B7,
-    0x237547, 0xEBF4ED, 0x86611D, 0xFFF4DB, 0xAE3941, 0xFBEFF0,
-    0x5F6974, 0xEEF1F4, 0x235D88, 0xECF3F9, 0xE9EDF2,
-};
+[[nodiscard]] constexpr Palette projected_palette(bool dark) noexcept {
+    // Preserve native enum ordinals while generated roles remain sorted by name.
+    using Role = desktop_tokens::ColorRole;
+    constexpr std::array<Role, static_cast<std::size_t>(ColorRole::count)> roles{
+        Role::k_canvas, Role::k_window, Role::k_surface, Role::k_raised,
+        Role::k_control, Role::k_hover, Role::k_pressed, Role::k_border,
+        Role::k_input_border, Role::k_text, Role::k_muted, Role::k_disabled,
+        Role::k_accent, Role::k_accent_hover, Role::k_on_accent,
+        Role::k_selected, Role::k_selected_text, Role::k_focus,
+        Role::k_success, Role::k_success_bg, Role::k_warning, Role::k_warning_bg,
+        Role::k_danger, Role::k_danger_bg, Role::k_offline, Role::k_offline_bg,
+        Role::k_info, Role::k_info_bg, Role::k_media, Role::k_action_text,
+    };
+    Palette result{};
+    for (std::size_t index = 0; index < roles.size(); ++index) {
+        result[index] = desktop_tokens::color(roles[index], dark);
+    }
+    return result;
+}
 
-inline constexpr Palette kDarkPalette{
-    0x1D1E21, 0x222327, 0x25272B, 0x2C2E33, 0x2C2E33, 0x34363C,
-    0x3B3E45, 0x41444C, 0x737B87, 0xE4E7EC, 0xAFB5BF, 0x777D88,
-    0x355E80, 0x406D92, 0xF3F8FC, 0x2C3A47, 0xA2CBE9, 0x87B9E0,
-    0x8FCAA5, 0x28382E, 0xE0BD7B, 0x3D3426, 0xE3A0A6, 0x402D32,
-    0xB3BAC5, 0x30343B, 0xA2CBE9, 0x2B3A49, 0x17191D,
-};
+inline constexpr Palette kLightPalette = projected_palette(false);
+inline constexpr Palette kDarkPalette = projected_palette(true);
 
 [[nodiscard]] inline ImVec4 interim_color(ColorRole role, bool dark) noexcept {
     const auto rgb = (dark ? kDarkPalette : kLightPalette)
@@ -49,56 +57,66 @@ inline constexpr Palette kDarkPalette{
 }
 
 namespace spacing {
-inline constexpr float xs = 4.0f;
-inline constexpr float sm = 8.0f;
-inline constexpr float md = 12.0f;
-inline constexpr float lg = 16.0f;
-inline constexpr float xl = 24.0f;
-inline constexpr float xxl = 32.0f;
+inline constexpr float xs = desktop_tokens::spacing::k_xs;
+inline constexpr float sm = desktop_tokens::spacing::k_sm;
+inline constexpr float md = desktop_tokens::spacing::k_md;
+inline constexpr float lg = desktop_tokens::spacing::k_lg;
+inline constexpr float xl = desktop_tokens::spacing::k_xl;
+inline constexpr float xxl = desktop_tokens::spacing::k_xxl;
 } // namespace spacing
 
 namespace radius {
-inline constexpr float window = 0.0f;
-inline constexpr float control = 8.0f;
-inline constexpr float card = 10.0f;
-inline constexpr float dialog = 12.0f;
-inline constexpr float badge = 6.0f;
+inline constexpr float window = desktop_tokens::radius::k_window;
+inline constexpr float control = desktop_tokens::radius::k_control;
+inline constexpr float card = desktop_tokens::radius::k_card;
+inline constexpr float dialog = desktop_tokens::radius::k_dialog;
+inline constexpr float badge = desktop_tokens::radius::k_badge;
 } // namespace radius
 
 namespace geometry {
-inline constexpr float reference_dpi = 96.0f;
-inline constexpr float outline = 1.0f;
+inline constexpr float reference_dpi = desktop_tokens::k_reference_dpi;
+inline constexpr float outline = desktop_tokens::controls::k_border_width;
 inline constexpr float shell_compact_breakpoint = 1100.0f;
-inline constexpr float sidebar = 200.0f;
-inline constexpr float sidebar_compact = 176.0f;
-inline constexpr float header = 64.0f;
-inline constexpr float toolbar_min = 44.0f;
-inline constexpr float statusbar = 28.0f;
-inline constexpr float content_inset = 24.0f;
-inline constexpr float content_inset_compact = 16.0f;
-inline constexpr float table_row_min = 40.0f;
-inline constexpr float table_header = 36.0f;
+inline constexpr float sidebar = desktop_tokens::geometry::k_sidebar;
+inline constexpr float sidebar_compact = desktop_tokens::geometry::k_sidebar_compact;
+inline constexpr float header = desktop_tokens::geometry::k_titlebar;
+inline constexpr float toolbar_min = desktop_tokens::geometry::k_toolbar_min;
+inline constexpr float statusbar = desktop_tokens::geometry::k_statusbar;
+inline constexpr float content_inset = desktop_tokens::geometry::k_content_inset;
+inline constexpr float content_inset_compact = desktop_tokens::geometry::k_content_inset_compact;
+inline constexpr float table_row_min = desktop_tokens::geometry::k_table_row_min;
+inline constexpr float table_header = desktop_tokens::geometry::k_table_header;
 inline constexpr float classroom_table_min = 920.0f;
 inline constexpr float classroom_search_min = 220.0f;
 inline constexpr float classroom_filter = 136.0f;
-inline constexpr float card_min_width = 208.0f;
-inline constexpr float grid_gap = 12.0f;
-inline constexpr float snapshot_aspect = 16.0f / 9.0f;
-inline constexpr float focus_targets = 220.0f;
-inline constexpr float focus_targets_compact = 180.0f;
+inline constexpr float card_min_width = desktop_tokens::geometry::k_card_min_width;
+inline constexpr float grid_gap = desktop_tokens::geometry::k_grid_gap;
+inline constexpr float snapshot_aspect = desktop_tokens::geometry::k_snapshot_aspect;
+inline constexpr float focus_targets = desktop_tokens::geometry::k_focus_target_list;
+inline constexpr float focus_targets_compact = desktop_tokens::geometry::k_focus_target_list_compact;
 inline constexpr float focus_viewport_min = 250.0f;
-inline constexpr float dialog_width = 640.0f;
-inline constexpr float dialog_max_width = 860.0f;
-inline constexpr float dialog_inset = 24.0f;
+inline constexpr float dialog_width = desktop_tokens::geometry::k_dialog_width;
+inline constexpr float dialog_max_width = desktop_tokens::geometry::k_dialog_max_width;
+inline constexpr float dialog_inset = desktop_tokens::geometry::k_dialog_inset;
 } // namespace geometry
 
 namespace typography {
-inline constexpr float page_title = 22.0f;
-inline constexpr float section_title = 16.0f;
-inline constexpr float body = 14.0f;
-inline constexpr float caption = 12.0f;
-inline constexpr float candidate_body = 16.0f;
+inline constexpr float page_title = desktop_tokens::typography::k_page_title;
+inline constexpr float section_title = desktop_tokens::typography::k_section_title;
+inline constexpr float body = desktop_tokens::typography::k_body;
+inline constexpr float caption = desktop_tokens::typography::k_caption;
+inline constexpr float candidate_body = desktop_tokens::typography::k_candidate_body;
 } // namespace typography
+
+namespace controls {
+inline constexpr float default_height = desktop_tokens::controls::k_default_height;
+inline constexpr float command_height = desktop_tokens::controls::k_command_height;
+inline constexpr float row_height = desktop_tokens::controls::k_row_height;
+inline constexpr float icon_size = desktop_tokens::controls::k_icon_size;
+inline constexpr float icon_stroke = desktop_tokens::controls::k_icon_stroke;
+inline constexpr float border_width = desktop_tokens::controls::k_border_width;
+inline constexpr float focus_ring = desktop_tokens::controls::k_focus_ring;
+} // namespace controls
 
 inline void apply_interim_style(ImGuiStyle& style, bool dark, float scale) {
     // Rebuild all fields, including those a local widget may have customized.
