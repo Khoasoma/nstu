@@ -164,30 +164,45 @@
       }
 
       item.innerHTML = `
-        <div class="nav-item-left">
+        <button class="nav-item-left question-select" type="button" aria-current="${idx === activeQuestionIndex}" aria-label="${escapeHtml(questionButtonName(q, idx))}">
           <span class="nav-item-index">${idx + 1}</span>
           <span class="nav-item-type-badge ${badgeType}">${badgeLabel}</span>
           <span class="nav-item-title">${escapeHtml(q.prompt || "Untitled Question")}</span>
-        </div>
+        </button>
         <div class="nav-item-actions">
-          <button class="icon-btn delete" type="button" title="Delete question" data-delete="${idx}">🗑️</button>
+          <button class="icon-btn delete" type="button" title="Delete question" aria-label="Delete question ${idx + 1}" data-delete="${idx}">🗑️</button>
         </div>
       `;
 
       item.addEventListener("click", (e) => {
+        const previousFocus = document.activeElement;
+        const railOwnedFocus = item.contains(previousFocus);
         syncExamMetadata();
         if (e.target.closest("[data-delete]")) {
           deleteQuestion(idx);
-          return;
+        } else {
+          activeQuestionIndex = idx;
+          renderEditor();
         }
-        activeQuestionIndex = idx;
-        renderEditor();
+        if (railOwnedFocus && !previousFocus.isConnected) {
+          const selected = el("question-nav-list").children[activeQuestionIndex]?.querySelector(".question-select");
+          selected?.focus({ preventScroll: true });
+          selected?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        }
       });
 
       navList.appendChild(item);
     });
 
     renderActiveQuestionForm();
+  }
+
+  function questionButtonName(q, index) {
+    const type = q.isMatching ? "Matching" : {
+      multiple_choice: "Multiple choice", short_answer: "Short answer",
+      essay: "Essay", listening: "Listening", reading: "Reading"
+    }[q.type];
+    return `Question ${index + 1}: ${type}. ${q.prompt || "Untitled Question"}`;
   }
 
   function renderActiveQuestionForm() {
@@ -1466,7 +1481,10 @@
       if (q) {
         q.prompt = e.target.value;
         const navItem = el("question-nav-list").children[activeQuestionIndex];
-        if (navItem) navItem.querySelector(".nav-item-title").textContent = e.target.value || "Untitled Question";
+        if (navItem) {
+          navItem.querySelector(".nav-item-title").textContent = e.target.value || "Untitled Question";
+          navItem.querySelector(".question-select")?.setAttribute("aria-label", questionButtonName(q, activeQuestionIndex));
+        }
       }
     });
 

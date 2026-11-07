@@ -167,6 +167,7 @@ const transitionNodes = new Map();
 function transitionNode(id = '') {
   const node = { value: '', children: [], listeners: {}, textContent: '',
     setAttribute(name,value) { this[name]=String(value); },
+    contains(target) { return target === this || this.children.some(child => child.contains?.(target)); },
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); },
     appendChild(child) { this.children.push(child); } };
   Object.defineProperty(node, 'innerHTML', { set(value) { this.html = value; this.children = []; }, get() { return this.html; } });
@@ -221,6 +222,12 @@ assertTransitionMetadata('Last-question guard metadata');
 assert.equal(transitions.exam.questions.length, 1);
 assert.equal(JSON.stringify(transitions.exam.questions[0]), addedQuestion);
 console.log('Studio metadata on select/add/delete/last-question guard: 4 scenarios passed');
+
+const nativeRailMarkup=transitionNodes.get('question-nav-list').children[0].innerHTML;
+assert.match(nativeRailMarkup,/<button[^>]*type="button"[^>]*aria-current="true"/,
+  'Current question selection must be a native button, keyboard reachable without a custom key dispatcher');
+assert.equal((nativeRailMarkup.match(/<button\b/g)||[]).length,2,'Selection and deletion are separate native controls');
+assert.ok(nativeRailMarkup.indexOf('</button>')<nativeRailMarkup.indexOf('data-delete='),'Delete must be outside selection button');
 
 function essayLimitInput(value, valid = true, number = Number(value)) {
   const node = fieldNode('q-essay-limit');
@@ -726,6 +733,28 @@ for(const byteLimit of [131072,131073]){
   assert.equal(h.node('lbl-archive-hash').textContent,'-');exportControllerCases++;
 }
 console.log(`Studio actual Export limits, whole-second seeds, rejection/custody/Save: ${exportControllerCases} cases passed`);
+
+let nativeRailCases=1;
+for(const [type,name,matching] of [['essay','Essay',false],['short_answer','Short answer',false],['multiple_choice','Multiple choice',false],
+  ['listening','Listening',false],['reading','Reading',false],['reading','Matching',true]]){
+  const x=nativeFixture();Object.assign(x.questions[0],{type,isMatching:matching,prompt:'Name "ế" <b>keep</b> & 𝄞',options:['A','B'],matchingTargets:['Target']});
+  const h=await numericHarness(x),before=JSON.stringify(h.probe.inspect().exam),markup=h.node('question-nav-list').children[0].innerHTML;
+  assert.match(markup,/<button[^>]*type="button"[^>]*aria-current="true"/);assert.equal((markup.match(/<button\b/g)||[]).length,2);
+  assert.ok(markup.includes(`aria-label="Question 1: ${name}. Name &quot;ế&quot; &lt;b&gt;keep&lt;/b&gt; &amp; 𝄞"`));
+  assert.ok(markup.includes('aria-label="Delete question 1"'));assert.ok(markup.indexOf('</button>')<markup.indexOf('data-delete='));
+  assert.equal(JSON.stringify(h.probe.inspect().exam),before,'Native naming/rendering does not mutate author data');nativeRailCases++;
+}
+for(const text of ['', 'Edited "𝄞" <img onerror=alert(1)> e\u0302\u0301']){
+  const h=await numericHarness(),state=h.probe.inspect(),other=JSON.stringify(state.exam.questions[1]),renders=h.probe.stats.editor;
+  state.answers['essay-a']='Retained Preview answer';const input=h.node('q-prompt');input.value=text;input.selectionStart=2;input.selectionEnd=5;input.focus();
+  for(const callback of input.listeners.input)callback({target:input});
+  assert.equal(h.probe.inspect().exam,state.exam);assert.equal(state.exam.questions[0].prompt,text);assert.equal(JSON.stringify(state.exam.questions[1]),other);
+  assert.equal(h.node('question-nav-list').children[0].querySelector('.question-select')['aria-label'],`Question 1: Essay. ${text||'Untitled Question'}`);
+  assert.equal(h.probe.stats.editor,renders,'Live accessible name update does not rerender or reset rail focus');
+  assert.equal(h.document.activeElement,input);assert.deepEqual([input.selectionStart,input.selectionEnd],[2,5]);assert.equal(h.probe.inspect().answers,state.answers);
+  assert.equal(state.answers['essay-a'],'Retained Preview answer');nativeRailCases++;
+}
+console.log(`Studio actual native question rail names/markup/live binding/identity: ${nativeRailCases} cases passed`);
 
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
