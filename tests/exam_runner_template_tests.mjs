@@ -756,6 +756,29 @@ for(const text of ['', 'Edited "𝄞" <img onerror=alert(1)> e\u0302\u0301']){
 }
 console.log(`Studio actual native question rail names/markup/live binding/identity: ${nativeRailCases} cases passed`);
 
+// A truthy fallback in Preview must not substitute one point for a stored zero.
+let previewPointCases=0;
+for(const [type,matching] of [['essay',false],['short_answer',false],['multiple_choice',false],['listening',false],['reading',false],['reading',true]]){
+  for(const points of [0,1,101,1000,undefined,1.25,-1]){
+    const x=nativeFixture();Object.assign(x.questions[0],{type,isMatching:matching,options:['A','B'],matchingTargets:['Target']});
+    if(points===undefined)delete x.questions[0].points;else x.questions[0].points=points;
+    const h=await numericHarness(x),state=h.probe.inspect(),before=JSON.stringify(state.exam),q=state.exam.questions[0];
+    state.answers[q.id]=matching?{0:0}:type==='essay'||type==='short_answer'?'Retained response':1;
+    const answers=state.answers,answer=answers[q.id];h.node('btn-mode-preview').click();
+    assert.equal(h.node('p-question-points').textContent,`${points===undefined?1:points} points`,'Preview shows literal stored points or absent default');
+    assert.equal(h.probe.inspect().exam,state.exam);assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);assert.equal(answers[q.id],answer);
+    assert.equal(h.probe.stats.compile,0);h.node('btn-mode-editor').click();h.probe.save();
+    assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before,'Preview and Save retain complete authoring data');
+    assert.equal(Object.hasOwn(state.exam.questions[0],'points'),points!==undefined,'Absent points remain absent in Save');previewPointCases++;
+  }
+}
+{
+  const x=numericFixture();x.questions[0].points=0;const h=await numericHarness(x);numericInput(h,'q-points','1e');
+  h.node('btn-mode-preview').click();assert.equal(h.node('p-question-points').textContent,'0 points');h.node('btn-mode-editor').click();
+  assert.equal(h.node('q-points').value,'1e');assert.equal(h.node('q-points')['aria-invalid'],'true');assert.equal(h.probe.inspect().exam.questions[0].points,0);previewPointCases++;
+}
+console.log(`Studio actual Preview point captions/defaults/model/Save/answer/raw identity: ${previewPointCases} cases passed`);
+
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
 for(const preview of [false,true]){
