@@ -908,6 +908,20 @@ for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=tru
 }
 console.log(`Studio actual text Preview resize ownership/caret/guards: ${previewTextResizeCases} cases passed`);
 
+let previewReferenceCases=0;
+for(const type of ['essay','short_answer','reading','multiple_choice','listening'])for(const kind of ['passage','audio','both','none']){
+  const q={id:'ref',type,prompt:'Authored prompt ế',points:0,options:['A','B']};if(kind==='passage'||kind==='both')q.passage='Authored passage <b>literal</b>';if(kind==='audio'||kind==='both')q.audio='media/listening-01.mp3';
+  const model={id:'reference-metadata',title:'Reference metadata',subject:'',durationSeconds:600,questions:[q,{id:'no-ref',type:'short_answer',prompt:'No reference'},{id:'last-ref',type:'essay',prompt:'Last',passage:'Last passage'}]},h=await numericHarness(model),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  h.node('btn-mode-preview').click();const label=kind==='audio'?'Audio reference':'Reference material';assert.equal(h.node('p-passage-heading').textContent,label);assert.equal(h.node('preview-pane-left')['aria-label'],label);assert.equal(h.node('p-passage-sub').textContent,kind==='none'?'':'Question 1 of 3');assert.equal(h.node('preview-pane-left').style.display,kind==='none'?'none':'block');
+  if(q.audio)assert.equal(h.node('p-audio-player').src,q.audio);assert.equal(h.node('p-question-prompt').textContent,q.prompt);assert.equal(h.node('p-question-points').textContent,'0 points');assert.equal(h.node('preview-timer').textContent,'10:00');
+  h.node('btn-p-next').click();assert.equal(h.node('p-passage-sub').textContent,'');assert.equal(h.node('preview-pane-left').style.display,'none');h.node('btn-p-next').click();assert.equal(h.node('p-passage-sub').textContent,'Question 3 of 3');assert.equal(h.node('p-passage-heading').textContent,'Reference material');assert.equal(h.node('preview-pane-left')['aria-label'],'Reference material');
+  assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().exam,state.exam);assert.equal(h.probe.inspect().answers,answers);h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before);previewReferenceCases++;
+}
+{
+  const h=await numericHarness({id:'empty-reference',title:'Empty reference',subject:'',durationSeconds:600,questions:[{id:'empty',type:'short_answer',prompt:'Empty',passage:'',audio:''}]});h.node('btn-mode-preview').click();assert.equal(h.node('p-passage-sub').textContent,'');assert.equal(h.node('preview-pane-left').style.display,'none');previewReferenceCases++;
+}
+console.log(`Studio actual reference metadata/kind/current ordinal/state/Save: ${previewReferenceCases} cases passed`);
+
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
 for(const preview of [false,true]){

@@ -461,6 +461,11 @@
     const passageContent = el("p-passage-content");
     const audioContainer = el("p-audio-container");
     const leftPane = el("preview-pane-left");
+    const referenceLabel = !q.passage && q.audio ? "Audio reference" : "Reference material";
+    el("p-passage-heading").textContent = referenceLabel;
+    el("p-passage-sub").textContent = q.passage || q.audio
+      ? `Question ${previewIndex + 1} of ${currentExam.questions.length}` : "";
+    leftPane.setAttribute("aria-label", referenceLabel);
 
     if (q.passage) {
       leftPane.style.display = "block";
