@@ -750,10 +750,13 @@
 
   function validateOrigin(origin) {
     if (typeof origin !== "string" || origin.length < 1 || origin.length > 253) return false;
+    if (!/^[\x21-\x7e]+$/.test(origin)) return false;
     if (origin.includes("@")) return false; // no userinfo
     let host = origin;
     if (/^https?:\/\//i.test(host)) {
       host = host.replace(/^https?:\/\//i, "");
+    } else if (host.startsWith("//")) {
+      host = host.substring(2);
     } else if (host.includes("://")) {
       return false; // unsupported scheme
     }
@@ -837,32 +840,107 @@
     return errors;
   }
 
+  // Authoring keeps its full model. This boundary admits only values the current
+  // schema, stager and native JsonReader can consume without data substitution.
+  function validateExportContract(exam) {
+    const errors = [];
+    const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
+    const text = (value, path, min, max, maxBytes = 65536) => {
+      if (typeof value !== "string") { errors.push(`${path} must be text.`); return; }
+      if (value.length < min || value.length > max) errors.push(`${path} must contain ${min}–${max} characters.`);
+      // TextEncoder replaces lone surrogates; native JSON decoding rejects them.
+      for (let i = 0; i < value.length; i++) {
+        const unit = value.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) { errors.push(`${path} contains an unpaired Unicode surrogate.`); return; }
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+          errors.push(`${path} contains an unpaired Unicode surrogate.`); return;
+        }
+      }
+      if (new TextEncoder().encode(value).byteLength > maxBytes) errors.push(`${path} exceeds the native ${maxBytes} UTF-8 byte limit.`);
+    };
+    const integer = (value, path, min, max) => {
+      if (!Number.isInteger(value) || value < min || value > max) errors.push(`${path} must be an integer from ${min} to ${max}.`);
+    };
+    const identifier = (value, path) => {
+      if (typeof value !== "string" || !/^[a-zA-Z0-9._-]{1,96}$/.test(value)) errors.push(`${path} must be a valid 1–96 character ID.`);
+    };
+    if (!object(exam)) return ["Assessment must be an object."];
+    identifier(exam.id, "Package ID");
+    text(exam.title, "Assessment title", 1, 240);
+    integer(exam.durationSeconds, "Duration (seconds)", 60, 86400);
+    for (const [key, max] of [["subject", 120], ["candidate", 160]]) {
+      if (Object.hasOwn(exam, key)) text(exam[key], key, 0, max);
+    }
+    if (Object.hasOwn(exam, "allowedOrigins")) {
+      if (!Array.isArray(exam.allowedOrigins) || exam.allowedOrigins.length > 32) errors.push("Allowed origins must be a list of at most 32 entries.");
+      else {
+        const seen = new Set();
+        exam.allowedOrigins.forEach((origin, index) => {
+          if (!validateOrigin(origin) || seen.has(origin)) errors.push(`Allowed origin #${index + 1} is invalid or duplicated.`);
+          seen.add(origin);
+        });
+      }
+    }
+    if (Object.hasOwn(exam, "documents") && (!Array.isArray(exam.documents) || exam.documents.length !== 0)) {
+      errors.push("Export cannot bundle authored documents. Keep them in the draft until media packaging is supported.");
+    }
+    if (!Array.isArray(exam.questions) || exam.questions.length < 1 || exam.questions.length > 256) {
+      errors.push("The current native reader supports 1–256 questions per Export. Authoring and Save retain up to 500.");
+      return errors;
+    }
+    const ids = new Set();
+    exam.questions.forEach((q, index) => {
+      const path = `Question #${index + 1}`;
+      if (!object(q)) { errors.push(`${path} must be an object.`); return; }
+      identifier(q.id, `${path} ID`);
+      if (ids.has(q.id)) errors.push(`${path} has a duplicate ID.`);
+      ids.add(q.id);
+      if (!["multiple_choice", "short_answer", "essay", "listening", "reading"].includes(q.type)) errors.push(`${path} has an unsupported native type.`);
+      if (q.isMatching === true) errors.push(`${path}: Matching is available in draft Preview but unsupported by the native runtime.`);
+      for (const key of ["audio", "pdf"]) {
+        if (Object.hasOwn(q, key)) errors.push(`${path}: Export cannot bundle declared ${key} media, including blank paths.`);
+      }
+      text(q.prompt, `${path} prompt`, 1, 8000, 8000);
+      for (const [key, max] of [["instruction", 4000], ["passage", 30000], ["answerPlaceholder", 240]]) {
+        if (Object.hasOwn(q, key)) text(q[key], `${path} ${key}`, 0, max);
+      }
+      if (Object.hasOwn(q, "points")) integer(q.points, `${path} points`, 0, 1000);
+      if (Object.hasOwn(q, "wordLimit")) integer(q.wordLimit, `${path} word limit`, 1, 5000);
+      const needsOptions = ["multiple_choice", "listening", "reading"].includes(q.type);
+      if (Object.hasOwn(q, "options") || needsOptions) {
+        if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 12) errors.push(`${path} options must contain 2–12 entries.`);
+        else q.options.forEach((option, n) => text(option, `${path} option #${n + 1}`, 1, 2000, 2000));
+      }
+    });
+    return errors;
+  }
+
   function compileManifest(exam) {
     // Generate clean manifest matching manifest.schema.json
     const manifest = {
       id: exam.id,
       title: exam.title,
-      subject: exam.subject || "General",
+      subject: Object.hasOwn(exam, "subject") ? exam.subject : "General",
       durationSeconds: exam.durationSeconds,
-      documents: exam.documents || [],
+      documents: Object.hasOwn(exam, "documents") ? exam.documents : [],
       questions: exam.questions.map(q => {
         const item = {
           id: q.id,
           type: q.type,
           prompt: q.prompt,
-          instruction: q.instruction || "",
-          points: Number(q.points) || 1
+          instruction: Object.hasOwn(q, "instruction") ? q.instruction : "",
+          points: Object.hasOwn(q, "points") ? q.points : 1
         };
-        if (q.passage) item.passage = q.passage;
-        if (q.options && q.options.length > 0) item.options = q.options;
-        if (q.audio) item.audio = q.audio;
-        if (q.wordLimit) item.wordLimit = Number(q.wordLimit);
-        if (q.answerPlaceholder) item.answerPlaceholder = q.answerPlaceholder;
+        for (const key of ["passage", "options", "audio", "pdf", "wordLimit", "answerPlaceholder"]) {
+          if (Object.hasOwn(q, key)) item[key] = q[key];
+        }
         return item;
       })
     };
-    if (Array.isArray(exam.allowedOrigins) && exam.allowedOrigins.length > 0) {
-      manifest.allowedOrigins = exam.allowedOrigins;
+    for (const key of ["candidate", "allowedOrigins"]) {
+      if (Object.hasOwn(exam, key)) manifest[key] = exam[key];
     }
     return manifest;
   }
@@ -1006,8 +1084,8 @@
   let numericDraftOwners = new WeakMap();
   const numericFields = {
     "exam-duration": { label: "Duration", key: "durationSeconds", min: 1, max: 1440, scale: 60, fallback: 3600 },
-    "q-points": { label: "Points", key: "points", min: 1, max: 100, scale: 1, fallback: 1 },
-    "q-essay-limit": { label: "Word limit", key: "wordLimit", min: 10, max: 2000, scale: 1, optional: true }
+    "q-points": { label: "Points", key: "points", min: 0, max: 1000, scale: 1, fallback: 1 },
+    "q-essay-limit": { label: "Word limit", key: "wordLimit", min: 1, max: 5000, scale: 1, optional: true }
   };
 
   function numericDraft(id, question) {
@@ -1023,6 +1101,10 @@
     if (!drafts[id]) {
       const value = owner[spec.key] ?? spec.fallback;
       drafts[id] = { raw: value === undefined ? "" : String(value / spec.scale), rejected: false };
+      if (id === "exam-duration") {
+        drafts[id].seededRaw = drafts[id].raw;
+        drafts[id].seededSeconds = value;
+      }
     }
     return drafts[id];
   }
@@ -1030,6 +1112,11 @@
   function numericError(id, draft) {
     const spec = numericFields[id];
     if (spec.optional && draft.raw === "" && !draft.rejected) return "";
+    if (id === "exam-duration") {
+      const seconds = draft.raw === draft.seededRaw ? draft.seededSeconds : Number(draft.raw) * 60;
+      return !draft.rejected && /^\d+(?:\.\d+)?$/.test(draft.raw.trim()) && Number.isInteger(seconds) &&
+        seconds >= 60 && seconds <= 86400 ? "" : "Duration must convert to whole seconds from 60 to 86400 (1–1440 minutes).";
+    }
     const value = Number(draft.raw);
     return !draft.rejected && /^\d+$/.test(draft.raw.trim()) && Number.isInteger(value) &&
       value >= spec.min && value <= spec.max ? ""
@@ -1063,7 +1150,8 @@
       const spec = numericFields[id];
       const owner = id === "exam-duration" ? currentExam : question;
       if (spec.optional && draft.raw === "") delete owner[spec.key];
-      else owner[spec.key] = Number(draft.raw) * spec.scale;
+      else owner[spec.key] = id === "exam-duration" && draft.raw === draft.seededRaw
+        ? draft.seededSeconds : Number(draft.raw) * spec.scale;
     }
     showNumericError(id, draft);
   }
@@ -1108,8 +1196,11 @@
     statusBox.innerHTML = "⏳ Validating exam schema and compiling package...";
     hashesBox.style.display = "none";
     btnDownload.disabled = true;
+    btnDownload.onclick = null;
+    for (const id of ["lbl-archive-hash", "lbl-content-hash", "lbl-stage-command"]) el(id).textContent = "-";
 
-    const errors = validateExam(currentExam).concat(numericExportErrors());
+    const errors = validateExportContract(currentExam);
+    if (errors.length === 0) errors.push(...validateExam(currentExam), ...numericExportErrors());
     if (errors.length > 0) {
       statusBox.style.color = "var(--danger)";
       statusBox.innerHTML = `<strong>Validation Failed (${errors.length} errors):</strong><ul style="margin: 8px 0 0 18px;">${errors.map(e => `<li>${escapeHtml(e)}</li>`).join("")}</ul>`;
@@ -1119,6 +1210,9 @@
     try {
       const manifestObj = compileManifest(currentExam);
       const manifestJson = JSON.stringify(manifestObj, null, 2);
+      if (new TextEncoder().encode(manifestJson).byteLength > 131072) {
+        throw new Error("Manifest exceeds the current native reader's 131072 UTF-8 byte limit. The complete draft can still be saved.");
+      }
       const packageId = manifestObj.id;
 
       const zip = new NstuZip.Writer();
