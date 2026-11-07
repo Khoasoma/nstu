@@ -8,6 +8,7 @@
 #include <exception>
 #include <functional>
 #include <iostream>
+#include <map>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -54,8 +55,17 @@ struct FakeApi final : WindowsAuthorizationApi {
     int delay_after{0};
     bool throw_query{false}, change_user_after{false}, change_alias_after{false};
     bool delay_original_close{false};
+    bool kernel_allow{true},kernel_ok{true};
+    std::optional<bool> teacher_kernel,technician_kernel;
+    int kernel_calls{0};
     std::function<void()> during_read;
     std::function<void()> during_membership;
+    std::function<void()> during_kernel;
+    std::function<void()> during_session;
+    int session_calls{0};
+    std::optional<AccountFacts> sid_override;
+    std::map<std::wstring,ApiResult<AccountFacts>> name_overrides;
+    std::vector<std::array<DWORD,3>> direct_query_arguments;
     std::set<HANDLE> held;
     FakeApi() {
         facts.user = sid(L"S-1-5-21-1-2-3-1001");
@@ -114,12 +124,14 @@ struct FakeApi final : WindowsAuthorizationApi {
         ++sid_lookups;
         if (!sid_lookup_ok) return bad<AccountFacts>();
         auto result = user;
+        if(sid_override)result=*sid_override;
         if (change_user_after && sid_lookups > 1) result.sid = technician.sid;
         return good(result);
     }
     ApiResult<AccountFacts> account_from_name(const std::wstring& name) override {
         ++lookups;
         if (!name_lookup_ok) return bad<AccountFacts>();
+        if(const auto found=name_overrides.find(name);found!=name_overrides.end())return found->second;
         if (name == user.domain + L"\\" + user.name) return good(user);
         if (name == L"LAB\\Teachers") {
             auto result = teacher;
@@ -133,14 +145,26 @@ struct FakeApi final : WindowsAuthorizationApi {
                                           DWORD flags, DWORD bytes) override {
         CHECK(name == user.domain + L"\\" + user.name);
         ++direct_calls; direct_level = level; direct_flags = flags; preferred = bytes;
+        direct_query_arguments.push_back({level,flags,bytes});
         if(during_membership)during_membership();
         if (delay_after == 1) tick += std::chrono::milliseconds(300);
         return groups;
     }
     ApiResult<SessionFacts> session_facts(DWORD id) override {
         CHECK(id == facts.session_id);
+        ++session_calls;
+        if(during_session)during_session();
         if (delay_after == 2) tick += std::chrono::milliseconds(300);
         return session_ok ? good(session) : bad<SessionFacts>();
+    }
+    ApiResult<bool> role_access_check(HANDLE token,std::span<const std::byte> role) override {
+        CHECK(token==fake_handle(3) && held.contains(token));
+        CHECK(SidBytes(role.begin(),role.end())==teacher.sid || SidBytes(role.begin(),role.end())==technician.sid);
+        ++kernel_calls;
+        if(during_kernel)during_kernel();
+        if(delay_after==3)tick+=std::chrono::milliseconds(300);
+        const auto per_role=SidBytes(role.begin(),role.end())==teacher.sid?teacher_kernel:technician_kernel;
+        return kernel_ok?good(per_role.value_or(kernel_allow)):bad<bool>();
     }
     Clock::time_point now() noexcept override { return tick; }
 };
@@ -169,6 +193,215 @@ void no_grant(const AuthorizationResult& result) {
     CHECK(!result.authorized()); CHECK(!result.evidence);
 }
 void unit_tests() {
+    run("post_kernel_single_teacher_alias_recreated_denied", [] {
+        Fixture f;
+        f.api->bindings.technician.reset();
+        f.api->during_kernel = [&] { f.api->teacher.sid = f.api->technician.sid; };
+        auto r = f.receive();
+        no_grant(r);
+        CHECK(r.status == AuthorizationStatus::binding_changed);
+    });
+    run("post_kernel_principal_remap_denied", [] {
+        Fixture f;
+        f.api->during_kernel = [&] { f.api->user.sid = f.api->teacher.sid; };
+        auto r = f.receive();
+        no_grant(r);
+        CHECK(r.status == AuthorizationStatus::identity_unavailable);
+    });
+    run("post_kernel_direct_membership_removal_denied", [] {
+        Fixture f;
+        f.api->during_kernel = [&] { f.api->groups = {0,0,0,0,true,{}}; };
+        auto r = f.receive();
+        no_grant(r);
+        CHECK(r.status == AuthorizationStatus::not_direct_member);
+    });
+    run("post_kernel_membership_result_errors_denied", [] {
+        for(int mode=0;mode!=10;++mode){
+            Fixture f;
+            f.api->during_kernel=[&] {
+                if(mode==0)f.api->groups.status=ERROR_MORE_DATA;
+                if(mode==1)f.api->groups.status=ERROR_ACCESS_DENIED;
+                if(mode==2)f.api->groups.structure_valid=false;
+                if(mode==3)f.api->groups.total=3;
+                if(mode==4)f.api->groups.aliases.pop_back();
+                if(mode==5){
+                    f.api->groups.aliases.clear();
+                    for(int index=0;index!=4097;++index)
+                        f.api->groups.aliases.push_back(L"Group"+std::to_wstring(index));
+                    f.api->groups.entries=4097;f.api->groups.total=4097;
+                }
+                if(mode==6)f.api->groups.buffer_bytes=1048577;
+                if(mode==7)f.api->groups.aliases[0]=L"invalid\\name";
+                if(mode==8)f.api->groups.aliases[0]=std::wstring(257,L'x');
+                if(mode==9)f.api->groups.aliases={L"Teachers",L"teachers"};
+            };
+            auto r=f.receive();no_grant(r);
+            CHECK(r.status==(mode==1?AuthorizationStatus::membership_unavailable:
+                                     AuthorizationStatus::membership_incomplete));
+            CHECK(r.native_error==(mode==0?DWORD{ERROR_MORE_DATA}:
+                                   mode==1?DWORD{ERROR_ACCESS_DENIED}:DWORD{0}));
+            CHECK(f.api->direct_calls==2 && f.api->session_calls==1);
+            CHECK(f.api->tick==Clock::time_point(std::chrono::seconds(1)));
+            CHECK(f.api->session.known && f.api->session.active && f.api->session.unlocked);
+            CHECK(f.api->bindings.generation==7);
+        }
+    });
+    run("post_kernel_identity_and_alias_query_errors_denied", [] {
+        for(int mode=0;mode!=16;++mode){
+            Fixture f;f.api->bindings.technician.reset();
+            f.api->during_kernel=[&] {
+                if(mode==0)f.api->sid_lookup_ok=false;
+                if(mode==1)f.api->name_lookup_ok=false;
+                if(mode>=2 && mode<=5){
+                    auto changed=f.api->user;
+                    if(mode==2)changed.type=SidTypeAlias;
+                    if(mode==3)changed.sid=f.api->technician.sid;
+                    if(mode==4)changed.name=L"Remapped";
+                    if(mode==5)changed.domain=L"OTHER";
+                    f.api->sid_override=changed;
+                }
+                if(mode>=6 && mode<=9){
+                    auto changed=f.api->user;
+                    if(mode==6)changed.type=SidTypeAlias;
+                    if(mode==7)changed.sid=f.api->technician.sid;
+                    if(mode==8)changed.name=L"Remapped";
+                    if(mode==9)changed.domain=L"OTHER";
+                    f.api->name_overrides[L"LAB\\Operator"]=good(changed);
+                }
+                if(mode==10)f.api->name_overrides[L"LAB\\Teachers"]=bad<AccountFacts>();
+                if(mode==11)f.api->teacher.type=SidTypeUser;
+                if(mode==12)f.api->teacher.sid=f.api->technician.sid;
+                if(mode==13)f.api->teacher.name=L"Recreated";
+                if(mode==14)f.api->teacher.domain=L"OTHER";
+                if(mode==15)f.api->name_overrides[L"LAB\\Operator"]=bad<AccountFacts>(ERROR_NONE_MAPPED);
+            };
+            auto r=f.receive();no_grant(r);
+            CHECK(r.status==(mode>=10 && mode<=14?AuthorizationStatus::binding_changed:
+                                                   AuthorizationStatus::identity_unavailable));
+            if(mode==0 || mode==1 || mode==10)CHECK(r.native_error==ERROR_ACCESS_DENIED);
+            if(mode==15)CHECK(r.native_error==ERROR_NONE_MAPPED);
+            CHECK(f.api->direct_calls==2 && f.api->kernel_calls==1);
+        }
+        for(bool alias_change:{false,true}){
+            Fixture f;f.api->bindings.technician.reset();
+            f.api->during_membership=[&] {
+                if(f.api->direct_calls!=2)return;
+                if(alias_change)f.api->teacher.sid=f.api->technician.sid;
+                else f.api->user.sid=f.api->teacher.sid;
+            };
+            auto r=f.receive();no_grant(r);
+            CHECK(r.status==(alias_change?AuthorizationStatus::binding_changed:AuthorizationStatus::identity_unavailable));
+        }
+    });
+    run("second_membership_query_final_guards_and_original_age", [] {
+        for(int mode=0;mode!=6;++mode){
+            Fixture f;
+            f.api->during_membership=[&] {
+                if(f.api->direct_calls!=2)return;
+                if(mode==0)f.api->tick+=std::chrono::milliseconds(250);
+                if(mode==1)f.api->tick-=std::chrono::milliseconds(1);
+                if(mode==2)f.api->session.unlocked=false;
+                if(mode==3)++f.api->bindings.generation;
+                if(mode==4)f.api->session.known=false;
+                if(mode==5)f.api->session.active=false;
+            };
+            auto r=f.receive();no_grant(r);
+            const auto expected=mode<2?AuthorizationStatus::evidence_expired:
+                mode==2?AuthorizationStatus::session_locked:
+                mode==3?AuthorizationStatus::generation_changed:
+                mode==4?AuthorizationStatus::session_unavailable:AuthorizationStatus::session_inactive;
+            CHECK(r.status==expected && f.api->direct_calls==2);
+        }
+        Fixture within_age;
+        within_age.api->during_membership=[&] {
+            if(within_age.api->direct_calls==2)within_age.api->tick+=std::chrono::milliseconds(249);
+        };
+        auto within=within_age.receive();CHECK(within.authorized());
+        within_age.api->tick+=std::chrono::milliseconds(1);
+        auto expired=within_age.provider.revalidate_for_dispatch(*within.evidence,within_age.api->bindings);
+        no_grant(expired);CHECK(expired.status==AuthorizationStatus::evidence_expired);
+        CHECK(within_age.api->direct_calls==2);
+        Fixture changed_binding;
+        changed_binding.api->during_session=[&] {
+            if(changed_binding.api->session_calls==2)
+                changed_binding.api->bindings.teacher->qualified_local_alias=L"LAB\\RenamedTeachers";
+        };
+        auto changed=changed_binding.receive();no_grant(changed);
+        CHECK(changed.status==AuthorizationStatus::binding_changed);
+        CHECK(changed_binding.api->bindings.generation==7 && changed_binding.api->direct_calls==2);
+        Fixture session_error;
+        session_error.api->during_membership=[&] {if(session_error.api->direct_calls==2)session_error.api->session_ok=false;};
+        auto unknown=session_error.receive();no_grant(unknown);
+        CHECK(unknown.status==AuthorizationStatus::session_unavailable && unknown.native_error==ERROR_ACCESS_DENIED);
+    });
+    run("post_kernel_snapshot_positive_and_call_budget_controls", [] {
+        for(bool single:{false,true}){
+            Fixture f;if(single)f.api->bindings.technician.reset();
+            auto r=f.receive();CHECK(r.authorized());
+            CHECK(f.api->direct_calls==2 && f.api->sid_lookups==3);
+            CHECK(f.api->lookups==(single?6:9) && f.api->kernel_calls==(single?1:2));
+            CHECK(f.api->session_calls==2 && f.api->direct_query_arguments.size()==2);
+            for(const auto& args:f.api->direct_query_arguments)
+                CHECK((args==std::array<DWORD,3>{0,0,32768}));
+            const int post_calls=(f.api->direct_calls-1)+(f.api->sid_lookups-2)+
+                                 (f.api->lookups-(single?4:6));
+            CHECK(post_calls==(single?4:5));
+        }
+        Fixture partial;partial.api->technician_kernel=false;
+        auto teacher_only=partial.receive();CHECK(teacher_only.authorized());
+        CHECK(teacher_only.role_grants.teacher && !teacher_only.role_grants.technician);
+        CHECK(partial.api->direct_calls==2 && partial.api->kernel_calls==2);
+        Fixture removed;removed.api->during_kernel=[&] {removed.api->groups={0,1,1,128,true,{L"Technicians"}};};
+        auto lost_teacher=removed.receive();no_grant(lost_teacher);
+        CHECK(lost_teacher.status==AuthorizationStatus::not_direct_member && removed.api->kernel_calls==2);
+        Fixture added;added.api->groups={0,1,1,128,true,{L"Teachers"}};
+        added.api->during_kernel=[&] {added.api->groups={0,2,2,256,true,{L"Teachers",L"Technicians"}};};
+        auto unchanged=added.receive();CHECK(unchanged.authorized());
+        CHECK(unchanged.role_grants.teacher && !unchanged.role_grants.technician);
+        CHECK(added.api->kernel_calls==1 && added.api->direct_calls==2);
+        Fixture denied;denied.api->kernel_allow=false;auto none=denied.receive();no_grant(none);
+        CHECK(none.status==AuthorizationStatus::kernel_access_denied);
+        CHECK(denied.api->direct_calls==1 && denied.api->kernel_calls==2);
+        Fixture kernel_error;kernel_error.api->kernel_ok=false;auto error=kernel_error.receive();no_grant(error);
+        CHECK(error.status==AuthorizationStatus::kernel_access_unavailable && kernel_error.api->direct_calls==1);
+        std::cout<<"Post-kernel prospective grant calls: dual5/single4; direct queries2; original kernel decisions retained.\n";
+    });
+    run("dispatch_post_kernel_changes_deny_without_recapture", [] {
+        for(int mode=0;mode!=3;++mode){
+            Fixture f;if(mode==2)f.api->bindings.technician.reset();
+            auto captured=f.receive();CHECK(captured.authorized());
+            const int reads=f.api->reads;
+            f.api->during_kernel=[&] {
+                if(mode==0)f.api->groups={0,0,0,0,true,{}};
+                if(mode==1)f.api->user.sid=f.api->teacher.sid;
+                if(mode==2)f.api->teacher.sid=f.api->technician.sid;
+            };
+            auto r=f.provider.revalidate_for_dispatch(*captured.evidence,f.api->bindings);no_grant(r);
+            CHECK(r.status==(mode==0?AuthorizationStatus::not_direct_member:
+                             mode==1?AuthorizationStatus::identity_unavailable:AuthorizationStatus::binding_changed));
+            CHECK(f.api->reads==reads && f.api->direct_calls==4 && f.api->reverts==1);
+        }
+    });
+    run("filter_history_is_not_a_role_veto", [] {
+        Fixture f; f.api->facts.ever_filtered=true;
+        auto r=f.receive(); CHECK(r.authorized());
+    });
+    run("role_kernel_allow_deny_error_and_current_restrictions", [] {
+        Fixture f; f.api->facts.ever_filtered=true; f.api->facts.restricting_sids={f.api->teacher.sid};
+        f.api->technician_kernel=false;
+        auto allowed=f.receive(); CHECK(allowed.authorized());
+        CHECK(allowed.role_grants.teacher && !allowed.role_grants.technician && f.api->kernel_calls==2);
+        f.api->kernel_allow=false; no_grant(f.receive());
+        f.api->kernel_allow=true; f.api->kernel_ok=false; no_grant(f.receive());
+    });
+    run("kernel_check_late_expiry_lock_and_malformed_current_sid", [] {
+        Fixture expired; expired.api->delay_after=3; auto r=expired.receive();
+        no_grant(r); CHECK(r.status==AuthorizationStatus::evidence_expired);
+        Fixture locked; locked.api->during_kernel=[&] {locked.api->session.unlocked=false;};
+        no_grant(locked.receive());
+        Fixture malformed; malformed.api->facts.restricting_sids={SidBytes{std::byte{1}}};
+        no_grant(malformed.receive()); CHECK(malformed.api->kernel_calls==0);
+    });
     run("direct_user_and_dual_roles_injected", [] {
         Fixture f; auto r=f.receive(); CHECK(r.authorized());
         CHECK(r.evidence->grants().teacher && r.evidence->grants().technician);
@@ -213,11 +446,11 @@ void unit_tests() {
         }
         Fixture f; f.api->facts.groups.clear(); no_grant(f.receive());
     });
-    run("unsupported_token_shapes", [] {
+    run("unsupported_identity_shapes_or_current_kernel_denial", [] {
         for(int mode=0;mode<6;++mode) {
             Fixture f;
             if(mode==0)f.api->facts.anonymous=true;
-            if(mode==1)f.api->facts.restricted=true;
+            if(mode==1){f.api->facts.ever_filtered=true;f.api->facts.restricting_sids={f.api->teacher.sid};f.api->kernel_allow=false;}
             if(mode==2)f.api->facts.app_container=true;
             if(mode==3)f.api->facts.level=SecurityIdentification;
             if(mode==4)f.api->facts.level=SecurityAnonymous;
@@ -451,15 +684,19 @@ void native_owned_restrictions() {
     std::vector<std::byte> buffer(needed);
     CHECK(GetTokenInformation(fixture.impersonation.value,TokenRestrictedSids,
                               buffer.data(),needed,&needed));
-    CHECK(reinterpret_cast<TOKEN_GROUPS*>(buffer.data())->GroupCount==0);
+    DWORD restricting_count=0;
+    CHECK(buffer.size()>=sizeof(restricting_count));
+    std::memcpy(&restricting_count,buffer.data(),sizeof(restricting_count));
+    std::cout<<"Native restricting-SID layout: returned_bytes="<<needed<<"; count="<<restricting_count<<"; prefix="<<sizeof(DWORD)<<"; nonempty_array_offset="<<offsetof(TOKEN_GROUPS,Groups)<<"\n";
+    CHECK(restricting_count==0);
     const auto observed=observe_owned_token_classification_read_only(fixture.impersonation.value);
     std::cout<<"Native owned-derived observation: independent_has_restrictions=1; "
              <<"restricting_sids=0; adapter_query="<<observed.query_succeeded
              <<"; adapter_error="<<observed.native_error
              <<"; adapter_ever_filtered="<<observed.ever_filtered
-             <<"; supported_shape="<<observed.supported_shape
+             <<"; identity_shape_valid="<<observed.identity_shape_valid
              <<"; managed_grants=not-tested; token_application=none.\n";
-    CHECK(observed.query_succeeded && observed.ever_filtered && !observed.supported_shape);
+    CHECK(observed.query_succeeded && observed.ever_filtered && observed.identity_shape_valid && observed.restricting_sid_count==0);
 }
 int restriction_query_calls=0;
 BOOL WINAPI denied_restriction_query(HANDLE token,TOKEN_INFORMATION_CLASS kind,
@@ -522,6 +759,10 @@ BOOL WINAPI byte_prefix_restriction(HANDLE token,TOKEN_INFORMATION_CLASS kind,
     return GetTokenInformation(token,kind,data,bytes,returned);
 }
 
+BOOL WINAPI empty_restriction_prefix(HANDLE,TOKEN_INFORMATION_CLASS,LPVOID,DWORD,PDWORD);
+BOOL WINAPI restriction_query_error(HANDLE,TOKEN_INFORMATION_CLASS,LPVOID,DWORD,PDWORD);
+BOOL WINAPI malformed_restriction_array(HANDLE,TOKEN_INFORMATION_CLASS,LPVOID,DWORD,PDWORD);
+BOOL WINAPI overlapping_restriction_sid(HANDLE,TOKEN_INFORMATION_CLASS,LPVOID,DWORD,PDWORD);
 void native_query_errors() {
     DerivedTokenFixture fixture;
     current_case="actual_native_hasrestrictions_access_denied";
@@ -530,24 +771,24 @@ void native_query_errors() {
         fixture.impersonation.value,denied_restriction_query);
     std::cout<<"Injected native-adapter query error: calls="<<restriction_query_calls
              <<"; query_succeeded="<<denied.query_succeeded
-             <<"; error="<<denied.native_error<<"; supported_shape="<<denied.supported_shape
+             <<"; error="<<denied.native_error<<"; identity_shape_valid="<<denied.identity_shape_valid
              <<"; managed_grants=not-tested.\n";
     CHECK(restriction_query_calls==1 && !denied.query_succeeded &&
-          denied.native_error==ERROR_ACCESS_DENIED && !denied.supported_shape);
+          denied.native_error==ERROR_ACCESS_DENIED && !denied.identity_shape_valid);
     current_case="actual_native_restriction_size_error";
     restriction_query_calls=0;
     const auto short_size=observe_owned_token_classification_read_only(
         fixture.impersonation.value,short_restriction_query);
     CHECK(restriction_query_calls==1 && !short_size.query_succeeded &&
-          short_size.native_error==ERROR_INVALID_DATA && !short_size.supported_shape);
+          short_size.native_error==ERROR_INVALID_DATA && !short_size.identity_shape_valid);
     for(DWORD length : {DWORD{0},DWORD{2},DWORD{5}}){
         injected_restriction_length=length; restriction_query_calls=0;
         const auto invalid=observe_owned_token_classification_read_only(fixture.impersonation.value,invalid_restriction_length);
-        CHECK(restriction_query_calls==1 && !invalid.query_succeeded && invalid.native_error==ERROR_INVALID_DATA && !invalid.supported_shape);
+        CHECK(restriction_query_calls==1 && !invalid.query_succeeded && invalid.native_error==ERROR_INVALID_DATA && !invalid.identity_shape_valid);
     }
     current_case="documentary_dword4_injected_compatibility"; restriction_query_calls=0;
     const auto documentary=observe_owned_token_classification_read_only(fixture.impersonation.value,documentary_dword_restriction);
-    CHECK(restriction_query_calls==1 && documentary.query_succeeded && documentary.ever_filtered && !documentary.supported_shape);
+    CHECK(restriction_query_calls==1 && documentary.query_succeeded && documentary.ever_filtered && documentary.identity_shape_valid);
     current_case="validated_byte_prefix_ignores_unwritten_tail"; restriction_query_calls=0;
     const auto prefix=observe_owned_token_classification_read_only(fixture.impersonation.value,byte_prefix_restriction);
     CHECK(restriction_query_calls==1 && prefix.query_succeeded && !prefix.ever_filtered);
@@ -555,7 +796,127 @@ void native_query_errors() {
     const auto null_query=observe_owned_token_classification_read_only(
         fixture.impersonation.value,nullptr);
     CHECK(!null_query.query_succeeded && null_query.native_error==ERROR_INVALID_PARAMETER);
-    std::cout<<"Injected native-adapter short-size/null query failures denied; no authority evidence.\n";
+    const auto empty_prefix=observe_owned_token_classification_read_only(fixture.impersonation.value,empty_restriction_prefix);
+    CHECK(empty_prefix.query_succeeded && empty_prefix.restricting_sid_count==0 && empty_prefix.restricting_sid_bytes==sizeof(DWORD));
+    const auto restricting_error=observe_owned_token_classification_read_only(fixture.impersonation.value,restriction_query_error);
+    CHECK(!restricting_error.query_succeeded && restricting_error.native_error==ERROR_ACCESS_DENIED);
+    const auto malformed=observe_owned_token_classification_read_only(fixture.impersonation.value,malformed_restriction_array);
+    CHECK(!malformed.query_succeeded && malformed.native_error==ERROR_INVALID_DATA);
+    const auto overlap=observe_owned_token_classification_read_only(fixture.impersonation.value,overlapping_restriction_sid);
+    CHECK(!overlap.query_succeeded && overlap.native_error==ERROR_INVALID_DATA);
+    std::cout<<"Injected native-adapter short-size/null/current-restriction failures denied; no authority evidence.\n";
+}
+
+
+struct CurrentRestrictionFixture {
+    Handle base, restricted, impersonation;
+    explicit CurrentRestrictionFixture(SidBytes restriction) {
+        CHECK(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE,&base.value));
+        SID_AND_ATTRIBUTES entry{restriction.data(),0};
+        CHECK(CreateRestrictedToken(base.value,0,0,nullptr,0,nullptr,1,&entry,&restricted.value));
+        CHECK(DuplicateTokenEx(restricted.value,TOKEN_QUERY,nullptr,SecurityImpersonation,
+                               TokenImpersonation,&impersonation.value));
+    }
+};
+BOOL WINAPI denied_kernel_query(PSECURITY_DESCRIPTOR,HANDLE,DWORD,PGENERIC_MAPPING,
+    PPRIVILEGE_SET,LPDWORD,LPDWORD,LPBOOL) {
+    SetLastError(ERROR_ACCESS_DENIED);return FALSE;
+}
+BOOL WINAPI oversized_kernel_privileges(PSECURITY_DESCRIPTOR,HANDLE,DWORD,PGENERIC_MAPPING,
+    PPRIVILEGE_SET,LPDWORD size,LPDWORD,LPBOOL) {
+    *size=4097;SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;
+}
+BOOL WINAPI malformed_kernel_grant(PSECURITY_DESCRIPTOR,HANDLE,DWORD,PGENERIC_MAPPING,
+    PPRIVILEGE_SET privileges,LPDWORD size,LPDWORD granted,LPBOOL access) {
+    privileges->PrivilegeCount=0;*size=sizeof(PRIVILEGE_SET);*granted=0;*access=TRUE;
+    return TRUE;
+}
+BOOL WINAPI privilege_backed_kernel_grant(PSECURITY_DESCRIPTOR,HANDLE,DWORD,PGENERIC_MAPPING,
+    PPRIVILEGE_SET privileges,LPDWORD size,LPDWORD granted,LPBOOL access) {
+    privileges->PrivilegeCount=1;*size=sizeof(PRIVILEGE_SET);*granted=1;*access=TRUE;
+    return TRUE;
+}
+int kernel_resize_calls=0;
+BOOL WINAPI resized_kernel_query(PSECURITY_DESCRIPTOR descriptor,HANDLE token,DWORD desired,
+    PGENERIC_MAPPING mapping,PPRIVILEGE_SET privileges,LPDWORD size,LPDWORD granted,LPBOOL access) {
+    ++kernel_resize_calls;
+    if(kernel_resize_calls==1){
+        *size=sizeof(PRIVILEGE_SET)+sizeof(LUID_AND_ATTRIBUTES);
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;
+    }
+    return AccessCheck(descriptor,token,desired,mapping,privileges,size,granted,access);
+}
+void native_kernel_tests() {
+    const auto everyone=sid(L"S-1-1-0"); // In-memory non-role surrogate only.
+    current_case="native_privilege_filtered_kernel_surrogate";
+    DerivedTokenFixture privilege_only;
+    auto allowed=observe_owned_kernel_access_read_only(privilege_only.impersonation.value,everyone);
+    std::cout<<"Native virtual resource: privilege-only history; api="<<allowed.ok
+             <<"; allowed="<<allowed.value<<"; error="<<allowed.error<<"; managed_role=not-tested.\n";
+    CHECK(allowed.ok && allowed.value);
+    current_case="native_restricting_sid_second_pass_denied";
+    CurrentRestrictionFixture mismatched(sid(L"S-1-5-12"));
+    auto mismatched_facts=observe_owned_token_classification_read_only(mismatched.impersonation.value);
+    CHECK(mismatched_facts.query_succeeded && mismatched_facts.restricting_sid_count==1);
+    auto denied=observe_owned_kernel_access_read_only(mismatched.impersonation.value,everyone);
+    std::cout<<"Native current restriction: count="<<mismatched_facts.restricting_sid_count
+             <<"; returned_bytes="<<mismatched_facts.restricting_sid_bytes
+             <<"; api="<<denied.ok<<"; allowed="<<denied.value
+             <<"; first-pass surrogate not a role.\n";
+    CHECK(denied.ok && !denied.value);
+    current_case="native_restricting_sid_both_passes_allow";
+    CurrentRestrictionFixture matching(everyone);
+    auto matching_facts=observe_owned_token_classification_read_only(matching.impersonation.value);
+    CHECK(matching_facts.query_succeeded && matching_facts.restricting_sid_count==1);
+    auto both=observe_owned_kernel_access_read_only(matching.impersonation.value,everyone);
+    CHECK(both.ok && both.value);
+    std::cout<<"Native both-check virtual resource allowed; restricting_count=1; no configured role/evidence.\n";
+    current_case="native_kernel_errors_and_outputs_fail_closed";
+    for(auto query : {denied_kernel_query,oversized_kernel_privileges,
+                       malformed_kernel_grant,privilege_backed_kernel_grant}) {
+        const auto failed=observe_owned_kernel_access_read_only(
+            privilege_only.impersonation.value,everyone,query);
+        CHECK(!failed.ok && !failed.value);
+    }
+    kernel_resize_calls=0;
+    auto resized=observe_owned_kernel_access_read_only(
+        privilege_only.impersonation.value,everyone,resized_kernel_query);
+    CHECK(resized.ok && resized.value && kernel_resize_calls==2);
+    CHECK(!observe_owned_kernel_access_read_only(privilege_only.impersonation.value,
+                                                 SidBytes{std::byte{1}}).ok);
+    std::cout<<"Native adapter error/descriptor/output/one-resize checks passed; surrogate only, no token application.\n";
+}
+BOOL WINAPI empty_restriction_prefix(HANDLE token,TOKEN_INFORMATION_CLASS kind,
+                                    LPVOID data,DWORD bytes,PDWORD returned) {
+    if(kind!=TokenRestrictedSids)return GetTokenInformation(token,kind,data,bytes,returned);
+    if(!data || bytes<sizeof(DWORD)){
+        *returned=sizeof(DWORD);SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;
+    }
+    const DWORD count=0;std::memcpy(data,&count,sizeof(count));*returned=sizeof(DWORD);return TRUE;
+}
+BOOL WINAPI restriction_query_error(HANDLE token,TOKEN_INFORMATION_CLASS kind,
+                                   LPVOID data,DWORD bytes,PDWORD returned) {
+    if(kind!=TokenRestrictedSids)return GetTokenInformation(token,kind,data,bytes,returned);
+    SetLastError(ERROR_ACCESS_DENIED);return FALSE;
+}
+BOOL WINAPI malformed_restriction_array(HANDLE token,TOKEN_INFORMATION_CLASS kind,
+                                       LPVOID data,DWORD bytes,PDWORD returned) {
+    if(kind!=TokenRestrictedSids)return GetTokenInformation(token,kind,data,bytes,returned);
+    if(!data || bytes<sizeof(DWORD)){
+        *returned=sizeof(DWORD);SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;
+    }
+    const DWORD count=1;std::memcpy(data,&count,sizeof(count));*returned=sizeof(DWORD);return TRUE;
+}
+
+BOOL WINAPI overlapping_restriction_sid(HANDLE token,TOKEN_INFORMATION_CLASS kind,
+    LPVOID data,DWORD bytes,PDWORD returned) {
+    if(kind!=TokenRestrictedSids)return GetTokenInformation(token,kind,data,bytes,returned);
+    constexpr DWORD size=offsetof(TOKEN_GROUPS,Groups)+sizeof(SID_AND_ATTRIBUTES);
+    if(!data || bytes<size){*returned=size;SetLastError(ERROR_INSUFFICIENT_BUFFER);return FALSE;}
+    std::memset(data,0,size);const DWORD count=1;std::memcpy(data,&count,sizeof(count));
+    SID_AND_ATTRIBUTES item{data,0};
+    std::memcpy(static_cast<std::byte*>(data)+offsetof(TOKEN_GROUPS,Groups),&item,sizeof(item));
+    *returned=size;return TRUE;
 }
 
 void fatal_child() {
@@ -591,6 +952,7 @@ int main(int argc,char** argv) {
         else if(mode=="--native-read-only")native_tests();
         else if(mode=="--native-owned-restrictions")native_owned_restrictions();
         else if(mode=="--native-query-errors")native_query_errors();
+        else if(mode=="--native-kernel-role-access")native_kernel_tests();
         else return 2;
         return 0;
     } catch(const std::exception&) {

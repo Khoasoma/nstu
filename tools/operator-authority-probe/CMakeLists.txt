@@ -31,3 +31,6 @@ add_test(NAME auth01.native_owned_restrictions COMMAND nstu_operator_authority_t
 set_tests_properties(auth01.native_owned_restrictions PROPERTIES LABELS "native;owned-token;no-managed-grants" TIMEOUT 30)
 add_test(NAME auth01.native_query_errors COMMAND nstu_operator_authority_tests --native-query-errors)
 set_tests_properties(auth01.native_query_errors PROPERTIES LABELS "injected;native-adapter;no-managed-grants" TIMEOUT 30)
+
+add_test(NAME auth01.native_kernel_role_resource COMMAND nstu_operator_authority_tests --native-kernel-role-access)
+set_tests_properties(auth01.native_kernel_role_resource PROPERTIES LABELS "native;kernel-surrogate;no-managed-grants" TIMEOUT 30)

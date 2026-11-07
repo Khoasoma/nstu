@@ -44,10 +44,15 @@ bool same_logon(const TokenFacts& a, const TokenFacts& b) noexcept {
         a.authentication_id.LowPart==b.authentication_id.LowPart &&
         a.authentication_id.HighPart==b.authentication_id.HighPart;
 }
-bool supported(const TokenFacts& token) noexcept {
+bool identity_shape_valid(const TokenFacts& token) noexcept {
     return valid_sid(token.user) && token.type == TokenImpersonation &&
         token.level >= SecurityImpersonation && token.level <= SecurityDelegation &&
-        !token.restricted && !token.app_container && !token.anonymous;
+        !token.app_container && !token.anonymous &&
+        token.groups.size()<=kMaximumGroups && token.restricting_sids.size()<=kMaximumGroups &&
+        std::all_of(token.groups.begin(),token.groups.end(),
+                    [](const auto& group){return valid_sid(group.sid);}) &&
+        std::all_of(token.restricting_sids.begin(),token.restricting_sids.end(),
+                    [](const auto& sid){return valid_sid(sid);});
 }
 bool enabled_group(const TokenFacts& token, const SidBytes& sid) {
     return std::any_of(token.groups.begin(),token.groups.end(),[&](const auto& group) {
@@ -90,12 +95,17 @@ struct NetBuffer {
 ApiResult<std::vector<std::byte>> token_blob(HANDLE token,TOKEN_INFORMATION_CLASS kind,
     TokenInformationQuery query) {
     DWORD needed=0;
-    if(query(token,kind,nullptr,0,&needed) ||
-       GetLastError()!=ERROR_INSUFFICIENT_BUFFER || needed==0 || needed>kMaximumBuffer)
+    const auto sized=query(token,kind,nullptr,0,&needed);
+    const auto sizing_error=GetLastError();
+    if(sized)return failure<std::vector<std::byte>>(ERROR_INVALID_DATA);
+    if(sizing_error!=ERROR_INSUFFICIENT_BUFFER)
+        return failure<std::vector<std::byte>>(sizing_error);
+    if(needed==0 || needed>kMaximumBuffer)
         return failure<std::vector<std::byte>>(ERROR_INVALID_DATA);
     std::vector<std::byte> bytes(needed);
     if(!query(token,kind,bytes.data(),needed,&needed))
         return failure<std::vector<std::byte>>(GetLastError());
+    if(needed==0 || needed>bytes.size())return failure<std::vector<std::byte>>(ERROR_INVALID_DATA);
     bytes.resize(needed);
     return success(std::move(bytes));
 }
@@ -134,6 +144,94 @@ SidBytes sid_in_blob(PSID sid,std::span<const std::byte> blob) {
     SidBytes result(remaining.begin(),remaining.begin()+static_cast<std::ptrdiff_t>(size));
     return valid_sid(result)?result:SidBytes{};
 }
+
+ApiResult<std::vector<SidBytes>> restricting_sid_list(std::span<const std::byte> blob) {
+    // Zero-count uses the count prefix (with native x64 header padding),
+    // never an assumed one-element TOKEN_GROUPS array. Measured native bytes are retained.
+    if(blob.size()<sizeof(DWORD))return failure<std::vector<SidBytes>>(ERROR_INVALID_DATA);
+    DWORD count=0;
+    std::memcpy(&count,blob.data(),sizeof(count));
+    if(count==0){
+        if(blob.size()!=sizeof(DWORD) && blob.size()!=offsetof(TOKEN_GROUPS,Groups))
+            return failure<std::vector<SidBytes>>(ERROR_INVALID_DATA);
+        return success(std::vector<SidBytes>{});
+    }
+    if(count>kMaximumGroups || blob.size()<offsetof(TOKEN_GROUPS,Groups) ||
+       offsetof(TOKEN_GROUPS,Groups)+std::size_t{count}*sizeof(SID_AND_ATTRIBUTES)>blob.size())
+        return failure<std::vector<SidBytes>>(ERROR_INVALID_DATA);
+    std::vector<SidBytes> result;
+    for(DWORD index=0;index<count;++index){
+        SID_AND_ATTRIBUTES item{};
+        std::memcpy(&item,blob.data()+offsetof(TOKEN_GROUPS,Groups)+
+                    std::size_t{index}*sizeof(item),sizeof(item));
+        const auto payload_begin=reinterpret_cast<std::uintptr_t>(blob.data())+
+            offsetof(TOKEN_GROUPS,Groups)+std::size_t{count}*sizeof(SID_AND_ATTRIBUTES);
+        if(reinterpret_cast<std::uintptr_t>(item.Sid)<payload_begin)
+            return failure<std::vector<SidBytes>>(ERROR_INVALID_DATA);
+        auto bytes=sid_in_blob(item.Sid,blob);
+        if(!valid_sid(bytes))return failure<std::vector<SidBytes>>(ERROR_INVALID_DATA);
+        result.push_back(std::move(bytes));
+    }
+    return success(std::move(result));
+}
+ApiResult<bool> kernel_role_access(HANDLE token,std::span<const std::byte> role,
+                                   KernelAccessQuery query) {
+    constexpr DWORD role_use=1;
+    if(!handle_valid(token) || !valid_sid(role) || !query)
+        return failure<bool>(ERROR_INVALID_PARAMETER);
+    alignas(DWORD) std::array<std::byte,SECURITY_MAX_SID_SIZE> system{},administrators{};
+    DWORD system_size=static_cast<DWORD>(system.size());
+    DWORD administrator_size=static_cast<DWORD>(administrators.size());
+    if(!CreateWellKnownSid(WinLocalSystemSid,nullptr,system.data(),&system_size) ||
+       !CreateWellKnownSid(WinBuiltinAdministratorsSid,nullptr,administrators.data(),&administrator_size))
+        return failure<bool>(GetLastError());
+    const auto acl_bytes=sizeof(ACL)+offsetof(ACCESS_ALLOWED_ACE,SidStart)+role.size();
+    if(acl_bytes>std::numeric_limits<DWORD>::max())return failure<bool>(ERROR_INVALID_DATA);
+    std::vector<std::byte> acl_storage(acl_bytes);
+    auto acl=reinterpret_cast<PACL>(acl_storage.data());
+    SECURITY_DESCRIPTOR descriptor{};
+    if(!InitializeAcl(acl,static_cast<DWORD>(acl_bytes),ACL_REVISION) ||
+       !AddAccessAllowedAce(acl,ACL_REVISION,role_use,const_cast<std::byte*>(role.data())) ||
+       !InitializeSecurityDescriptor(&descriptor,SECURITY_DESCRIPTOR_REVISION) ||
+       !SetSecurityDescriptorOwner(&descriptor,system.data(),FALSE) ||
+       !SetSecurityDescriptorGroup(&descriptor,administrators.data(),FALSE) ||
+       !SetSecurityDescriptorDacl(&descriptor,TRUE,acl,FALSE) ||
+       !SetSecurityDescriptorControl(&descriptor,SE_DACL_PROTECTED,SE_DACL_PROTECTED))
+        return failure<bool>(GetLastError());
+    // Specific virtual role bit only, no implicit owner/security/maximum rights.
+    GENERIC_MAPPING mapping{role_use,0,role_use,role_use};
+    PRIVILEGE_SET initial{};
+    DWORD privilege_bytes=sizeof(initial),granted=0;
+    BOOL access=FALSE;
+    auto check=[&](PPRIVILEGE_SET privileges,DWORD capacity) {
+        privilege_bytes=capacity;granted=0;access=FALSE;
+        return query(&descriptor,token,role_use,&mapping,privileges,&privilege_bytes,&granted,&access);
+    };
+    BOOL checked=check(&initial,sizeof(initial));
+    PPRIVILEGE_SET privileges=&initial;
+    DWORD capacity=sizeof(initial);
+    std::vector<std::byte> extra;
+    if(!checked){
+        const auto error=GetLastError();
+        if(error!=ERROR_INSUFFICIENT_BUFFER)return failure<bool>(error);
+        if(privilege_bytes<=sizeof(initial) || privilege_bytes>4096)
+            return failure<bool>(ERROR_INVALID_DATA);
+        extra.resize(privilege_bytes);
+        privileges=reinterpret_cast<PPRIVILEGE_SET>(extra.data());
+        capacity=privilege_bytes;
+        checked=check(privileges,capacity); // At most one bounded resize, never unbounded retry.
+        if(!checked)return failure<bool>(GetLastError());
+    }
+    if(privilege_bytes<offsetof(PRIVILEGE_SET,Privilege) || privilege_bytes>capacity)
+        return failure<bool>(ERROR_INVALID_DATA);
+    DWORD used=0;
+    std::memcpy(&used,privileges,sizeof(used));
+    if(used!=0)return failure<bool>(ERROR_INVALID_DATA); // No privilege-backed role bypass.
+    if(access && (granted&role_use)!=role_use)return failure<bool>(ERROR_INVALID_DATA);
+    if(!access && granted!=0)return failure<bool>(ERROR_INVALID_DATA);
+    return success(access!=FALSE);
+}
+
 class NativeApi final : public WindowsAuthorizationApi {
 public:
     explicit NativeApi(TokenInformationQuery query = ::GetTokenInformation) : query_(query) {}
@@ -189,12 +287,18 @@ public:
         TokenFacts result;
         auto restrictions=token_has_restrictions(token,query_);
         if(!restrictions.ok)return failure<TokenFacts>(restrictions.error);
-        result.restricted=restrictions.value;
+        result.ever_filtered=restrictions.value;
         auto statistics=token_value<TOKEN_STATISTICS>(token,TokenStatistics,query_);
         auto session=token_value<DWORD>(token,TokenSessionId,query_);
         auto container=token_value<DWORD>(token,TokenIsAppContainer,query_);
         auto user=token_blob(token,TokenUser,query_);
         auto groups=token_blob(token,TokenGroups,query_);
+        auto restricting=token_blob(token,TokenRestrictedSids,query_);
+        if(!restricting.ok)return failure<TokenFacts>(restricting.error);
+        auto current=restricting_sid_list(restricting.value);
+        if(!current.ok)return failure<TokenFacts>(current.error);
+        result.restricting_sids=std::move(current.value);
+        result.restricting_sid_bytes=restricting.value.size();
         if(!statistics.ok || !session.ok || !container.ok || !user.ok || !groups.ok)
             return failure<TokenFacts>(ERROR_INVALID_DATA);
         result.type=statistics.value.TokenType;
@@ -317,6 +421,9 @@ public:
         return success(SessionFacts{known,value.SessionState==WTSActive,
                                      value.SessionFlags==WTS_SESSIONSTATE_UNLOCK});
     }
+    ApiResult<bool> role_access_check(HANDLE token,std::span<const std::byte> role) override {
+        return kernel_role_access(token,role,::AccessCheck);
+    }
     Clock::time_point now() noexcept override {return Clock::now();}
 private:
     TokenInformationQuery query_;
@@ -336,9 +443,17 @@ NativeTokenClassificationObservation observe_owned_token_classification_read_onl
         const auto facts=adapter.token_facts(owned_token);
         result.query_succeeded=facts.ok;
         result.native_error=facts.error;
-        if(facts.ok){result.ever_filtered=facts.value.restricted;result.supported_shape=supported(facts.value);}
+        if(facts.ok){result.ever_filtered=facts.value.ever_filtered;result.identity_shape_valid=identity_shape_valid(facts.value);
+            result.restricting_sid_count=facts.value.restricting_sids.size();
+            result.restricting_sid_bytes=facts.value.restricting_sid_bytes;}
     } catch(...) {result.native_error=ERROR_INVALID_DATA;}
     return result;
+}
+
+ApiResult<bool> observe_owned_kernel_access_read_only(HANDLE token,
+    std::span<const std::byte> sid,KernelAccessQuery query) {
+    try {return kernel_role_access(token,sid,query);}
+    catch(...) {return failure<bool>(ERROR_INVALID_DATA);}
 }
 
 struct OwnedOperatorPipeConnection::State {
@@ -434,7 +549,7 @@ AuthorizationResult WindowsOperatorAuthorizationProvider::receive_authorized_pip
         }
         TokenOwner original_owner(api_,original.value);
         auto original_facts=api_->token_facts(original.value);
-        if(!original_facts.ok || !supported(original_facts.value)){
+        if(!original_facts.ok || !identity_shape_valid(original_facts.value)){
             impersonation_guard.finish();
             return denied(AuthorizationStatus::unsupported_token,original_facts.error,true,true);
         }
@@ -480,7 +595,7 @@ AuthorizationResult WindowsOperatorAuthorizationProvider::validate(
         return denied(AuthorizationStatus::generation_changed);
     if(bindings!=evidence.bindings)return denied(AuthorizationStatus::binding_changed);
     auto facts=api_->token_facts(evidence.token.handle);
-    if(!facts.ok || !supported(facts.value) || !same_logon(evidence.initial,facts.value))
+    if(!facts.ok || !identity_shape_valid(facts.value) || !same_logon(evidence.initial,facts.value))
         return denied(AuthorizationStatus::unsupported_token,facts.error);
     if(facts.value.session_id==0)return denied(AuthorizationStatus::session_inactive);
     auto session=api_->session_facts(facts.value.session_id);
@@ -529,19 +644,24 @@ AuthorizationResult WindowsOperatorAuthorizationProvider::validate(
     };
     if(!check_principal())return denied(AuthorizationStatus::identity_unavailable);
     auto groups=api_->direct_local_groups(qualified,0,0,kPreferredGroupBytes);
-    if(groups.status!=NERR_Success)return denied(
-        groups.status==ERROR_MORE_DATA?AuthorizationStatus::membership_incomplete:
-        AuthorizationStatus::membership_unavailable,groups.status);
-    if(!groups.structure_valid || groups.entries!=groups.total ||
-       groups.entries!=groups.aliases.size() || groups.entries>kMaximumGroups ||
-       groups.buffer_bytes>kMaximumBuffer)
-        return denied(AuthorizationStatus::membership_incomplete);
-    for(std::size_t i=0;i<groups.aliases.size();++i){
-        if(!simple_name(groups.aliases[i]))return denied(AuthorizationStatus::membership_incomplete);
-        for(std::size_t j=0;j<i;++j)
-            if(name_equal(groups.aliases[i],groups.aliases[j]))
-                return denied(AuthorizationStatus::membership_incomplete);
-    }
+    const auto validate_groups=[](const DirectLocalGroups& snapshot)
+        ->std::optional<AuthorizationResult> {
+        if(snapshot.status!=NERR_Success)return denied(
+            snapshot.status==ERROR_MORE_DATA?AuthorizationStatus::membership_incomplete:
+            AuthorizationStatus::membership_unavailable,snapshot.status);
+        if(!snapshot.structure_valid || snapshot.entries!=snapshot.total ||
+           snapshot.entries!=snapshot.aliases.size() || snapshot.entries>kMaximumGroups ||
+           snapshot.buffer_bytes>kMaximumBuffer)
+            return denied(AuthorizationStatus::membership_incomplete);
+        for(std::size_t i=0;i<snapshot.aliases.size();++i){
+            if(!simple_name(snapshot.aliases[i]))return denied(AuthorizationStatus::membership_incomplete);
+            for(std::size_t j=0;j<i;++j)
+                if(name_equal(snapshot.aliases[i],snapshot.aliases[j]))
+                    return denied(AuthorizationStatus::membership_incomplete);
+        }
+        return std::nullopt;
+    };
+    if(auto failure=validate_groups(groups))return std::move(*failure);
     auto principal_after=api_->account_from_sid(facts.value.user);
     if(!principal_after.ok || principal_after.value.type!=SidTypeUser ||
        !equal_sid(principal_after.value.sid,facts.value.user) ||
@@ -549,6 +669,7 @@ AuthorizationResult WindowsOperatorAuthorizationProvider::validate(
        !name_equal(principal_after.value.domain,principal.value.domain) || !check_principal())
         return denied(AuthorizationStatus::identity_unavailable);
     RoleGrants granted;
+    bool role_candidate=false;
     for(std::size_t index=0;index<roles.size();++index){
         if(!*roles[index])continue;
         const auto& binding=**roles[index];
@@ -560,8 +681,48 @@ AuthorizationResult WindowsOperatorAuthorizationProvider::validate(
             return denied(AuthorizationStatus::binding_changed,account.error);
         const bool direct=std::any_of(groups.aliases.begin(),groups.aliases.end(),
             [&](const auto& alias){return name_equal(alias,aliases[index]);});
-        const bool allowed=direct && enabled_group(facts.value,binding.expected_sid);
+        bool allowed=direct && enabled_group(facts.value,binding.expected_sid);
+        if(allowed){
+            role_candidate=true;
+            const auto kernel=api_->role_access_check(evidence.token.handle,binding.expected_sid);
+            if(!kernel.ok)return denied(AuthorizationStatus::kernel_access_unavailable,kernel.error);
+            allowed=kernel.value;
+        }
         if(index==0)granted.teacher=allowed;else granted.technician=allowed;
+    }
+    if(granted.teacher || granted.technician){
+        // Fresh SAM observations can only invalidate already computed grants.
+        // Query membership first, then recheck the original principal and aliases.
+        auto fresh_groups=api_->direct_local_groups(qualified,0,0,kPreferredGroupBytes);
+        if(auto failure=validate_groups(fresh_groups))return std::move(*failure);
+        auto final_principal=api_->account_from_sid(facts.value.user);
+        if(!final_principal.ok || final_principal.value.type!=SidTypeUser ||
+           !equal_sid(final_principal.value.sid,facts.value.user) ||
+           !name_equal(final_principal.value.name,principal.value.name) ||
+           !name_equal(final_principal.value.domain,principal.value.domain))
+            return denied(AuthorizationStatus::identity_unavailable,final_principal.error);
+        auto final_mapping=api_->account_from_name(qualified);
+        if(!final_mapping.ok || final_mapping.value.type!=SidTypeUser ||
+           !equal_sid(final_mapping.value.sid,facts.value.user) ||
+           !name_equal(final_mapping.value.name,principal.value.name) ||
+           !name_equal(final_mapping.value.domain,principal.value.domain))
+            return denied(AuthorizationStatus::identity_unavailable,final_mapping.error);
+        for(std::size_t index=0;index<roles.size();++index){
+            if(!*roles[index])continue;
+            const auto& binding=**roles[index];
+            auto account=api_->account_from_name(binding.qualified_local_alias);
+            if(!account.ok || account.value.type!=SidTypeAlias ||
+               !name_equal(account.value.domain,machine.value) ||
+               !name_equal(account.value.name,aliases[index]) ||
+               !equal_sid(account.value.sid,binding.expected_sid))
+                return denied(AuthorizationStatus::binding_changed,account.error);
+        }
+        for(std::size_t index=0;index<roles.size();++index){
+            if(!(index==0?granted.teacher:granted.technician))continue;
+            if(!std::any_of(fresh_groups.aliases.begin(),fresh_groups.aliases.end(),
+               [&](const auto& alias){return name_equal(alias,aliases[index]);}))
+                return denied(AuthorizationStatus::not_direct_member);
+        }
     }
     // Membership lookup may have overlapped a session lock/disconnect.
     // Recheck local WTS state at acceptance, then check final evidence age.
@@ -574,8 +735,10 @@ AuthorizationResult WindowsOperatorAuthorizationProvider::validate(
     if(expired())return denied(AuthorizationStatus::evidence_expired);
     if(bindings.generation!=evidence.bindings.generation)
         return denied(AuthorizationStatus::generation_changed);
+    if(bindings!=evidence.bindings)return denied(AuthorizationStatus::binding_changed);
     if(!granted.teacher && !granted.technician)
-        return denied(AuthorizationStatus::not_direct_member);
+        return denied(role_candidate?AuthorizationStatus::kernel_access_denied:
+                      AuthorizationStatus::not_direct_member);
     AuthorizationResult result;
     result.status=AuthorizationStatus::authorized;
     result.role_grants=granted;
@@ -600,7 +763,9 @@ OwnProcessObservation WindowsOperatorAuthorizationProvider::observe_own_process_
         auto facts=api_->own_process_facts();
         result.token_query_succeeded=facts.ok;
         if(!facts.ok)return result;
-        result.restricted=facts.value.restricted;
+        result.ever_filtered=facts.value.ever_filtered;
+        result.restricting_sid_count=facts.value.restricting_sids.size();
+        result.restricting_sid_bytes=facts.value.restricting_sid_bytes;
         for(const auto& group:facts.value.groups){
             if((group.attributes&SE_GROUP_ENABLED)!=0)++result.enabled_group_count;
             if((group.attributes&SE_GROUP_USE_FOR_DENY_ONLY)!=0)++result.deny_only_group_count;

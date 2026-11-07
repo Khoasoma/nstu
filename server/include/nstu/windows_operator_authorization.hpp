@@ -25,7 +25,9 @@ struct TokenFacts {
     DWORD session_id{0};
     TOKEN_TYPE type{TokenPrimary};
     SECURITY_IMPERSONATION_LEVEL level{SecurityAnonymous};
-    bool restricted{false}; // Successfully queried ever-filtered TokenHasRestrictions.
+    bool ever_filtered{false}; // History only, never a role verdict.
+    std::vector<SidBytes> restricting_sids;
+    std::size_t restricting_sid_bytes{0};
     bool app_container{false};
     bool anonymous{false};
 };
@@ -62,7 +64,8 @@ enum class AuthorizationStatus {
     membership_unavailable, membership_incomplete, not_direct_member,
     session_unavailable, session_locked, session_inactive, evidence_expired,
     binding_changed, generation_changed, connection_busy, connection_invalid,
-    outer_impersonation_present, entry_context_unavailable, foreign_evidence
+    outer_impersonation_present, entry_context_unavailable, foreign_evidence,
+    kernel_access_denied, kernel_access_unavailable
 };
 
 // A trusted test backend is never selected by IPC input. Native construction
@@ -88,6 +91,8 @@ public:
     virtual DirectLocalGroups direct_local_groups(const std::wstring& qualified_user,
         DWORD level, DWORD flags, DWORD preferred_bytes) = 0;
     virtual ApiResult<SessionFacts> session_facts(DWORD session_id) = 0;
+    virtual ApiResult<bool> role_access_check(HANDLE captured_query_token,
+        std::span<const std::byte> role_sid) = 0;
     virtual Clock::time_point now() noexcept = 0;
 };
 class OwnedOperatorPipeConnection {
@@ -136,7 +141,9 @@ struct OwnProcessObservation {
     bool session_query_succeeded{false};
     bool session_active{false};
     bool session_unlocked{false};
-    bool restricted{false};
+    bool ever_filtered{false};
+    std::size_t restricting_sid_count{0};
+    std::size_t restricting_sid_bytes{0};
     bool direct_local_query_succeeded{false};
     std::size_t direct_local_group_count{0};
     RoleGrants managed_grants{}; // Observation cannot establish a managed role.
@@ -147,11 +154,20 @@ struct NativeTokenClassificationObservation {
     bool query_succeeded{false};
     DWORD native_error{0};
     bool ever_filtered{false};
-    bool supported_shape{false};
+    bool identity_shape_valid{false};
+    std::size_t restricting_sid_count{0};
+    std::size_t restricting_sid_bytes{0};
 };
 // Read-only developer observation; never creates role/evidence/operation authority.
 [[nodiscard]] NativeTokenClassificationObservation observe_owned_token_classification_read_only(
     HANDLE owned_token, TokenInformationQuery query = ::GetTokenInformation);
+
+using KernelAccessQuery = BOOL (WINAPI*)(PSECURITY_DESCRIPTOR, HANDLE, DWORD,
+    PGENERIC_MAPPING, PPRIVILEGE_SET, LPDWORD, LPDWORD, LPBOOL);
+// In-memory resource check only. Never creates managed role/evidence authority.
+[[nodiscard]] ApiResult<bool> observe_owned_kernel_access_read_only(
+    HANDLE owned_token, std::span<const std::byte> surrogate_sid,
+    KernelAccessQuery query = ::AccessCheck);
 
 class WindowsOperatorAuthorizationProvider {
 public:
