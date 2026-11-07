@@ -932,10 +932,10 @@ button { font-family: inherit; }
 }
 
 .question-prompt-text {
-  font-size: 17px;
-  font-weight: 700;
+  font-size: var(--nstu-typography-page-title);
+  font-weight: var(--nstu-typography-weight-medium);
   color: var(--text-main);
-  line-height: 1.4;
+  line-height: 1.45;
   margin-bottom: 6px;
 }
 
