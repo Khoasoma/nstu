@@ -1380,3 +1380,45 @@ button { font-family: inherit; }
 .btn-success:hover { filter: none; }
 .form-input, .form-select, .form-textarea { border-color: var(--border-input); }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: var(--nstu-controls-focus-ring) solid var(--border-focus); outline-offset: var(--nstu-controls-border-width); }
+
+/* Compact Preview is one document canvas; the outer Studio header stays fixed. */
+@media (max-width: 850px) {
+  #preview-view { overflow: auto; container-type: size; }
+  #preview-view .preview-toolbar {
+    flex: none;
+    height: auto;
+    min-height: var(--nstu-geometry-toolbar-min);
+    flex-wrap: wrap;
+    gap: var(--nstu-spacing-sm);
+    padding: var(--nstu-spacing-xs) var(--nstu-spacing-xl);
+  }
+  #preview-view .preview-toolbar > div { flex-wrap: wrap; min-width: 0; max-width: 100%; }
+  #preview-exam-title { min-width: 0; overflow-wrap: anywhere; }
+  #preview-split-container { flex: none; flex-direction: column; overflow: visible; min-width: 0; }
+  #preview-pane-left, #preview-pane-right {
+    /* The existing desktop divider owns inline width/flex; retain them for wide mode. */
+    flex: none !important;
+    width: 100% !important;
+    min-width: 0;
+    max-width: none;
+    overflow: visible;
+    padding: var(--nstu-spacing-xl);
+  }
+  #preview-pane-left { border-right: 0; border-bottom: var(--nstu-controls-border-width) solid var(--border-medium); }
+  #preview-splitter { display: none; }
+  #preview-view :is(.ielts-paragraph, .question-prompt-text, .target-label-box, .target-select, .mc-option-label span) { overflow-wrap: anywhere; }
+  #preview-view .token-bank-header { flex-wrap: wrap; gap: var(--nstu-spacing-sm); }
+  #p-token-tray .drag-chip { max-width: 100%; }
+  #p-token-tray .drag-chip span, #preview-view .mc-option-label span { min-width: 0; overflow-wrap: anywhere; }
+  #preview-view :is(.chip-handle-icon, .mc-radio-circle) { flex-shrink: 0; }
+  #p-target-list .target-row { flex-wrap: wrap; }
+  #p-target-list .target-label-box { min-width: 0; max-width: 100%; }
+  #p-target-list .target-drop-slot { min-width: 0; }
+  #p-target-list .placed-chip span { min-width: 0; overflow-wrap: anywhere; }
+  #p-essay-input {
+    height: min(200px, calc(100cqh - var(--nstu-spacing-xs) - var(--nstu-spacing-xs)));
+    max-height: min(200px, calc(100cqh - var(--nstu-spacing-xs) - var(--nstu-spacing-xs)));
+    min-height: var(--nstu-controls-default-height);
+  }
+  #p-essay-input, #p-sa-input { scroll-margin: var(--nstu-spacing-xs); }
+}

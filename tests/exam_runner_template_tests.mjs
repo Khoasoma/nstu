@@ -393,7 +393,7 @@ class ImportDomNode {
   matches(selector) { assert.equal(selector, ':disabled');for(let n=this;n;n=n.parentNode)if(n.disabled)return true;return false; }
   contains(node) { for(let n=node;n;n=n.parentNode)if(n===this)return true;return false; }
   querySelectorAll(selector) { assert.equal(selector,'button');const result=[];const walk=n=>{for(const c of n.children){if(c.tagName==='BUTTON')result.push(c);walk(c);}};walk(this);return result; }
-  focus() { this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1)this.ownerDocument.activeElement=this; }
+  focus() { this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1){const previous=this.ownerDocument.activeElement;this.ownerDocument.activeElement=this;if(previous!==this)for(const callback of this.listeners.focus||[])callback({target:this,currentTarget:this});} }
   scrollIntoView(options) { (this.scrolls ||= []).push(options); }
 }
 
@@ -603,7 +603,8 @@ let resizeCases=0;
 {
   const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueAuthoringFocusReveal').length,1,'one actual authoring resize listener is installed');
   assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');
-  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueChoiceFocusReveal').length,1,'one choice resize listener is installed');assert.equal(h.window.listeners.resize.length,3,'no duplicate resize registrations');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueChoiceFocusReveal').length,1,'one choice resize listener is installed');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queuePreviewTextFocusReveal').length,1,'one text Preview resize listener is installed');assert.equal(h.window.listeners.resize.length,4,'no duplicate resize registrations');
   const before=h.probe.inspect(),model=JSON.stringify(before.exam),answers=before.answers,stats=JSON.stringify(h.probe.stats),focusCalls=field.focusCalls;
   h.resize();h.resize();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'opaque RAF id0 must be cancelled');h.flushFrames();
   assert.equal(field.scrolls.length,1);assert.equal(field.scrolls[0].block,'nearest');assert.equal(field.scrolls[0].inline,'nearest');assert.equal(field.scrolls[0].behavior,'instant');
@@ -842,7 +843,7 @@ for(const type of ['multiple_choice','reading','listening']){
   assert.equal(Object.hasOwn(state.answers,'choice-a'),false,'Rendering does not initialize an answer');
   for(let index=0;index<3;index++){
     const radio=choiceRadio(h,index);assert.equal(radio.tagName,'INPUT');assert.equal(radio.type,'radio');assert.equal(radio.name,'nstu-preview-choice-choice-a');
-    assert.equal(radio.value,String(index));assert.equal(radio['aria-label'],`Option ${index+1}: ${state.exam.questions[0].options[index]}`);assert.equal(radio.checked,false);
+    assert.equal(radio.value,String(index));assert.equal(radio['aria-label'],`Option ${index+1}: ${state.exam.questions[0].options[index]}`);assert.equal(radio.checked,false);assert.equal(radio.listeners.focus.length,1,'one focus listener per rendered radio');
     assert.equal(surface.children[index].listeners.click?.length||0,0,'Native change owns selection; no legacy label-click path');
   }
   const labels=[...surface.children],radio=choiceRadio(h,1);radio.focus();const stats=JSON.stringify(h.probe.stats);choiceChange(radio);
@@ -877,17 +878,35 @@ async function choiceResizeHarness(){const h=await numericHarness(choiceFixture(
 let choiceResizeCases=0;
 {
   const {h,field,label,queue}=await choiceResizeHarness(),state=h.probe.inspect(),model=JSON.stringify(state.exam),stats=JSON.stringify(h.probe.stats),focus=field.focusCalls;
-  queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0]);h.flushFrames();
-  assert.equal(label.scrolls.length,1);assert.deepEqual({...label.scrolls[0]},{block:'nearest',inline:'nearest',behavior:'instant'});assert.equal(field.focusCalls,focus);assert.equal(h.document.activeElement,field);
+  assert.equal(label.scrolls.length,1,'ordinary radio focus reveals full proxy before resize');queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0]);h.flushFrames();
+  assert.equal(label.scrolls.length,2);assert.deepEqual({...label.scrolls[1]},{block:'nearest',inline:'nearest',behavior:'instant'});assert.equal(field.focusCalls,focus);assert.equal(h.document.activeElement,field);
   assert.equal(JSON.stringify(state.exam),model);assert.equal(h.probe.inspect().answers,state.answers);assert.equal(JSON.stringify(h.probe.stats),stats);choiceResizeCases++;
 }
 for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({surface})=>surface.style.display='none',({h})=>h.node('preview-view').style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus(),({h})=>h.probe.inspect().exam.questions[0].isMatching=true,({h})=>h.probe.inspect().exam.questions[0].type='essay',({field})=>field.type='text']){
-  const ctx=await choiceResizeHarness();ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),model=JSON.stringify(state.exam),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.label.scrolls?.length||0,0);assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),model);assert.equal(ctx.h.probe.inspect().answers,state.answers);choiceResizeCases++;
+  const ctx=await choiceResizeHarness();assert.equal(ctx.label.scrolls.length,1);ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),model=JSON.stringify(state.exam),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.label.scrolls.length,1,'ineligible queued resize adds no reveal');assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),model);assert.equal(ctx.h.probe.inspect().answers,state.answers);choiceResizeCases++;
 }
 {
-  const {h,field,label,queue}=await choiceResizeHarness();queue();const next=choiceRadio(h,0);next.focus();h.flushFrames();assert.equal(label.scrolls?.length||0,0);assert.equal(next.parentNode.scrolls.length,1);assert.equal(h.document.activeElement,next);choiceResizeCases++;
+  const {h,field,label,queue}=await choiceResizeHarness();queue();const next=choiceRadio(h,0);next.focus();assert.equal(next.parentNode.scrolls.length,1,'new current radio has separate native focus reveal');h.flushFrames();assert.equal(label.scrolls.length,1);assert.equal(next.parentNode.scrolls.length,2);assert.equal(h.document.activeElement,next);choiceResizeCases++;
 }
 console.log(`Studio actual single-choice resize ownership/lifecycle/guards: ${choiceResizeCases} cases passed`);
+
+const previewTextFixture=()=>({id:'text-preview',title:'Text Preview',subject:'',durationSeconds:600,questions:[
+  {id:'essay',type:'essay',prompt:'Essay',points:0,wordLimit:250},{id:'short',type:'short_answer',prompt:'Short',points:1}]});
+async function previewTextResizeHarness(short=false){const h=await numericHarness(previewTextFixture());h.node('btn-mode-preview').click();if(short)h.node('btn-p-next').click();const field=h.node(short?'p-sa-input':'p-essay-input'),view=h.node('preview-view');field.remove();view.appendChild(field);field.value='A e\u0302\u0301 Việt';field.selectionStart=2;field.selectionEnd=5;field.oninput({target:field});field.focus();return{h,field,view,queue:()=>h.window.listeners.resize.find(callback=>callback.name==='queuePreviewTextFocusReveal')({type:'resize'})};}
+let previewTextResizeCases=0;
+for(const short of [false,true]){
+  const {h,field,queue}=await previewTextResizeHarness(short),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=JSON.stringify(state.answers),stats=JSON.stringify(h.probe.stats),focus=field.focusCalls,value=field.value;
+  assert.equal(field.listeners.focus.length,1,'one native focus listener per persistent text control');assert.equal(field.scrolls.length,1,'ordinary native focus reveals independently of resize');
+  queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0]);h.flushFrames();assert.equal(field.scrolls.length,2);assert.deepEqual({...field.scrolls[1]},{block:'nearest',inline:'nearest',behavior:'instant'});
+  assert.equal(field.focusCalls,focus);assert.equal(h.document.activeElement,field);assert.equal(field.value,value);assert.equal(field.selectionStart,2);assert.equal(field.selectionEnd,5);assert.equal(JSON.stringify(state.exam),before);assert.equal(JSON.stringify(state.answers),answers);assert.equal(h.probe.inspect().answers,state.answers);assert.equal(JSON.stringify(h.probe.stats),stats);previewTextResizeCases++;
+}
+for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({view})=>view.style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus(),({h})=>h.probe.inspect().exam.questions[0].type='reading',({h,field})=>{field.remove();h.document.body.appendChild(field);},({h})=>h.probe.inspect().exam.questions[0].isMatching=true]){
+  const ctx=await previewTextResizeHarness();assert.equal(ctx.field.scrolls.length,1);ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),before=JSON.stringify(state.exam),answers=JSON.stringify(state.answers),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.field.scrolls.length,1,'ineligible queued resize adds no reveal');assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),before);assert.equal(JSON.stringify(state.answers),answers);previewTextResizeCases++;
+}
+{
+  const {h,field,view,queue}=await previewTextResizeHarness();queue();h.node('btn-p-next').click();const next=h.node('p-sa-input');next.remove();view.appendChild(next);next.focus();assert.equal(next.scrolls.length,1,'new current input receives ordinary native reveal');const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=JSON.stringify(state.answers);h.flushFrames();assert.equal(field.scrolls.length,1);assert.equal(next.scrolls.length,2);assert.equal(h.document.activeElement,next);assert.equal(JSON.stringify(state.exam),before);assert.equal(JSON.stringify(state.answers),answers);previewTextResizeCases++;
+}
+console.log(`Studio actual text Preview resize ownership/caret/guards: ${previewTextResizeCases} cases passed`);
 
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
