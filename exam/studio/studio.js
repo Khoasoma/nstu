@@ -730,19 +730,33 @@
   function renderPreviewMc(q) {
     const surface = el("p-mc-surface");
     surface.innerHTML = "";
+    surface.setAttribute("role", "radiogroup");
+    surface.setAttribute("aria-labelledby", "p-question-prompt");
     const selected = previewAnswers[q.id];
 
     (q.options || []).forEach((optText, optIdx) => {
       const label = document.createElement("label");
       label.className = `mc-option-label ${selected === optIdx ? "checked" : ""}`;
       label.innerHTML = `
-        <div class="mc-radio-circle"></div>
+        <div class="mc-radio-circle" aria-hidden="true"></div>
         <span>${escapeHtml(optText)}</span>
       `;
-      label.addEventListener("click", () => {
+      const input = document.createElement("input");
+      input.type = "radio";
+      input.className = "mc-option-input";
+      input.name = `nstu-preview-choice-${q.id}`;
+      input.value = String(optIdx);
+      input.checked = selected === optIdx;
+      input.setAttribute("aria-label", `Option ${optIdx + 1}: ${optText}`);
+      input.addEventListener("change", () => {
+        if (!input.checked) return;
         previewAnswers[q.id] = optIdx;
-        renderPreviewMc(q);
+        Array.from(surface.children).forEach((option, index) => {
+          option.classList.toggle("checked", index === optIdx);
+          option.querySelector(".mc-option-input").checked = index === optIdx;
+        });
       });
+      label.prepend(input);
       surface.appendChild(label);
     });
   }
@@ -1152,6 +1166,23 @@
     });
   }
 
+  let choiceResizeFrame = null;
+  function queueChoiceFocusReveal() {
+    if (choiceResizeFrame !== null) window.cancelAnimationFrame(choiceResizeFrame);
+    choiceResizeFrame = null;
+    if (getComputedStyle(el("preview-view")).display === "none") return;
+    choiceResizeFrame = window.requestAnimationFrame(() => {
+      choiceResizeFrame = null;
+      const active = document.activeElement;
+      const q = currentExam.questions[previewIndex];
+      if (!q || q.isMatching || !["multiple_choice", "reading", "listening"].includes(q.type) ||
+          getComputedStyle(el("preview-view")).display === "none" || el("export-modal").classList.contains("open") ||
+          active?.tagName !== "INPUT" || active.type !== "radio" || !active.classList.contains("mc-option-input") ||
+          !el("p-mc-surface").contains(active) || !usableExportFocus(active)) return;
+      active.parentNode.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    });
+  }
+
   let numericDraftModel = null;
   let numericDraftOwners = new WeakMap();
   const numericFields = {
@@ -1522,6 +1553,7 @@
     document.addEventListener("keydown", handleExportDialogKey);
     window.addEventListener("resize", queueAuthoringFocusReveal);
     window.addEventListener("resize", queueMatchingFocusReveal);
+    window.addEventListener("resize", queueChoiceFocusReveal);
 
     // Add Question
     el("btn-add-question").addEventListener("click", () => {
