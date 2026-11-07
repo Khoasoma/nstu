@@ -26,9 +26,14 @@ assert.equal(png.length, 171569);
 assert.equal(createHash('sha256').update(png).digest('hex'),
   '0b3cf7023212288d978bd898d0fa9ec1dcb7e82c92b678fa2bd1d42e18272486');
 console.log('Bundled original PNG byte and hash parity: PASS');
+const canonicalRunner=context.window.NSTU_RUNNER_TEMPLATE;
 
 // Fault-inject the actual private reader helper without exporting production APIs.
 const studioSource = await readFile(new URL('exam/studio/studio.js', root), 'utf8');
+const dialogStart=studioSource.indexOf('  let exportDialogOpener =');
+const dialogEnd=studioSource.indexOf('  function syncExamMetadata() {');
+assert.ok(dialogStart>=0&&dialogEnd>dialogStart);
+const dialogSource=studioSource.slice(dialogStart,dialogEnd);
 const readerStart = studioSource.indexOf('  async function readRunnerAsset(');
 const readerEnd = studioSource.indexOf('  async function verifiedBrandPng(', readerStart);
 assert.ok(readerStart >= 0 && readerEnd > readerStart, 'asset-reader source boundary must exist');
@@ -120,11 +125,12 @@ const fields = vm.runInNewContext(`(() => {
     renderPreview = () => {}, showToast = () => {}, handleImportFile = () => {},
     saveDraft = () => {}, exportPackage = () => {}, addQuestion = () => {};
   ${studioSource.slice(compileStart, compileEnd)}
+  ${dialogSource}
   ${studioSource.slice(initStart, initEnd)}
   init();
   return { exam: currentExam, setIndex(index) { activeQuestionIndex = index; },
     manifest() { return compileManifest(currentExam); } };
-})()`, { getNode: fieldNode, document: { documentElement: { dataset: {} } },
+})()`, { getNode: fieldNode, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   localStorage: { getItem() { return null; }, setItem() {} } });
 function placeholderInput(value) {
   const node = fieldNode('q-sa-placeholder'); node.value = value;
@@ -152,7 +158,7 @@ const renderEnd = studioSource.indexOf('  function renderActiveQuestionForm()', 
 const addStart = studioSource.indexOf('  function addQuestion(type) {');
 const addEnd = studioSource.indexOf('  let previewIndex = 0;', addStart);
 const syncStart = studioSource.indexOf('  function syncExamMetadata() {');
-const syncEnd = studioSource.indexOf('  async function exportPackage()', syncStart);
+const syncEnd = studioSource.indexOf('  async function exportPackage(', syncStart);
 const originsStart = studioSource.indexOf('  function parseOriginsInput(raw) {');
 const originsEnd = studioSource.indexOf('  function validateOrigin(', originsStart);
 assert.ok([renderStart, renderEnd, addStart, addEnd, syncStart, syncEnd, originsStart, originsEnd].every(index => index >= 0));
@@ -296,13 +302,14 @@ const replacements = vm.runInNewContext(`(() => {
     addQuestion = () => {}, renderPreview = () => { ++previewRenders; }, initSplitter = () => {};
   ${studioSource.slice(previewStateStart, previewStateEnd)}
   ${studioSource.slice(importStart, importEnd)}
+  ${dialogSource}
   ${studioSource.slice(initStart, initEnd)}
   init();
   return { importFile: handleImportFile,
     seedPreview() { previewIndex = 3; previewAnswers = { shared: 'Old answer' }; selectedTokenForPlacement = 2; activeQuestionIndex = 1; },
     inspect() { return { currentExam, previewIndex, previewAnswers, selectedTokenForPlacement, activeQuestionIndex, renderCount, previewRenders }; },
     sample() { el('btn-load-sample').listeners.click[0](); } };
-})()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} } },
+})()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   localStorage: { getItem() { return null; }, setItem() {} },
   NstuZip: { Reader: class { async readEntries() {
     return [{ path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(zipManifest)) }];
@@ -349,16 +356,43 @@ assert.equal(replacements.inspect().previewRenders, unchangedPreview.previewRend
 assert.equal(replacements.inspect().currentExam, unchangedPreview.currentExam);
 console.log('Studio Preview reset/refresh on model replacement: 8 scenarios passed');
 
+class ImportDomNode {
+  constructor(id = '') { this.id = id; this.children = []; this.style = {}; this.dataset = {}; this.listeners = {}; this.className = ''; this._html = ''; this._value = ''; this.textContent = ''; this.queries = new Map(); }
+  get value() { return this._value; }
+  set value(value) { this._value = String(value ?? ''); }
+  get innerHTML() { return this._html; }
+  set innerHTML(value) { this._html = String(value); this.children = []; this.queries.clear(); }
+  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name) }; }
+  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
+  append(...children) { children.forEach(child => this.appendChild(child)); }
+  querySelector(selector) { if (!this.queries.has(selector)) this.queries.set(selector, new ImportDomNode(selector)); return this.queries.get(selector); }
+  addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
+  setAttribute(name, value) { this[name] = String(value); }
+  getBoundingClientRect() { return { left: 0, width: 1000 }; }
+  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; }
+  click() { (this.listeners.click || []).forEach(listener => listener({ target: this, currentTarget: this, preventDefault() {}, stopPropagation() {} })); }
+  get isConnected() { return this === this.ownerDocument?.body || !!this.parentNode?.isConnected; }
+  getClientRects() { for(let n=this;n;n=n.parentNode)if(n.hidden||n.style.display==='none')return [];return [{width:100,height:30}]; }
+  closest() { for(let n=this;n;n=n.parentNode)if(n.hidden||n.inert)return n;return null; }
+  matches(selector) { assert.equal(selector, ':disabled');for(let n=this;n;n=n.parentNode)if(n.disabled)return true;return false; }
+  contains(node) { for(let n=node;n;n=n.parentNode)if(n===this)return true;return false; }
+  querySelectorAll(selector) { assert.equal(selector,'button');const result=[];const walk=n=>{for(const c of n.children){if(c.tagName==='BUTTON')result.push(c);walk(c);}};walk(this);return result; }
+  focus() { if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1)this.ownerDocument.activeElement=this; }
+}
+
+
 const exportStart = studioSource.indexOf('  let exportGeneration =') >= 0
-  ? studioSource.indexOf('  let exportGeneration =') : studioSource.indexOf('  async function exportPackage() {');
+  ? studioSource.indexOf('  let exportGeneration =') : studioSource.indexOf('  async function exportPackage(');
 const exportEnd = studioSource.indexOf('  async function handleImportFile(', exportStart);
 assert.ok(exportStart >= 0 && exportEnd > exportStart);
 function exportLifecycleHarness() {
   const nodes = new Map(), pending = [], downloads = [];
+  const doc={documentElement:{},body:new ImportDomNode('body')};doc.body.ownerDocument=doc;doc.activeElement=doc.body;
   const node = id => {
-    if (!nodes.has(id)) nodes.set(id, { style: {}, classList: { add() {} }, innerHTML: '', textContent: '', disabled: false });
+    if (!nodes.has(id)) {const value=new ImportDomNode(id);value.ownerDocument=doc;value.tabIndex=0;doc.body.appendChild(value);nodes.set(id,value);}
     return nodes.get(id);
   };
+  for(const id of ['btn-close-export','btn-cancel-export','btn-download-nstuexam']){const value=node(id);value.remove();value.tagName='BUTTON';node('export-modal').appendChild(value);}
   const model = { id: 'old-export', title: 'Old content', questions: [] };
   const exporter = vm.runInNewContext(`(() => {
     let currentExam = model;
@@ -366,6 +400,7 @@ function exportLifecycleHarness() {
       validateExam = exam => exam.title ? [] : ['Invalid title'],
       compileManifest = exam => ({ id: exam.id, title: exam.title }),
       verifiedBrandPng = async bytes => bytes, showToast = () => {}, escapeHtml = value => value;
+    ${dialogSource}
     ${studioSource.slice(exportStart, exportEnd)}
     return { exportPackage };
   })()`, { model, getNode: node, Uint8Array, window: { NSTU_RUNNER_TEMPLATE: {
@@ -376,7 +411,8 @@ function exportLifecycleHarness() {
       build() { return new Promise((resolve, reject) => pending.push({ resolve, reject,
         manifest: JSON.parse(this.entries.get('manifest.json')) })); }
     } }, URL: { createObjectURL: () => 'blob:test', revokeObjectURL() {} },
-    document: { createElement: () => ({ click() { downloads.push(this.download); } }) } });
+    getComputedStyle:value=>({visibility:value.style.visibility||'visible'}),
+    document: Object.assign(doc,{createElement: () => ({ click() { downloads.push(this.download); } })}) });
   const result = id => ({ fileCount: 5, totalBytes: 100, archiveSha256: id + '-archive', contentSha256: id + '-content', blob: {} });
   async function start() {
     const promise = exporter.exportPackage();
@@ -428,22 +464,6 @@ function exportLifecycleHarness() {
 console.log('Studio asynchronous export ownership and manifest identity: 5 scenarios passed');
 
 // Run the whole actual controller and renderers; only DOM/platform I/O are boundaries.
-class ImportDomNode {
-  constructor(id = '') { this.id = id; this.children = []; this.style = {}; this.dataset = {}; this.listeners = {}; this.className = ''; this._html = ''; this._value = ''; this.textContent = ''; this.queries = new Map(); }
-  get value() { return this._value; }
-  set value(value) { this._value = String(value ?? ''); }
-  get innerHTML() { return this._html; }
-  set innerHTML(value) { this._html = String(value); this.children = []; this.queries.clear(); }
-  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name) }; }
-  appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
-  append(...children) { children.forEach(child => this.appendChild(child)); }
-  querySelector(selector) { if (!this.queries.has(selector)) this.queries.set(selector, new ImportDomNode(selector)); return this.queries.get(selector); }
-  addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
-  setAttribute(name, value) { this[name] = String(value); }
-  getBoundingClientRect() { return { left: 0, width: 1000 }; }
-  remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); }
-  click() { (this.listeners.click || []).forEach(listener => listener({ target: this, preventDefault() {}, stopPropagation() {} })); }
-}
 
 const zipSource = await readFile(new URL('exam/studio/zip.js', root), 'utf8');
 const importInstrumentation = `
@@ -460,6 +480,7 @@ const importInstrumentation = `
   compileManifest=exam=>{importStats.compile++;return originalImportCompiler(exam);};
   window.importProbe={
     load:handleImportFile, save:saveDraft, sync:syncExamMetadata, stats:importStats,
+    export:exportPackage,
     inspect:()=>({exam:currentExam,active:activeQuestionIndex,index:previewIndex,answers:previewAnswers,token:selectedTokenForPlacement}),
     seed:(exam,answers,open)=>{currentExam=exam;activeQuestionIndex=1;previewIndex=0;previewAnswers=answers;selectedTokenForPlacement=1;el('preview-view').style.display=open?'flex':'none';renderEditor();if(open)renderPreview();Object.assign(importStats,{reset:0,editor:0,preview:0,matching:0,mc:0,forms:[]});},
     place:(target,token)=>assignTokenToSlot(currentExam.questions[previewIndex],target,token),
@@ -467,13 +488,22 @@ const importInstrumentation = `
   };
 `;
 async function actualImportHarness(reader) {
-  const nodes = new Map(), getNode = id => { if (!nodes.has(id)) nodes.set(id, new ImportDomNode(id)); return nodes.get(id); };
+  const nodes = new Map();
+  const doc={readyState:'complete',documentElement:{dataset:{}},listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}};
+  doc.body=new ImportDomNode('body');doc.body.ownerDocument=doc;doc.activeElement=doc.body;
+  const getNode = id => { if (!nodes.has(id)){const node=new ImportDomNode(id);node.ownerDocument=doc;node.tabIndex=0;doc.body.appendChild(node);nodes.set(id,node);}return nodes.get(id); };
+  // Model the real initial modal attributes and its existing button order.
+  const html=await readFile(new URL('exam/studio/index.html',root),'utf8');
+  const modalTag=html.match(/<div[^>]*id="export-modal"[^>]*>/)[0];
+  const modal=getNode('export-modal');modal.inert=/\binert\b/.test(modalTag);modal.tabIndex=/tabindex="-1"/.test(modalTag)?-1:0;
+  for(const id of ['btn-close-export','btn-cancel-export','btn-download-nstuexam']){const node=getNode(id);node.remove();node.tagName='BUTTON';modal.appendChild(node);}
+  getNode('btn-download-nstuexam').disabled=true;
   const downloads = [], blobs = new Map();
   class DownloadURL extends URL { static createObjectURL(blob) { const url='blob:test-'+blobs.size;blobs.set(url,blob);return url; } static revokeObjectURL() {} }
   getNode('preview-view').style.display = 'none';
-  const globals = { window: { addEventListener() {} }, document: { readyState: 'complete', documentElement: { dataset: {} }, getElementById: getNode, createElement: tag => {
-    const node=new ImportDomNode();if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;
-  }, addEventListener() {} },
+  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
+  const globals = { window: { addEventListener() {}, NSTU_RUNNER_TEMPLATE:canonicalRunner }, document: doc, atob, btoa,
+    getComputedStyle:node=>({visibility:node.style.visibility||'visible'}),
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
     TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
     crypto: (await import('node:crypto')).webcrypto, URL:DownloadURL, location: { origin:'http://studio.test' } };
@@ -487,10 +517,73 @@ async function actualImportHarness(reader) {
     {id:'old-match',type:'reading',prompt:'Old matching',isMatching:true,options:['Old A','Old B'],matchingTargets:['A','B']},
     {id:'old-short',type:'short_answer',prompt:'Old short'}] };
   const answers = {'old-match':{0:0},'old-short':'old answer'};
-  return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip, downloads,
+  return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip, downloads, document:doc,
+    key(key,options={}){const event={key,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,prevented:0,preventDefault(){this.prevented++;},...options};for(const callback of doc.listeners.keydown||[])callback(event);return event;},
     seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
 }
 const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
+
+// Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
+let dialogCases=0;
+for(const preview of [false,true]){
+  const h=await actualImportHarness();h.seed(preview);h.node('exam-id').value='invalid id';
+  const modal=h.node('export-modal'),exportButton=h.node('btn-export-pkg');
+  assert.equal(modal.inert,true,'initial closed modal excludes keyboard/AX focus');
+  exportButton.focus();h.node('btn-close-export').focus();assert.equal(h.document.activeElement,exportButton);
+  assert.equal(h.key('Tab').prevented,0);assert.equal(h.key('Escape').prevented,0);
+  const snapshot=h.probe.inspect(),modelContent=JSON.stringify(snapshot.exam),mode=h.node('preview-view').style.display;
+  exportButton.click();assert.equal(h.document.activeElement,h.node('btn-cancel-export'),'Export starts on safe Cancel');
+  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.length,1);
+  const postSync=JSON.stringify(h.probe.inspect().exam);
+  for(const [key,want] of [['Tab','btn-close-export'],['Tab','btn-cancel-export'],['Tab','btn-close-export']]){assert.equal(h.key(key).prevented,1);assert.equal(h.document.activeElement,h.node(want));}
+  h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('btn-cancel-export'));
+  h.node('btn-download-nstuexam').disabled=false;h.node('btn-cancel-export').focus();h.key('Tab');assert.equal(h.document.activeElement,h.node('btn-download-nstuexam'));
+  h.node('btn-download-nstuexam').disabled=true;h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('btn-cancel-export'));
+  exportButton.focus();h.key('Tab');assert.equal(h.document.activeElement,h.node('btn-close-export'));exportButton.focus();h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('btn-cancel-export'));
+  for(const options of [{ctrlKey:true},{altKey:true},{metaKey:true}])for(const key of ['Tab','Escape']){const before=h.document.activeElement;assert.equal(h.key(key,options).prevented,0);assert.equal(h.document.activeElement,before);assert(modal.classList.contains('open'));}
+  assert.equal(h.key('Escape',{shiftKey:true}).prevented,0);
+  assert.equal(h.key('Escape').prevented,1);assert.equal(h.document.activeElement,exportButton);assert.equal(modal.inert,true);
+  assert.equal(JSON.stringify(h.probe.inspect().exam),postSync);assert.equal(h.probe.inspect().answers,snapshot.answers);assert.equal(h.node('preview-view').style.display,mode);assert.notEqual(postSync,modelContent,'existing Export metadata sync still runs');
+  for(const id of ['btn-close-export','btn-cancel-export']){exportButton.click();h.node(id).click();assert.equal(h.document.activeElement,exportButton);assert.equal(modal.inert,true);}
+  h.node('exam-title').focus();h.node('btn-close-export').click();assert.equal(h.document.activeElement,h.node('exam-title'),'repeated close is harmless');
+  assert.equal(h.downloads.length,0);dialogCases++;
+}
+// Eligibility, degenerate candidates and opener lifetime through actual init callbacks.
+for(const disqualify of [n=>n.hidden=true,n=>n.inert=true,n=>n.disabled=true,n=>n.style.display='none',n=>n.style.visibility='hidden',n=>n.style.visibility='collapse',n=>n.tabIndex=-1,n=>n.remove(),n=>n.ownerDocument={}]){
+  const h=await actualImportHarness();h.node('exam-id').value='invalid id';const cancel=h.node('btn-cancel-export');disqualify(cancel);
+  h.node('btn-export-pkg').click();assert.equal(h.document.activeElement,h.node('btn-close-export'),'unusable Cancel falls back inside');h.key('Tab');assert.equal(h.document.activeElement,h.node('btn-close-export'),'one eligible candidate cycles');h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('btn-close-export'));dialogCases++;
+}
+{
+  const h=await actualImportHarness();h.node('exam-id').value='invalid id';h.node('btn-close-export').disabled=true;h.node('btn-cancel-export').disabled=true;
+  h.node('btn-export-pkg').click();assert.equal(h.document.activeElement,h.node('export-modal'));h.key('Tab');assert.equal(h.document.activeElement,h.node('export-modal'));h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('export-modal'));dialogCases++;
+}
+{
+  const h=await actualImportHarness();h.node('exam-id').value='invalid id';const group=h.document.createElement('fieldset');group.disabled=true;h.node('export-modal').appendChild(group);const cancel=h.node('btn-cancel-export');cancel.remove();group.appendChild(cancel);
+  h.node('btn-export-pkg').click();assert.equal(h.document.activeElement,h.node('btn-close-export'));h.key('Tab');assert.equal(h.document.activeElement,h.node('btn-close-export'));dialogCases++;
+}
+for(const invalidOpener of [n=>n.remove(),n=>n.hidden=true,n=>n.inert=true,n=>n.disabled=true,n=>n.tabIndex=-1,n=>n.ownerDocument={}]){
+  const h=await actualImportHarness();h.node('exam-id').value='invalid id';const opener=h.node('exam-title');opener.focus();await h.probe.export({currentTarget:opener});invalidOpener(opener);h.key('Escape');assert.equal(h.document.activeElement,h.node('btn-export-pkg'));dialogCases++;
+}
+for(const currentTarget of ['valid','body','foreign','disabled','missing']){
+  const h=await actualImportHarness();h.node('exam-id').value='invalid id';const active=h.node('exam-title'),trigger=h.node('btn-open-file');active.focus();let target=trigger;
+  if(currentTarget==='body')target=h.document.body;if(currentTarget==='foreign')trigger.ownerDocument={};if(currentTarget==='disabled')trigger.disabled=true;if(currentTarget==='missing')target=undefined;
+  await h.probe.export({currentTarget:target});await h.probe.export({currentTarget:h.node('btn-cancel-export')});h.key('Escape');assert.equal(h.document.activeElement,currentTarget==='valid'?trigger:active,'reopen preserves original outside opener');dialogCases++;
+}
+{
+  const h=await actualImportHarness();h.node('exam-id').value='invalid id';h.document.activeElement=h.document.body;await h.probe.export();h.key('Escape');assert.equal(h.document.activeElement,h.node('btn-export-pkg'));dialogCases++;
+}
+for(const fail of [false,true]){
+  const h=await actualImportHarness();await h.probe.load({name:'valid.json',text:async()=>JSON.stringify(importFixture())});
+  let resolveBuild,rejectBuild;h.zip.Writer.prototype.build=function(){return new Promise((resolve,reject)=>{resolveBuild=resolve;rejectBuild=reject;});};
+  // Keep the real exporter and asset checks; only the asynchronous build boundary is controlled.
+  const completion=h.probe.export({currentTarget:h.node('btn-export-pkg')});
+  for(let attempt=0;attempt<100&&!resolveBuild;attempt++)await new Promise(resolve=>setTimeout(resolve,10));
+  assert.equal(typeof resolveBuild,'function','real asset checks reached the pending build boundary');
+  h.node('btn-cancel-export').click();assert.equal(h.document.activeElement,h.node('btn-export-pkg'));
+  if(fail)rejectBuild(new Error('Dismissed build failure'));else resolveBuild({fileCount:5,totalBytes:100,archiveSha256:'archive',contentSha256:'content',blob:new Blob()});
+  await completion;assert.equal(h.node('export-modal').inert,true);assert.equal(h.node('export-modal').classList.contains('open'),false);assert.equal(h.document.activeElement,h.node('btn-export-pkg'));assert.equal(h.downloads.length,0);assert.match(h.node('export-validation-status').innerHTML,fail?/Dismissed build failure/:/Successfully/);dialogCases++;
+}
+console.log(`Studio actual Export dialog keyboard, filters, lifetime and pending dismissal: ${dialogCases} scenarios passed`);
 const jsonImport = value => ({ name:'fixture.json', text:async()=>JSON.stringify(value) });
 async function storedImport(h, value, literal) {
   const writer = new h.zip.Writer(); writer.add('manifest.json',literal ?? JSON.stringify(value));

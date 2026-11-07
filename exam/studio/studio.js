@@ -922,6 +922,73 @@
     return text;
   }
 
+  let exportDialogOpener = null;
+
+  function usableExportFocus(node) {
+    return !!node && node.ownerDocument === document && node.isConnected &&
+      node !== document.body && node !== document.documentElement &&
+      !node.closest("[hidden], [inert]") && !node.matches(":disabled") &&
+      node.tabIndex >= 0 && node.getClientRects().length > 0 &&
+      !["hidden", "collapse"].includes(getComputedStyle(node).visibility);
+  }
+
+  function exportDialogButtons() {
+    const modal = el("export-modal");
+    return Array.from(modal.querySelectorAll("button")).filter(node =>
+      modal.contains(node) && usableExportFocus(node));
+  }
+
+  function focusExportDialog() {
+    const cancel = el("btn-cancel-export");
+    if (usableExportFocus(cancel) && el("export-modal").contains(cancel)) {
+      cancel.focus();
+      if (document.activeElement === cancel) return;
+    }
+    const first = exportDialogButtons()[0];
+    if (first) first.focus();
+    if (!first || document.activeElement !== first) el("export-modal").focus();
+  }
+
+  function openExportDialog(event) {
+    const modal = el("export-modal");
+    if (!modal.classList.contains("open")) {
+      exportDialogOpener = [event?.currentTarget, document.activeElement, el("btn-export-pkg")]
+        .find(node => usableExportFocus(node) && !modal.contains(node)) || null;
+    }
+    modal.inert = false;
+    modal.classList.add("open");
+    focusExportDialog();
+  }
+
+  function closeExportDialog() {
+    const modal = el("export-modal");
+    if (!modal.classList.contains("open")) return;
+    modal.classList.remove("open");
+    modal.inert = true;
+    const opener = exportDialogOpener;
+    exportDialogOpener = null;
+    const canReturn = usableExportFocus(opener);
+    if (canReturn) opener.focus();
+    if ((!canReturn || document.activeElement !== opener) && usableExportFocus(el("btn-export-pkg"))) {
+      el("btn-export-pkg").focus();
+    }
+  }
+
+  function handleExportDialogKey(event) {
+    if (!el("export-modal").classList.contains("open") || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.key === "Escape" && !event.shiftKey) {
+      event.preventDefault();
+      closeExportDialog();
+    } else if (event.key === "Tab") {
+      event.preventDefault();
+      const buttons = exportDialogButtons();
+      const index = buttons.indexOf(document.activeElement);
+      const next = index < 0 ? (event.shiftKey ? buttons.length - 1 : 0)
+        : (index + (event.shiftKey ? -1 : 1) + buttons.length) % buttons.length;
+      (buttons[next] || el("export-modal")).focus();
+    }
+  }
+
   function syncExamMetadata() {
     currentExam.id = el("exam-id").value.trim();
     currentExam.title = el("exam-title").value.trim();
@@ -936,16 +1003,15 @@
   }
 
   let exportGeneration = 0;
-  async function exportPackage() {
+  async function exportPackage(event) {
     const generation = ++exportGeneration;
     syncExamMetadata();
 
-    const modal = el("export-modal");
     const statusBox = el("export-validation-status");
     const hashesBox = el("export-hashes");
     const btnDownload = el("btn-download-nstuexam");
 
-    modal.classList.add("open");
+    openExportDialog(event);
     statusBox.style.color = "var(--text-main)";
     statusBox.innerHTML = "⏳ Validating exam schema and compiling package...";
     hashesBox.style.display = "none";
@@ -1193,8 +1259,9 @@
     el("btn-export-pkg").addEventListener("click", exportPackage);
 
     // Modal controls
-    el("btn-close-export").addEventListener("click", () => el("export-modal").classList.remove("open"));
-    el("btn-cancel-export").addEventListener("click", () => el("export-modal").classList.remove("open"));
+    el("btn-close-export").addEventListener("click", closeExportDialog);
+    el("btn-cancel-export").addEventListener("click", closeExportDialog);
+    document.addEventListener("keydown", handleExportDialogKey);
 
     // Add Question
     el("btn-add-question").addEventListener("click", () => {
