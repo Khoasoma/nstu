@@ -131,6 +131,7 @@ const fields = vm.runInNewContext(`(() => {
   return { exam: currentExam, setIndex(index) { activeQuestionIndex = index; },
     manifest() { return compileManifest(currentExam); } };
 })()`, { getNode: fieldNode, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
+  window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
   localStorage: { getItem() { return null; }, setItem() {} } });
 function placeholderInput(value) {
   const node = fieldNode('q-sa-placeholder'); node.value = value;
@@ -312,6 +313,7 @@ const replacements = vm.runInNewContext(`(() => {
     inspect() { return { currentExam, previewIndex, previewAnswers, selectedTokenForPlacement, activeQuestionIndex, renderCount, previewRenders }; },
     sample() { el('btn-load-sample').listeners.click[0](); } };
 })()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
+  window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
   localStorage: { getItem() { return null; }, setItem() {} },
   NstuZip: { Reader: class { async readEntries() {
     return [{ path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(zipManifest)) }];
@@ -379,7 +381,8 @@ class ImportDomNode {
   matches(selector) { assert.equal(selector, ':disabled');for(let n=this;n;n=n.parentNode)if(n.disabled)return true;return false; }
   contains(node) { for(let n=node;n;n=n.parentNode)if(n===this)return true;return false; }
   querySelectorAll(selector) { assert.equal(selector,'button');const result=[];const walk=n=>{for(const c of n.children){if(c.tagName==='BUTTON')result.push(c);walk(c);}};walk(this);return result; }
-  focus() { if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1)this.ownerDocument.activeElement=this; }
+  focus() { this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1)this.ownerDocument.activeElement=this; }
+  scrollIntoView(options) { (this.scrolls ||= []).push(options); }
 }
 
 
@@ -492,6 +495,10 @@ const importInstrumentation = `
 async function actualImportHarness(reader) {
   const nodes = new Map();
   const doc={readyState:'complete',documentElement:{dataset:{}},listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}};
+  const win={NSTU_RUNNER_TEMPLATE:canonicalRunner,listeners:{},frames:new Map(),cancelled:[],nextFrame:0,
+    addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);},
+    requestAnimationFrame(callback){const id=this.nextFrame++;this.frames.set(id,callback);return id;},
+    cancelAnimationFrame(id){this.cancelled.push(id);this.frames.delete(id);}};
   doc.body=new ImportDomNode('body');doc.body.ownerDocument=doc;doc.activeElement=doc.body;
   const getNode = id => { if (!nodes.has(id)){const node=new ImportDomNode(id);node.ownerDocument=doc;node.tabIndex=0;doc.body.appendChild(node);nodes.set(id,node);}return nodes.get(id); };
   // Model the real initial modal attributes and its existing button order.
@@ -504,8 +511,8 @@ async function actualImportHarness(reader) {
   class DownloadURL extends URL { static createObjectURL(blob) { const url='blob:test-'+blobs.size;blobs.set(url,blob);return url; } static revokeObjectURL() {} }
   getNode('preview-view').style.display = 'none';
   doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
-  const globals = { window: { addEventListener() {}, NSTU_RUNNER_TEMPLATE:canonicalRunner }, document: doc, atob, btoa,
-    getComputedStyle:node=>({visibility:node.style.visibility||'visible'}),
+  const globals = { window:win, document: doc, atob, btoa,
+    getComputedStyle:node=>({visibility:node.style.visibility||'visible',display:node.style.display||'block'}),
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
     TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
     crypto: (await import('node:crypto')).webcrypto, URL:DownloadURL, location: { origin:'http://studio.test' } };
@@ -520,10 +527,41 @@ async function actualImportHarness(reader) {
     {id:'old-short',type:'short_answer',prompt:'Old short'}] };
   const answers = {'old-match':{0:0},'old-short':'old answer'};
   return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip, downloads, document:doc,
+    window:win,resize(){for(const callback of win.listeners.resize||[])callback({type:'resize'});},
+    flushFrames(){const callbacks=[...win.frames.values()];win.frames.clear();callbacks.forEach(callback=>callback());},
     key(key,options={}){const event={key,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,prevented:0,preventDefault(){this.prevented++;},...options};for(const callback of doc.listeners.keydown||[])callback(event);return event;},
     seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
 }
 const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
+
+// Exercise the real init-installed resize listener and frame-time focus guards.
+async function resizeHarness(){const h=await actualImportHarness();h.seed(false);const editor=h.node('editor-view');editor.style.display='grid';const field=h.node('q-points');field.remove();editor.appendChild(field);field.value='12.';field.selectionStart=1;field.selectionEnd=2;field.focus();return{h,editor,field};}
+let resizeCases=0;
+{
+  const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.length,1,'one actual authoring resize listener is installed');
+  const before=h.probe.inspect(),model=JSON.stringify(before.exam),answers=before.answers,stats=JSON.stringify(h.probe.stats),focusCalls=field.focusCalls;
+  h.resize();h.resize();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'opaque RAF id0 must be cancelled');h.flushFrames();
+  assert.equal(field.scrolls.length,1);assert.equal(field.scrolls[0].block,'nearest');assert.equal(field.scrolls[0].inline,'nearest');assert.equal(field.scrolls[0].behavior,'instant');
+  assert.equal(field.focusCalls,focusCalls,'reveal never refocuses');assert.equal(h.document.activeElement,field);assert.equal(field.value,'12.');assert.equal(field.selectionStart,1);assert.equal(field.selectionEnd,2);
+  assert.equal(JSON.stringify(h.probe.inspect().exam),model);assert.equal(h.probe.inspect().answers,answers);assert.equal(JSON.stringify(h.probe.stats),stats);
+  h.resize();assert.deepEqual(h.window.cancelled,[0],'executed frame ownership was cleared');h.flushFrames();assert.equal(field.scrolls.length,2);resizeCases++;
+}
+for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({editor})=>editor.style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus()]){
+  const context=await resizeHarness();context.h.resize();invalidate(context);const active=context.h.document.activeElement,model=JSON.stringify(context.h.probe.inspect().exam);context.h.flushFrames();assert.equal(context.field.scrolls?.length||0,0);assert.equal(context.h.document.activeElement,active);assert.equal(JSON.stringify(context.h.probe.inspect().exam),model);resizeCases++;
+}
+{
+  const {h,editor,field}=await resizeHarness();h.resize();const next=h.node('q-sa-placeholder');next.remove();editor.appendChild(next);next.focus();h.flushFrames();assert.equal(field.scrolls?.length||0,0);assert.equal(next.scrolls.length,1);assert.equal(h.document.activeElement,next,'frame resolves current active control');resizeCases++;
+}
+{
+  const {h,field}=await resizeHarness();h.resize();h.node('btn-mode-preview').click();const state=h.probe.inspect(),active=h.document.activeElement;h.flushFrames();assert.equal(field.scrolls?.length||0,0);assert.equal(h.probe.inspect().exam,state.exam);assert.equal(h.document.activeElement,active);resizeCases++;
+}
+{
+  const {h,field}=await resizeHarness();h.resize();await h.probe.export();const state=h.probe.inspect(),active=h.document.activeElement,status=h.node('export-validation-status').innerHTML;h.flushFrames();assert.equal(field.scrolls?.length||0,0);assert.equal(h.probe.inspect().exam,state.exam);assert.equal(h.document.activeElement,active);assert.equal(h.node('export-validation-status').innerHTML,status);resizeCases++;
+}
+{
+  const {h,field}=await resizeHarness();h.resize();await h.probe.load({name:'new.json',text:async()=>JSON.stringify({id:'resize-new',title:'New',durationSeconds:600,questions:[{id:'new',type:'essay',prompt:'New',points:7,wordLimit:300}]})});const state=h.probe.inspect(),raw=field.value;h.flushFrames();assert.equal(field.scrolls.length,1);assert.equal(field.value,raw);assert.equal(h.probe.inspect().exam,state.exam);assert.equal(h.probe.inspect().exam.questions[0].points,7);resizeCases++;
+}
+console.log(`Studio actual authoring resize reveal lifecycle/guards: ${resizeCases} cases passed`);
 
 // A numeric renderer coercion, lost raw/rejection draft, or missing Export guard must fail these actual-controller tests.
 const numericFixture=()=>({id:'numeric-draft',title:'Numeric draft',subject:'',durationSeconds:600,questions:[
