@@ -116,7 +116,7 @@
       renderPreview();
     } else {
       previewView.style.display = "none";
-      editorView.style.display = "flex";
+      editorView.style.display = "grid";
       btnPreview.classList.remove("active");
       btnEditor.classList.add("active");
       renderEditor();
@@ -989,6 +989,19 @@
     }
   }
 
+  let authoringResizeFrame = null;
+  function queueAuthoringFocusReveal() {
+    if (authoringResizeFrame !== null) window.cancelAnimationFrame(authoringResizeFrame);
+    authoringResizeFrame = window.requestAnimationFrame(() => {
+      authoringResizeFrame = null;
+      const editor = el("editor-view");
+      const active = document.activeElement;
+      if (getComputedStyle(editor).display === "none" || el("export-modal").classList.contains("open") ||
+          !editor.contains(active) || !usableExportFocus(active)) return;
+      active.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    });
+  }
+
   let numericDraftModel = null;
   let numericDraftOwners = new WeakMap();
   const numericFields = {
@@ -1341,6 +1354,7 @@
     el("btn-close-export").addEventListener("click", closeExportDialog);
     el("btn-cancel-export").addEventListener("click", closeExportDialog);
     document.addEventListener("keydown", handleExportDialogKey);
+    window.addEventListener("resize", queueAuthoringFocusReveal);
 
     // Add Question
     el("btn-add-question").addEventListener("click", () => {
