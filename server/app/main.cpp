@@ -473,15 +473,9 @@ struct DashboardState {
     bool dark_mode = false;
     bool show_offline = true;
     bool broadcast_enabled = false;
-    // The client currently receiving a live Focus stream (~15fps). Distinct
-    // from the slow class-view snapshots; zero when no client is focused.
-    std::uint64_t streaming_client_id = 0;
+    // One Focus/remote command owner, distinct from slow class snapshots.
+    nstu::ui::FocusStreamRequests stream_requests;
     nstu::ui::FocusStreamObserver focus_stream;
-    // Self-heals a stalled Focus/remote stream. Arming above is edge-triggered
-    // on the streamed client id, so a start_stream lost across a client/agent
-    // reconnect leaves the server believing a client streams while its agent
-    // sends nothing. This re-asserts set_streaming when delivered frames stop.
-    nstu::server::StreamRearmWatchdog stream_watchdog;
     bool annotation_enabled = false;
     bool uwf_confirmation_open = false;
     std::uint64_t uwf_confirmation_client_id = 0;
@@ -6187,34 +6181,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             desired_stream_id = selected->id;
             stream_owner = StreamObserver::Owner::focus;
         }
-        if (dashboard.streaming_client_id != desired_stream_id) {
-            if (dashboard.streaming_client_id != 0) {
-                (void)control_plane.set_streaming(
-                    dashboard.streaming_client_id, false, 0, nullptr);
-            }
-            if (desired_stream_id != 0) {
-                std::string stream_error;
-                const bool sent = control_plane.set_streaming(desired_stream_id, true, 15,
-                                                              &stream_error);
-                if (stream_owner == StreamObserver::Owner::focus)
-                    stream_outcome = sent ? StreamObserver::RequestOutcome::start_sent
-                                          : StreamObserver::RequestOutcome::start_failed;
-                if (!sent) {
-                    record_operation_failure(
-                        "Focus", "Live stream start failed", stream_error);
-                }
-            }
-            dashboard.streaming_client_id = desired_stream_id;
-        }
-
-        // Self-heal a stalled live stream. The arming above is edge-triggered on
-        // the streamed client id, so a start_stream dropped across a client or
-        // agent reconnect leaves the server believing the client streams while
-        // its agent has stopped capturing -- the Focus surface and the remote
-        // window freeze on the last frame with no edge to re-fire. Re-assert
-        // set_streaming when the wanted client stops delivering frames (its
-        // snapshot_generation stops advancing) for longer than the stall window.
-        constexpr auto kStreamStallRearm = std::chrono::milliseconds(2000);
         std::uint64_t desired_generation = 0;
         if (desired_stream_id != 0) {
             for (const auto& candidate : clients) {
@@ -6224,21 +6190,26 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                 }
             }
         }
-        const nstu::server::StreamRearm rearm =
-            dashboard.stream_watchdog.update(desired_stream_id,
-                                             desired_generation, now,
-                                             kStreamStallRearm);
-        if (rearm != nstu::server::StreamRearm::none) {
-            std::string rearm_error;
-            const bool sent = control_plane.set_streaming(desired_stream_id, true, 15,
-                                                          &rearm_error);
-            if (stream_owner == StreamObserver::Owner::focus)
-                stream_outcome = sent ? StreamObserver::RequestOutcome::rearm_sent
-                                      : StreamObserver::RequestOutcome::rearm_failed;
+        const auto stream_decision = dashboard.stream_requests.advance({
+            .client_id = desired_stream_id, .owner = stream_owner,
+            .generation = desired_generation, .now = now});
+        if (stream_decision.stop_client_id != 0) {
+            (void)control_plane.set_streaming(stream_decision.stop_client_id,
+                                              false, 0, nullptr);
+        }
+        if (stream_decision.request.client_id != 0) {
+            const bool is_rearm = stream_decision.request.kind ==
+                nstu::ui::FocusStreamRequests::Kind::rearm;
+            std::string stream_error;
+            const bool sent = control_plane.set_streaming(
+                stream_decision.request.client_id, true, 15, &stream_error);
+            stream_outcome = dashboard.stream_requests.complete(
+                stream_decision.request, sent);
             if (!sent) {
-                record_operation_failure("Focus", "Live stream re-arm failed",
-                                         rearm_error);
-            } else if (rearm == nstu::server::StreamRearm::first) {
+                record_operation_failure("Focus", is_rearm
+                    ? "Live stream re-arm failed" : "Live stream start failed",
+                    stream_error);
+            } else if (stream_decision.rearm == nstu::server::StreamRearm::first) {
                 // Log once per stall episode; a still-dark client re-arms
                 // quietly (`repeat`) so it can't churn the diagnostics ring.
                 record_diagnostic("info", "Focus",
@@ -6375,8 +6346,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         g_remote_session.reset();
     }
     close_remote_window(control_plane);
-    if (dashboard.streaming_client_id != 0) {
-        (void)control_plane.set_streaming(dashboard.streaming_client_id, false,
+    if (dashboard.stream_requests.client_id() != 0) {
+        (void)control_plane.set_streaming(dashboard.stream_requests.client_id(), false,
                                           0, nullptr);
     }
     control_plane.stop();

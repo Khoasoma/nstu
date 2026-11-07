@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cstdint>
 
+#include "../include/nstu/stream_rearm_watchdog.hpp"
+
 namespace nstu::ui {
 
 // Presentation-only evidence. Callers supply real request outcomes and delivered
@@ -122,6 +124,76 @@ private:
     std::uint64_t target_ = 0, generation_ = 0, request_generation_ = 0, sample_generation_ = 0;
     Clock::time_point last_tick_{}, last_delivery_{}, sample_time_{};
     double fps_ = 0.0;
+};
+
+// The dashboard's command decision seam. Request identities protect local
+// completion authority; they do not identify the capture that produced a frame.
+class FocusStreamRequests {
+public:
+    using Owner = FocusStreamObserver::Owner;
+    using Outcome = FocusStreamObserver::RequestOutcome;
+    using Clock = FocusStreamObserver::Clock;
+    enum class Kind { start, rearm };
+    struct Request {
+        std::uint64_t client_id = 0;
+        Owner owner = Owner::none;
+        Kind kind = Kind::start;
+        std::uint64_t serial = 0;
+        bool operator==(const Request&) const = default;
+    };
+    struct Input {
+        std::uint64_t client_id = 0;
+        Owner owner = Owner::none;
+        std::uint64_t generation = 0;
+        Clock::time_point now{};
+    };
+    struct Decision {
+        std::uint64_t stop_client_id = 0;
+        Request request;
+        server::StreamRearm rearm = server::StreamRearm::none;
+    };
+
+    [[nodiscard]] Decision advance(const Input& input) noexcept {
+        Decision decision;
+        const auto desired_id = input.owner == Owner::none ? 0 : input.client_id;
+        const auto desired_owner = desired_id == 0 ? Owner::none : input.owner;
+        if (client_id_ != desired_id || owner_ != desired_owner) {
+            if (client_id_ != desired_id) decision.stop_client_id = client_id_;
+            client_id_ = desired_id;
+            owner_ = desired_owner;
+            pending_ = {};
+            // Same-target handover reasserts start without interrupting capture.
+            // It also seeds a full stall window, never a second request now.
+            watchdog_.reset();
+            if (client_id_ != 0) decision.request = select(Kind::start);
+        }
+        decision.rearm = watchdog_.update(client_id_, input.generation, input.now,
+                                          std::chrono::milliseconds{2000});
+        if (decision.rearm != server::StreamRearm::none)
+            decision.request = select(Kind::rearm);
+        return decision;
+    }
+
+    [[nodiscard]] Outcome complete(const Request& request, bool sent) noexcept {
+        if (request.client_id == 0 || request != pending_) return Outcome::none;
+        pending_ = {};
+        if (request.owner != Owner::focus) return Outcome::none;
+        if (request.kind == Kind::start)
+            return sent ? Outcome::start_sent : Outcome::start_failed;
+        return sent ? Outcome::rearm_sent : Outcome::rearm_failed;
+    }
+    [[nodiscard]] std::uint64_t client_id() const noexcept { return client_id_; }
+    [[nodiscard]] Owner owner() const noexcept { return owner_; }
+
+private:
+    [[nodiscard]] Request select(Kind kind) noexcept {
+        pending_ = {client_id_, owner_, kind, ++serial_};
+        return pending_;
+    }
+    std::uint64_t client_id_ = 0, serial_ = 0;
+    Owner owner_ = Owner::none;
+    Request pending_;
+    server::StreamRearmWatchdog watchdog_;
 };
 
 } // namespace nstu::ui
