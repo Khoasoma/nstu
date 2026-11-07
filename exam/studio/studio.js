@@ -453,7 +453,7 @@
 
     // Header info
     el("p-question-badge").textContent = q.isMatching ? "IELTS Matching" : q.type.toUpperCase();
-    el("p-question-points").textContent = `${q.points || 1} points`;
+    el("p-question-points").textContent = `${q.points ?? 1} points`;
     el("p-question-prompt").textContent = q.prompt || "";
     el("p-question-instruction").textContent = q.instruction || "";
 
