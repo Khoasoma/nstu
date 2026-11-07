@@ -383,6 +383,16 @@ button { font-family: inherit; }
   overflow: hidden;
 }
 
+.question-select {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
 .nav-item-index {
   font-size: 12px;
   font-weight: 700;
