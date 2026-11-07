@@ -56,6 +56,14 @@ nstu_enable_warnings(nstu_exam_control_tests)
 nstu_enable_test_assertions(nstu_exam_control_tests)
 add_test(NAME nstu.exam_control COMMAND nstu_exam_control_tests)
 
+add_executable(nstu_exam_digest_tests exam_digest_tests.cpp)
+target_include_directories(nstu_exam_digest_tests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../common/include")
+target_compile_features(nstu_exam_digest_tests PRIVATE cxx_std_20)
+nstu_enable_warnings(nstu_exam_digest_tests)
+nstu_enable_test_assertions(nstu_exam_digest_tests)
+add_test(NAME nstu.exam_digest COMMAND nstu_exam_digest_tests)
+
 add_executable(nstu_exam_telemetry_tests exam_telemetry_tests.cpp)
 target_link_libraries(nstu_exam_telemetry_tests PRIVATE nstu_common)
 nstu_enable_warnings(nstu_exam_telemetry_tests)

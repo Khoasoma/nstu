@@ -38,6 +38,7 @@
 #include "focus_stream_observer.hpp"
 #include "pairing_request_view.hpp"
 #include "exam_fleet_presentation.hpp"
+#include "exam_digest.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -547,30 +548,6 @@ const char* tr(const DashboardState& state, const char* english,
 
 // A client has unread student chat when its current inbound count exceeds the
 // count the teacher last had on screen for it.
-bool parse_sha256_hex(std::string_view text,
-                      nstu::security::Sha256Digest& digest) noexcept {
-    if (text.size() != digest.size() * 2) {
-        return false;
-    }
-    const auto nibble = [](char value) -> int {
-        if (value >= '0' && value <= '9') return value - '0';
-        if (value >= 'a' && value <= 'f') return value - 'a' + 10;
-        if (value >= 'A' && value <= 'F') return value - 'A' + 10;
-        return -1;
-    };
-    bool non_zero = false;
-    for (std::size_t index = 0; index < digest.size(); ++index) {
-        const int high = nibble(text[index * 2]);
-        const int low = nibble(text[index * 2 + 1]);
-        if (high < 0 || low < 0) {
-            return false;
-        }
-        digest[index] = static_cast<std::byte>((high << 4) | low);
-        non_zero = non_zero || digest[index] != std::byte{0};
-    }
-    return non_zero;
-}
-
 bool client_has_unread_chat(const DashboardState& state, std::uint64_t id) {
     const auto current = state.chat_counts.find(id);
     if (current == state.chat_counts.end()) {
@@ -4310,7 +4287,7 @@ void generate_sealed_cohort_export(
     if (grade.candidate_id.empty()) {
         grade.candidate_id = "cohort-submission";
     }
-    parse_sha256_hex(state.exam_digest_hex.data(), grade.package_digest);
+    (void)nstu::ui::parse_sha256_hex(state.exam_digest_hex.data(), grade.package_digest);
     grade.total_points = 100;
     grade.max_points = 100;
     grade.score_percentage = 100.0;
@@ -4420,19 +4397,25 @@ void draw_exam_panel(
     // Load on Selected
     ImGui::BeginDisabled(!selected_online || selected_has_active);
     if (ImGui::Button(tr(state, "Load on Selected Machine", "Mở trên máy chọn"), {scaled(200.0f), 0})) {
-        nstu::server::ExamLaunchRequest launch;
-        launch.package_root = state.exam_package_root.data();
-        launch.package_id = state.exam_package_id.data();
-        launch.candidate_id = state.exam_candidate_id.data();
-        while (!launch.package_root.empty() && (launch.package_root.back() == '/' || launch.package_root.back() == '\\')) {
-            launch.package_root.pop_back();
+        nstu::security::Sha256Digest digest{};
+        if (!nstu::ui::parse_sha256_hex(state.exam_digest_hex.data(), digest)) {
+            state.control_status = tr(state,
+                "Content SHA-256 must contain exactly 64 hex characters and must not be all zeros.",
+                "Content SHA-256 phải có đúng 64 ký tự hex và không được toàn số 0.");
+        } else {
+            nstu::server::ExamLaunchRequest launch;
+            launch.package_root = state.exam_package_root.data();
+            launch.package_id = state.exam_package_id.data();
+            launch.candidate_id = state.exam_candidate_id.data();
+            launch.package_digest = digest;
+            while (!launch.package_root.empty() && (launch.package_root.back() == '/' || launch.package_root.back() == '\\')) {
+                launch.package_root.pop_back();
+            }
+            launch.web_root = launch.package_root + "/exam/web";
+            std::string error;
+            const bool sent = control_plane.launch_exam(selected_client->id, launch, &error);
+            state.control_status = sent ? tr(state, "Exam loading request sent.", "Đã gửi yêu cầu tải bài thi.") : error;
         }
-        launch.web_root = launch.package_root + "/exam/web";
-        std::string error;
-        const bool valid_digest = parse_sha256_hex(state.exam_digest_hex.data(), launch.package_digest);
-        const bool sent = valid_digest && control_plane.launch_exam(selected_client->id, launch, &error);
-        if (!valid_digest) error = "Content SHA-256 must be 64 non-zero hex digits.";
-        state.control_status = sent ? tr(state, "Exam loading request sent.", "Đã gửi yêu cầu tải bài thi.") : error;
     }
     ImGui::EndDisabled();
 
@@ -4448,26 +4431,33 @@ void draw_exam_panel(
     }
     ImGui::BeginDisabled(!any_online_unlaunched);
     if (ImGui::Button(tr(state, "Load on ALL Online Computers", "Mở trên TẤT CẢ máy online"), {scaled(220.0f), 0})) {
-        std::size_t launched_count = 0;
-        std::string last_err;
-        for (const auto& cl : clients) {
-            if (cl.status == nstu::server::ClientStatus::online && !control_plane.exam_active(cl.id)) {
-                nstu::server::ExamLaunchRequest launch;
-                launch.package_root = state.exam_package_root.data();
-                launch.package_id = state.exam_package_id.data();
-                launch.candidate_id = cl.hostname;
-                while (!launch.package_root.empty() && (launch.package_root.back() == '/' || launch.package_root.back() == '\\')) {
-                    launch.package_root.pop_back();
-                }
-                launch.web_root = launch.package_root + "/exam/web";
-                (void)parse_sha256_hex(state.exam_digest_hex.data(), launch.package_digest);
-                if (control_plane.launch_exam(cl.id, launch, &last_err)) {
-                    ++launched_count;
+        nstu::security::Sha256Digest digest{};
+        if (!nstu::ui::parse_sha256_hex(state.exam_digest_hex.data(), digest)) {
+            state.control_status = tr(state,
+                "Content SHA-256 must contain exactly 64 hex characters and must not be all zeros.",
+                "Content SHA-256 phải có đúng 64 ký tự hex và không được toàn số 0.");
+        } else {
+            std::size_t launched_count = 0;
+            std::string last_err;
+            for (const auto& cl : clients) {
+                if (cl.status == nstu::server::ClientStatus::online && !control_plane.exam_active(cl.id)) {
+                    nstu::server::ExamLaunchRequest launch;
+                    launch.package_root = state.exam_package_root.data();
+                    launch.package_id = state.exam_package_id.data();
+                    launch.candidate_id = cl.hostname;
+                    launch.package_digest = digest;
+                    while (!launch.package_root.empty() && (launch.package_root.back() == '/' || launch.package_root.back() == '\\')) {
+                        launch.package_root.pop_back();
+                    }
+                    launch.web_root = launch.package_root + "/exam/web";
+                    if (control_plane.launch_exam(cl.id, launch, &last_err)) {
+                        ++launched_count;
+                    }
                 }
             }
+            state.control_status = tr(state, "Dispatched exam to ", "Đã phát đề thi tới ") +
+                                  std::to_string(launched_count) + tr(state, " computers.", " máy tính.");
         }
-        state.control_status = tr(state, "Dispatched exam to ", "Đã phát đề thi tới ") +
-                              std::to_string(launched_count) + tr(state, " computers.", " máy tính.");
     }
     ImGui::EndDisabled();
 
