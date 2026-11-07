@@ -17,6 +17,7 @@
 #include "nstu/operator_role.hpp"
 #include "nstu/room_profile.hpp"
 #include "nstu/support_bundle.hpp"
+#include "nstu/checked_file_output.hpp"
 #include "nstu/url_validation.hpp"
 
 #include <d3d11.h>
@@ -501,6 +502,7 @@ struct DashboardState {
     bool support_bundle_modal_open = false;
     bool support_bundle_consented = false;
     std::string support_bundle_preview;
+    std::string support_bundle_save_error;
     bool room_profile_modal_open = false;
     bool software_updates_modal_open = false;
     nstu::server::FleetUpdateConfig fleet_update_config;
@@ -536,6 +538,7 @@ struct DashboardState {
     std::array<char, nstu::discovery::kMaximumServerNameBytes + 1>
         room_name_input{};
     std::filesystem::path room_name_path;
+    std::string room_name_save_warning;
     std::vector<std::string> discovered_packages;
     int selected_package_index = -1;
     std::string last_export_path;
@@ -3689,9 +3692,40 @@ void draw_software_updates_modal(
     ImGui::EndPopup();
 }
 
+std::string file_output_error_text(const DashboardState& state,
+                                  const nstu::server::files::FileOutputResult& result) {
+    using nstu::server::files::FileFailureStage;
+    const char* text = tr(state, "File save could not be confirmed.", "Chưa xác nhận được việc lưu tệp.");
+    switch (result.failure) {
+    case FileFailureStage::path:
+        text = tr(state, "File save could not be confirmed: destination unavailable.", "Chưa xác nhận được việc lưu tệp: vị trí đích không khả dụng.");
+        break;
+    case FileFailureStage::open:
+        text = tr(state, "File save could not be confirmed: could not open the file.", "Chưa xác nhận được việc lưu tệp: không thể mở tệp.");
+        break;
+    case FileFailureStage::write:
+        text = tr(state, "File save could not be confirmed: writing failed.", "Chưa xác nhận được việc lưu tệp: ghi tệp thất bại.");
+        break;
+    case FileFailureStage::flush:
+        text = tr(state, "File save could not be confirmed: flushing failed.", "Chưa xác nhận được việc lưu tệp: đẩy dữ liệu ghi thất bại.");
+        break;
+    case FileFailureStage::close:
+        text = tr(state, "File save could not be confirmed: closing failed.", "Chưa xác nhận được việc lưu tệp: đóng tệp thất bại.");
+        break;
+    case FileFailureStage::exception:
+    case FileFailureStage::none:
+        break;
+    }
+    std::string message(text);
+    if (result.release_unconfirmed)
+        message += tr(state, " The file may still be in use.", " Tệp có thể vẫn đang được sử dụng.");
+    return message;
+}
+
 void draw_support_bundle_modal(DashboardState& state) {
     if (state.support_bundle_modal_open) {
         state.support_bundle_modal_open = false;
+        state.support_bundle_save_error.clear();
         ImGui::OpenPopup("support-bundle-modal");
     }
     const ImVec2 viewport_size = ImGui::GetMainViewport()->WorkSize;
@@ -3720,7 +3754,12 @@ void draw_support_bundle_modal(DashboardState& state) {
                     &state.support_bundle_consented);
     ImGui::Spacing();
 
-    if (ImGui::BeginChild("support-bundle-preview", {0.0f, scaled(-52.0f)}, true,
+    const std::string save_status = state.support_bundle_save_error.empty()
+        ? std::string{} : "▲ " + state.support_bundle_save_error;
+    const float save_status_height = save_status.empty() ? 0.0f :
+        ImGui::CalcTextSize(save_status.c_str(), nullptr, false, ImGui::GetContentRegionAvail().x).y +
+            ImGui::GetStyle().ItemSpacing.y;
+    if (ImGui::BeginChild("support-bundle-preview", {0.0f, scaled(-52.0f) - save_status_height}, true,
                           ImGuiWindowFlags_HorizontalScrollbar)) {
         ImGui::TextUnformatted(state.support_bundle_preview.c_str());
     }
@@ -3737,6 +3776,7 @@ void draw_support_bundle_modal(DashboardState& state) {
     if (ImGui::Button(tr(state, "Copy Bundle Markdown", "Sao chép Markdown"),
                       {scaled(170.0f), 0.0f})) {
         ImGui::SetClipboardText(state.support_bundle_preview.c_str());
+        state.support_bundle_save_error.clear();
         state.control_status = tr(state, "Support bundle copied to clipboard.",
                                   "Đã sao chép gói hỗ trợ vào bộ nhớ tạm.");
         ImGui::CloseCurrentPopup();
@@ -3744,30 +3784,23 @@ void draw_support_bundle_modal(DashboardState& state) {
     ImGui::SameLine();
     if (ImGui::Button(tr(state, "Save to Documents", "Lưu vào Documents"),
                       {scaled(160.0f), 0.0f})) {
-        std::string docs_path;
-        char profile_buf[MAX_PATH]{};
-        const DWORD env_len = GetEnvironmentVariableA("USERPROFILE", profile_buf, MAX_PATH);
-        if (env_len > 0 && env_len < MAX_PATH) {
-            docs_path = std::string(profile_buf) + "\\Documents";
-        } else {
-            docs_path = ".";
-        }
+        const auto documents = nstu::server::files::current_user_documents_path();
         SYSTEMTIME st{};
         GetLocalTime(&st);
         char filename[128]{};
-        sprintf_s(filename, "\\NSTU_Support_Bundle_%04u%02u%02u_%02u%02u%02u.md",
+        sprintf_s(filename, "NSTU_Support_Bundle_%04u%02u%02u_%02u%02u%02u.md",
                   st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-        const std::string full_file_path = docs_path + filename;
-        std::ofstream out(full_file_path);
-        if (out.is_open()) {
-            out << state.support_bundle_preview;
-            out.close();
+        const auto result = documents.ok()
+            ? nstu::server::files::write_checked_file(documents.path / filename, state.support_bundle_preview)
+            : nstu::server::files::FileOutputResult{nstu::server::files::FileFailureStage::path, static_cast<DWORD>(documents.error)};
+        if (result.ok()) {
+            state.support_bundle_save_error.clear();
             state.control_status = tr(state, "Support bundle saved to Documents.",
                                       "Đã lưu gói hỗ trợ vào Documents.");
             ImGui::CloseCurrentPopup();
         } else {
-            state.control_status = tr(state, "Failed to write support bundle file.",
-                                      "Không thể ghi tệp gói hỗ trợ.");
+            state.support_bundle_save_error = file_output_error_text(state, result);
+            state.control_status = state.support_bundle_save_error;
         }
     }
     ImGui::EndGroup();
@@ -3785,8 +3818,10 @@ void draw_support_bundle_modal(DashboardState& state) {
     }
     ImGui::SameLine();
     if (ImGui::Button(tr(state, "Close", "Đóng"), {scaled(80.0f), 0.0f})) {
+        state.support_bundle_save_error.clear();
         ImGui::CloseCurrentPopup();
     }
+    if (!save_status.empty()) ImGui::TextWrapped("%s", save_status.c_str());
     ImGui::EndPopup();
 }
 
@@ -3818,11 +3853,42 @@ void draw_room_profile_modal(DashboardState& state, nstu::server::ServerControlP
         "Tuyệt đối không chứa mật khẩu, khóa ghép nối, bí mật ghi danh, thông tin học sinh hay bài thi."));
     ImGui::Spacing();
 
+    const char* profile_apply_saved_message = tr(state,
+        "Room name applied and saved. Other profile settings were not applied.",
+        "Đã áp dụng và lưu tên phòng. Các thiết lập khác trong hồ sơ chưa được áp dụng.");
+    const char* profile_apply_partial_message = tr(state,
+        "Room name applied to this session; file save could not be confirmed. Other profile settings were not applied.",
+        "Tên phòng đã được áp dụng trong phiên này; chưa xác nhận được việc lưu tệp. Các thiết lập khác trong hồ sơ chưa được áp dụng.");
+    const float profile_wrap_width = std::max(1.0f, ImGui::GetContentRegionAvail().x);
+    const auto profile_status_height = [&](const char* text) {
+        return text && *text
+            ? ImGui::CalcTextSize(text, nullptr, false, profile_wrap_width).y : 0.0f;
+    };
+    float measured_status_height = std::max({
+        profile_status_height(state.room_profile_status_message.c_str()),
+        profile_status_height(profile_apply_saved_message),
+        profile_status_height(profile_apply_partial_message)});
+    using nstu::server::files::FileFailureStage;
+    for (const auto stage : std::array{
+            FileFailureStage::path, FileFailureStage::open, FileFailureStage::write,
+            FileFailureStage::flush, FileFailureStage::close, FileFailureStage::exception}) {
+        // Candidate text budgets a possible click-frame error, not an I/O result.
+        const auto candidate_text = file_output_error_text(state, {stage, 0, false, true});
+        measured_status_height = std::max(
+            measured_status_height, profile_status_height(candidate_text.c_str()));
+    }
+    const float profile_footer_reservation = std::max(
+        scaled(90.0f),
+        2.0f * ImGui::GetFrameHeight() + measured_status_height +
+            8.0f * ImGui::GetStyle().ItemSpacing.y + scaled(1.0f));
+
     if (ImGui::BeginTabBar("room-profile-tabs")) {
         if (ImGui::BeginTabItem(tr(state, "Export Current Profile", "Xuất hồ sơ hiện tại"))) {
             ImGui::Spacing();
             ImGui::TextUnformatted(tr(state, "Generated JSON Profile:", "Hồ sơ JSON được tạo:"));
-            if (ImGui::BeginChild("room-profile-export-preview", {0.0f, scaled(-90.0f)}, true,
+            const float profile_body_height = std::max(
+                ImGui::GetFrameHeight(), ImGui::GetContentRegionAvail().y - profile_footer_reservation);
+            if (ImGui::BeginChild("room-profile-export-preview", {0.0f, profile_body_height}, true,
                                   ImGuiWindowFlags_HorizontalScrollbar)) {
                 ImGui::TextUnformatted(state.room_profile_export_text.c_str());
             }
@@ -3837,26 +3903,21 @@ void draw_room_profile_modal(DashboardState& state, nstu::server::ServerControlP
             }
             ImGui::SameLine();
             if (ImGui::Button(tr(state, "Save to Documents", "Lưu vào Documents"), {scaled(170.0f), 0.0f})) {
-                char profile_buf[MAX_PATH]{};
-                const DWORD env_len = GetEnvironmentVariableA("USERPROFILE", profile_buf, MAX_PATH);
-                std::string docs_path = (env_len > 0 && env_len < MAX_PATH)
-                    ? (std::string(profile_buf) + "\\Documents")
-                    : "C:\\";
+                const auto documents = nstu::server::files::current_user_documents_path();
                 char filename[128]{};
                 SYSTEMTIME st;
                 GetLocalTime(&st);
-                sprintf_s(filename, "\\nstu_room_profile_%04u%02u%02u_%02u%02u%02u.json",
+                sprintf_s(filename, "nstu_room_profile_%04u%02u%02u_%02u%02u%02u.json",
                           st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-                const std::string full_path = docs_path + filename;
-                std::ofstream out(full_path);
-                if (out.is_open()) {
-                    out << state.room_profile_export_text;
-                    out.close();
+                const auto result = documents.ok()
+                    ? nstu::server::files::write_checked_file(documents.path / filename, state.room_profile_export_text)
+                    : nstu::server::files::FileOutputResult{nstu::server::files::FileFailureStage::path, static_cast<DWORD>(documents.error)};
+                if (result.ok()) {
                     state.room_profile_status_message = tr(state, "Room profile saved to Documents.",
                                                           "Đã lưu hồ sơ phòng học vào Documents.");
                     state.room_profile_status_is_error = false;
                 } else {
-                    state.room_profile_status_message = tr(state, "Failed to save file.", "Không thể lưu tệp.");
+                    state.room_profile_status_message = file_output_error_text(state, result);
                     state.room_profile_status_is_error = true;
                 }
             }
@@ -3866,9 +3927,11 @@ void draw_room_profile_modal(DashboardState& state, nstu::server::ServerControlP
         if (ImGui::BeginTabItem(tr(state, "Import & Apply Profile", "Nhập & Áp dụng hồ sơ"))) {
             ImGui::Spacing();
             ImGui::TextUnformatted(tr(state, "Paste Room Profile JSON:", "Dán JSON hồ sơ phòng học:"));
+            const float profile_body_height = std::max(
+                ImGui::GetFrameHeight(), ImGui::GetContentRegionAvail().y - profile_footer_reservation);
             ImGui::InputTextMultiline("##import-profile-json", state.room_profile_import_buffer.data(),
                                       state.room_profile_import_buffer.size(),
-                                      {0.0f, scaled(-90.0f)},
+                                      {0.0f, profile_body_height},
                                       ImGuiInputTextFlags_AllowTabInput);
             ImGui::Spacing();
             if (ImGui::Button(tr(state, "Validate & Apply Profile", "Xác thực & Áp dụng"), {scaled(200.0f), 0.0f})) {
@@ -3884,19 +3947,21 @@ void draw_room_profile_modal(DashboardState& state, nstu::server::ServerControlP
                                                         result.error_message;
                     state.room_profile_status_is_error = true;
                 } else {
-                    strncpy_s(state.room_name_input.data(), state.room_name_input.size(),
-                              result.profile.room_name.c_str(), _TRUNCATE);
                     control_plane.set_server_name(result.profile.room_name);
-                    if (!state.room_name_path.empty()) {
-                        std::ofstream out(state.room_name_path, std::ios::binary | std::ios::trunc);
-                        if (out.is_open()) {
-                            out << result.profile.room_name;
-                        }
+                    const auto canonical_name = control_plane.server_name();
+                    std::snprintf(state.room_name_input.data(), state.room_name_input.size(), "%s", canonical_name.c_str());
+                    const auto saved = nstu::server::files::write_checked_file(state.room_name_path, canonical_name);
+                    if (saved.ok()) {
+                        state.room_profile_status_message = profile_apply_saved_message;
+                        state.room_profile_status_is_error = false;
+                        state.room_name_save_warning.clear();
+                    } else {
+                        state.room_profile_status_message = profile_apply_partial_message;
+                        state.room_profile_status_is_error = true;
+                        state.room_name_save_warning = tr(state,
+                            "Room name is active in this session; file save could not be confirmed.",
+                            "Tên phòng đang có hiệu lực trong phiên này; chưa xác nhận được việc lưu tệp.");
                     }
-                    state.room_profile_status_message = tr(state, "Profile applied successfully for room '",
-                                                          "Đã áp dụng thành công hồ sơ cho phòng '") +
-                                                        result.profile.room_name + "'.";
-                    state.room_profile_status_is_error = false;
                 }
             }
             ImGui::EndTabItem();
@@ -3909,7 +3974,9 @@ void draw_room_profile_modal(DashboardState& state, nstu::server::ServerControlP
         const ImVec4 status_col = state.room_profile_status_is_error
             ? ImVec4{0.9f, 0.3f, 0.3f, 1.0f}
             : ImVec4{0.3f, 0.85f, 0.4f, 1.0f};
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(status_col, "%s", state.room_profile_status_message.c_str());
+        ImGui::PopTextWrapPos();
     }
 
     ImGui::Separator();
@@ -3956,19 +4023,6 @@ std::string load_room_name(const std::filesystem::path& path) {
     return line.substr(first, last - first + 1);
 }
 
-// Persists the room label as plaintext. Best-effort: a write failure only means
-// the label will not survive a restart, so the caller surfaces it as a benign
-// status rather than a hard error. The value is written verbatim; the control
-// plane has already sanitized it to the discovery bound.
-bool save_room_name(const std::filesystem::path& path, std::string_view name) {
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file) {
-        return false;
-    }
-    file << name;
-    return static_cast<bool>(file);
-}
-
 // Six digits compared out loud across a room are easier to read in two groups.
 std::string grouped_code(const std::string& code) {
     return code.size() == 6 ? code.substr(0, 3) + " " + code.substr(3) : code;
@@ -3995,15 +4049,24 @@ void draw_room_name_field(DashboardState& state,
         const std::string sanitized = control_plane.server_name();
         std::snprintf(state.room_name_input.data(),
                       state.room_name_input.size(), "%s", sanitized.c_str());
-        if (!state.room_name_path.empty() &&
-            !save_room_name(state.room_name_path, sanitized)) {
+        const auto result = nstu::server::files::write_checked_file(state.room_name_path, sanitized);
+        if (result.ok()) {
+            state.room_name_save_warning.clear();
+        } else {
+            state.room_name_save_warning = tr(state,
+                "Room name is active in this session; file save could not be confirmed.",
+                "Tên phòng đang có hiệu lực trong phiên này; chưa xác nhận được việc lưu tệp.");
             record_operation_failure("Pairing",
-                                     "Room name could not be saved", "");
+                "Room name file save could not be confirmed",
+                "stage=" + std::to_string(static_cast<unsigned int>(result.failure)) +
+                    " native_error=" + std::to_string(result.native_error));
         }
     }
     ImGui::TextDisabled("%s", tr(state,
         "Leave blank to use the computer name.",
         "Để trống để dùng tên máy tính."));
+    if (!state.room_name_save_warning.empty())
+        ImGui::TextWrapped("▲ %s", state.room_name_save_warning.c_str());
 }
 
 // Show offered SAS digits before student confirmation so both screens can be
