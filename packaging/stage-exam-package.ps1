@@ -384,13 +384,52 @@ function Add-ManifestAssetReference {
     $AssetSet.Add($normalized.Relative) | Out-Null
 }
 
+function Assert-ExamAllowedOrigin {
+    param([Parameter(Mandatory = $true)]$Value)
+    Assert-JsonString -Value $Value -Context 'Exam allowed origin' -MinimumLength 1 -MaximumLength 253
+    # Match native parse_origin_hostname on the whole string before stripping
+    # suffixes. Preserve the signed value; do not resolve or normalize hosts.
+    if ($Value -match '[^\x21-\x7e]' -or $Value.Contains('@')) {
+        throw 'Exam allowed origin must be printable ASCII without whitespace or userinfo.'
+    }
+    $hostPart = $Value
+    if ($hostPart.StartsWith('https://', [StringComparison]::OrdinalIgnoreCase)) {
+        $hostPart = $hostPart.Substring(8)
+    } elseif ($hostPart.StartsWith('http://', [StringComparison]::OrdinalIgnoreCase)) {
+        $hostPart = $hostPart.Substring(7)
+    } elseif ($hostPart.StartsWith('//', [StringComparison]::Ordinal)) {
+        $hostPart = $hostPart.Substring(2)
+    } elseif ($hostPart.Contains('://')) {
+        throw 'Exam allowed origin uses an unsupported scheme.'
+    }
+    $separator = $hostPart.IndexOfAny([char[]]('/?#'))
+    if ($separator -ge 0) { $hostPart = $hostPart.Substring(0, $separator) }
+    $colon = $hostPart.LastIndexOf(':')
+    if ($colon -ge 0) {
+        $port = $hostPart.Substring($colon + 1)
+        if ($port -notmatch '^[0-9]{1,5}$' -or [UInt32]$port -lt 1 -or [UInt32]$port -gt 65535) {
+            throw 'Exam allowed origin port must be decimal 1..65535 with at most five digits.'
+        }
+        $hostPart = $hostPart.Substring(0, $colon)
+    }
+    if ($hostPart.Length -eq 0 -or $hostPart.Length -gt 253) {
+        throw 'Exam allowed origin hostname is empty or too long.'
+    }
+    foreach ($label in $hostPart.Split([char]'.')) {
+        if ($label.Length -eq 0 -or $label.Length -gt 63 -or
+            $label -notmatch '^[A-Za-z0-9-]+$' -or $label.StartsWith('-') -or $label.EndsWith('-')) {
+            throw 'Exam allowed origin contains an invalid DNS label.'
+        }
+    }
+}
+
 function Test-ExamManifest {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
         [Parameter(Mandatory = $true)]$EntryKinds
     )
     Assert-JsonProperties -Object $Manifest -Context 'Exam manifest' -Allowed @(
-        'id', 'title', 'subject', 'candidate', 'durationSeconds', 'documents', 'questions')
+        'id', 'title', 'subject', 'candidate', 'durationSeconds', 'allowedOrigins', 'documents', 'questions')
 
     $id = Get-JsonPropertyValue -Object $Manifest -Name 'id' -Required
     Assert-JsonString -Value $id -Context 'Exam manifest id' -MinimumLength 1 -MaximumLength 96
@@ -408,6 +447,18 @@ function Test-ExamManifest {
         if (Test-JsonPropertyPresent -Object $Manifest -Name $optional[0]) {
             $value = Get-JsonPropertyValue -Object $Manifest -Name $optional[0]
             Assert-JsonString -Value $value -Context "Exam manifest $($optional[0])" -MaximumLength $optional[1]
+        }
+    }
+
+    if (Test-JsonPropertyPresent -Object $Manifest -Name 'allowedOrigins') {
+        $origins = Get-JsonArray -Value (Get-JsonPropertyValue -Object $Manifest -Name 'allowedOrigins') `
+            -Context 'Exam allowedOrigins' -MaximumCount 32
+        $seenOrigins = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($origin in $origins) {
+            Assert-ExamAllowedOrigin -Value $origin
+            if (-not $seenOrigins.Add($origin)) {
+                throw 'Exam allowedOrigins contains duplicate entries.'
+            }
         }
     }
 
