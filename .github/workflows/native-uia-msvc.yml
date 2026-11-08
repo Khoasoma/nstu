@@ -42,7 +42,7 @@ jobs:
             expectedSourceHashes = [ordered]@{
               'tools/native-uia-probe/main.cpp' = '04D64CA99477CA1A4CE26C8DC017CD3F085C5D56B7FA8E2139937D0907A7E5E6'
               'tools/native-uia-probe/tests.cpp' = 'F0AF05868F66B1B6ECE6C9DD85823872352DD6BC67C5C2D4373CD07A415B6121'
-              'tools/native-uia-probe/CMakeLists.txt' = 'FE634D458EDC8634AFE826B820323E2CB440C5758AA67E69A2C42499AAE76493'
+              'tools/native-uia-probe/CMakeLists.txt' = 'C723FC39AFE43BE99AD4104B0C7A812EB93378333CEA6A02AC4E534E07857388'
               'tools/native-uia-probe/README.md' = '309A6EB16479C7B5EBC603C7961AE3848670F67518D7469204986977F6A5E67E'
             }
             expectedTests = @(
@@ -166,6 +166,97 @@ jobs:
             $compile.activeAssertionsProof = 'Existing tests.cpp compile guard; target NDEBUG undefinition applies to both frozen translation units'
             $compile.WindowsSDK = $project.SelectSingleNode('//*[local-name()="WindowsTargetPlatformVersion"]').InnerText
             $compile.PlatformToolset = @($project.SelectNodes('//*[local-name()="PlatformToolset"]') | ForEach-Object { $_.InnerText } | Sort-Object -Unique)
+            function Split-NativeArguments([string]$text) {
+              $arguments = [Collections.Generic.List[string]]::new(); $index = 0
+              while ($index -lt $text.Length) {
+                while ($index -lt $text.Length -and [char]::IsWhiteSpace($text[$index])) { ++$index }
+                if ($index -ge $text.Length) { break }
+                $value = [Text.StringBuilder]::new(); $quoted = $false
+                while ($index -lt $text.Length) {
+                  $character = $text[$index]
+                  if (-not $quoted -and [char]::IsWhiteSpace($character)) { break }
+                  if ($character -eq '\') {
+                    $slashes = 0
+                    while ($index -lt $text.Length -and $text[$index] -eq '\') { ++$slashes; ++$index }
+                    if ($index -lt $text.Length -and $text[$index] -eq '"') {
+                      [void]$value.Append('\', [int][Math]::Floor($slashes / 2))
+                      if ($slashes % 2) { [void]$value.Append('"'); ++$index } else { $quoted = -not $quoted; ++$index }
+                    } else { [void]$value.Append('\', $slashes) }
+                    continue
+                  }
+                  if ($character -eq '"') {
+                    if ($quoted -and $index + 1 -lt $text.Length -and $text[$index + 1] -eq '"') { [void]$value.Append('"'); $index += 2 }
+                    else { $quoted = -not $quoted; ++$index }
+                    continue
+                  }
+                  [void]$value.Append($character); ++$index
+                }
+                if ($quoted) { throw 'Unterminated quote in actual native tool command' }
+                $arguments.Add($value.ToString())
+              }
+              return ,$arguments.ToArray()
+            }
+            function Read-ActualCommand([string[]]$lines, [string]$tool) {
+              $commandMatches = @()
+              for ($lineIndex = 0; $lineIndex -lt $lines.Count; ++$lineIndex) {
+                $text = ($lines[$lineIndex] -replace '^\s*\d+>', '').TrimStart()
+                $prefix = if ($text.StartsWith('"')) { '"' + $tool + '"' } else { $tool }
+                if (-not $text.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
+                    $text.Length -le $prefix.Length -or -not [char]::IsWhiteSpace($text[$prefix.Length])) { continue }
+                $commandLines = [Collections.Generic.List[string]]::new(); $commandLines.Add($lines[$lineIndex])
+                $argumentText = $text.Substring($prefix.Length)
+                for ($next = $lineIndex + 1; $next -lt $lines.Count; ++$next) {
+                  $continuation = $lines[$next].Trim()
+                  if ($continuation -notmatch '^"[^"]+\.(obj|res|rsp)"\s*$' -and $continuation -notmatch '^@"[^"]+\.rsp"\s*$') { break }
+                  $argumentText += ' ' + $continuation; $commandLines.Add($lines[$next])
+                }
+                $commandMatches += @{ arguments = (Split-NativeArguments $argumentText); text = ($commandLines -join [Environment]::NewLine) }
+              }
+              if ($commandMatches.Count -ne 1) { throw 'Actual native tool command missing or ambiguous' }
+              return $commandMatches[0]
+            }
+            $responseFiles = [Collections.Generic.List[object]]::new()
+            $responseSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            function Expand-LinkResponses([string[]]$arguments, [int]$depth = 0) {
+              if ($depth -gt 4) { throw 'Link response nesting exceeds bound' }
+              $expanded = [Collections.Generic.List[string]]::new()
+              foreach ($argument in $arguments) {
+                if (-not $argument.StartsWith('@')) { $expanded.Add($argument); continue }
+                $responsePath = [IO.Path]::GetFullPath($argument.Substring(1), $buildDir)
+                $prefix = [IO.Path]::GetFullPath($buildDir).TrimEnd('\','/') + [IO.Path]::DirectorySeparatorChar
+                if (-not $responsePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) -or
+                    -not $responseSeen.Add($responsePath) -or $responseSeen.Count -gt 16) { throw 'Response file is outside owned build or repeated/oversized' }
+                $file = Get-Item -LiteralPath $responsePath
+                if ($file.Length -gt 1048576) { throw 'Response file byte bound exceeded' }
+                $bytes = [IO.File]::ReadAllBytes($responsePath)
+                if ($bytes.Length -ge 2 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254) {
+                  $decoder = [Text.UnicodeEncoding]::new($false, $true, $true); $responseText = $decoder.GetString($bytes, 2, $bytes.Length - 2)
+                } else {
+                  $decoder = [Text.UTF8Encoding]::new($false, $true); $offset = if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) { 3 } else { 0 }
+                  $responseText = $decoder.GetString($bytes, $offset, $bytes.Length - $offset)
+                }
+                $copy = Join-Path $evidenceDir ('link-response-' + ($responseFiles.Count + 1) + '.rsp')
+                Copy-Item -LiteralPath $responsePath -Destination $copy
+                $hash = (Get-FileHash -LiteralPath $responsePath -Algorithm SHA256).Hash
+                if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -ne $hash) { throw 'Retained response file differs' }
+                $responseFiles.Add(@{ source = $responsePath; artifact = [IO.Path]::GetFileName($copy); sha256 = $hash; bytes = $bytes.Length })
+                foreach ($nested in (Expand-LinkResponses (Split-NativeArguments $responseText) ($depth + 1))) { $expanded.Add($nested) }
+              }
+              return ,$expanded.ToArray()
+            }
+            $generatedManifest = Join-Path $buildDir 'probe.manifest'
+            $generatedRc = Join-Path $buildDir 'probe.rc'
+            $generation = @($project.SelectNodes('//*[local-name()="GenerateManifest"]'))
+            if ($generation.Count -ne 1 -or $generation[0].GetAttribute('Condition') -notmatch 'Release\|x64' -or $generation[0].InnerText -ne 'false') {
+              throw 'Actual Release project does not exclusively disable generated manifest'
+            }
+            $resourceItems = @($project.SelectNodes('//*[local-name()="ResourceCompile" and @Include]'))
+            if ($resourceItems.Count -ne 1 -or
+                -not [string]::Equals([IO.Path]::GetFullPath($resourceItems[0].GetAttribute('Include'), $buildDir), $generatedRc, [StringComparison]::OrdinalIgnoreCase)) {
+              throw 'Actual project resource input is not the sole generated probe.rc'
+            }
+            if (@($project.SelectNodes('//*[local-name()="AdditionalManifestFiles" or (local-name()="Manifest" and @Include)]')).Count) { throw 'Additional project manifest producer present' }
+            $compile.manifestProjectPolicy = @{ GenerateManifest = $generation[0].InnerText; Condition = $generation[0].GetAttribute('Condition'); resource = $generatedRc }
             if ([string]::IsNullOrWhiteSpace($compile.WindowsSDK) -or $compile.PlatformToolset.Count -ne 1 -or
                 $compile.PlatformToolset[0] -ne 'v143') { throw 'Actual VS2022 SDK/toolset not verified' }
             Copy-Item -LiteralPath $projectPath -Destination (Join-Path $evidenceDir 'nstu-native-uia-probe.vcxproj')
@@ -196,7 +287,185 @@ jobs:
               }
             }
             $compile.imports = $imports
+            $compile.phase = 'embedded-manifest'
+            $manifestReceipt = [ordered]@{
+              status = 'RUNNING'; phase = 'link-policy'; checkoutSha = $inputs.checkoutSha
+              workflowSha256 = $inputs.workflowSha256; sourceHashes = $inputs.sourceHashes
+              CMakeSha256 = $inputs.sourceHashes.'tools/native-uia-probe/CMakeLists.txt'
+              projectPolicy = $compile.manifestProjectPolicy; binarySha256Before = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
+              binarySha256After = $null; resources = @(); extractExit = $null; validateExit = $null
+              mtHelpExit = $null; mt = $null; WindowsSDK = $compile.WindowsSDK; error = $null
+            }
+            try {
+              $buildLines = @(Get-Content -LiteralPath (Join-Path $evidenceDir 'build.log'))
+              $link = Read-ActualCommand $buildLines (Join-Path $cl.DirectoryName 'link.exe')
+              $link.text | Set-Content -LiteralPath (Join-Path $evidenceDir 'actual-link-command.log') -Encoding utf8
+              $linkArguments = Expand-LinkResponses $link.arguments
+              $manifestSwitches = @($linkArguments | Where-Object { $_ -match '(?i)^/MANIFEST(?::|$)' })
+              if ($manifestSwitches.Count -ne 1 -or $manifestSwitches[0] -ine '/MANIFEST:NO') { throw 'Actual link has a missing/conflicting automatic manifest policy' }
+              $resourceArguments = @($linkArguments | Where-Object { [IO.Path]::GetExtension($_) -ieq '.res' })
+              if ($resourceArguments.Count -ne 1 -or [IO.Path]::GetFileName($resourceArguments[0]) -ine 'probe.res') { throw 'Actual link does not use exactly one custom probe.res' }
+              $linkedResource = [IO.Path]::GetFullPath($resourceArguments[0], $buildDir)
+              if ($compile.WindowsSDK -notmatch '^10\.0\.\d+\.\d+$') { throw 'Actual Windows SDK version is not exact' }
+              $kits = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows Kits\Installed Roots'
+              if ([string]::IsNullOrWhiteSpace($kits.KitsRoot10) -or -not [IO.Path]::IsPathRooted($kits.KitsRoot10)) { throw 'Installed Windows Kits root missing' }
+              $sdkBin = [IO.Path]::GetFullPath((Join-Path $kits.KitsRoot10 ('bin/' + $compile.WindowsSDK + '/x64')))
+              $mt = Get-Item -LiteralPath (Join-Path $sdkBin 'mt.exe')
+              $rc = Get-Item -LiteralPath (Join-Path $sdkBin 'rc.exe')
+              if ($mt.Name -ine 'mt.exe' -or $rc.Name -ine 'rc.exe' -or $mt.PSIsContainer -or $rc.PSIsContainer -or $mt.Length -le 0 -or $rc.Length -le 0 -or
+                  [string]::IsNullOrWhiteSpace($mt.VersionInfo.FileVersion) -or [string]::IsNullOrWhiteSpace($rc.VersionInfo.FileVersion) -or
+                  -not [string]::Equals($mt.DirectoryName, $sdkBin, [StringComparison]::OrdinalIgnoreCase) -or
+                  -not [string]::Equals($rc.DirectoryName, $sdkBin, [StringComparison]::OrdinalIgnoreCase)) { throw 'Installed SDK tool resolution differs' }
+              $manifestReceipt.mt = @{ path = $mt.FullName; version = $mt.VersionInfo.FileVersion; sha256 = (Get-FileHash -LiteralPath $mt.FullName -Algorithm SHA256).Hash }
+              $resourceCommand = Read-ActualCommand $buildLines $rc.FullName
+              $resourceCommand.text | Set-Content -LiteralPath (Join-Path $evidenceDir 'actual-resource-compile-command.log') -Encoding utf8
+              $rcArguments = $resourceCommand.arguments
+              $languages = @($rcArguments | Where-Object { $_ -match '(?i)^/l(?:0x)?[0-9a-f]+$' })
+              if ($languages.Count -ne 1) { throw 'Actual resource compiler language missing/ambiguous' }
+              $resourceLanguage = [Convert]::ToUInt16(($languages[0] -replace '(?i)^/l(?:0x)?', ''), 16)
+              $rcInputs = @($rcArguments | Where-Object { [IO.Path]::GetExtension($_) -ieq '.rc' })
+              $rcOutputs = @($rcArguments | Where-Object { $_ -match '(?i)^/fo.+' })
+              if ($rcInputs.Count -ne 1 -or $rcOutputs.Count -ne 1 -or
+                  -not [string]::Equals([IO.Path]::GetFullPath($rcInputs[0], $buildDir), $generatedRc, [StringComparison]::OrdinalIgnoreCase) -or
+                  -not [string]::Equals([IO.Path]::GetFullPath($rcOutputs[0].Substring(3), $buildDir), $linkedResource, [StringComparison]::OrdinalIgnoreCase)) { throw 'Actual resource compiler/link inputs disagree' }
+              $manifestReceipt.linkPolicy = @{ manifestSwitches = $manifestSwitches; resource = $linkedResource
+                commandSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'actual-link-command.log') -Algorithm SHA256).Hash; responseFiles = $responseFiles.ToArray() }
+              $manifestReceipt.resourceCompiler = @{ path = $rc.FullName; version = $rc.VersionInfo.FileVersion
+                sha256 = (Get-FileHash -LiteralPath $rc.FullName -Algorithm SHA256).Hash; language = $resourceLanguage
+                commandSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'actual-resource-compile-command.log') -Algorithm SHA256).Hash }
+              $manifestReceipt.generated = @{ manifestSha256 = (Get-FileHash -LiteralPath $generatedManifest -Algorithm SHA256).Hash
+                rcSha256 = (Get-FileHash -LiteralPath $generatedRc -Algorithm SHA256).Hash; resSha256 = (Get-FileHash -LiteralPath $linkedResource -Algorithm SHA256).Hash }
+              $manifestReceipt.phase = 'SDK-extraction'
+              & $mt.FullName '-?' *> (Join-Path $evidenceDir 'mt-help.log')
+              $manifestReceipt.mtHelpExit = $LASTEXITCODE
+              $help = Get-Content -LiteralPath (Join-Path $evidenceDir 'mt-help.log') -Raw
+              if ($manifestReceipt.mtHelpExit -ne 0 -or $help -notmatch '(?i)inputresource' -or $help -notmatch '(?i)validate_manifest') { throw 'Installed SDK manifest tool syntax unavailable' }
+              $extractedPath = Join-Path $evidenceDir 'embedded-manifest.xml'
+              & $mt.FullName "-inputresource:$($exe.FullName);#1" "-out:$extractedPath" *> (Join-Path $evidenceDir 'mt-extract.log')
+              $manifestReceipt.extractExit = $LASTEXITCODE
+              if ($manifestReceipt.extractExit -ne 0 -or -not (Test-Path -LiteralPath $extractedPath -PathType Leaf)) { throw 'Actual resource1 extraction failed' }
+              & $mt.FullName '-manifest' $extractedPath '-validate_manifest' *> (Join-Path $evidenceDir 'mt-validate.log')
+              $manifestReceipt.validateExit = $LASTEXITCODE
+              if ($manifestReceipt.validateExit -ne 0) { throw 'Actual extracted manifest failed SDK validation' }
+              $manifestReceipt.phase = 'resource-inventory'
+              Add-Type @'
+          using System;
+          using System.Collections.Generic;
+          using System.ComponentModel;
+          using System.Runtime.ExceptionServices;
+          using System.Runtime.InteropServices;
+          public static class NativeProbeManifestRead {
+            public sealed class Entry { public bool Numeric; public ushort Id; public ushort Language; }
+            [UnmanagedFunctionPointer(CallingConvention.Winapi)] [return: MarshalAs(UnmanagedType.Bool)]
+            delegate bool Names(IntPtr module, IntPtr type, IntPtr name, IntPtr argument);
+            [UnmanagedFunctionPointer(CallingConvention.Winapi)] [return: MarshalAs(UnmanagedType.Bool)]
+            delegate bool Languages(IntPtr module, IntPtr type, IntPtr name, ushort language, IntPtr argument);
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)]
+            static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", ExactSpelling=true, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+            static extern bool FreeLibrary(IntPtr module);
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+            static extern bool EnumResourceNamesW(IntPtr module, IntPtr type, Names callback, IntPtr argument);
+            [DllImport("kernel32.dll", CharSet=CharSet.Unicode, ExactSpelling=true, SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+            static extern bool EnumResourceLanguagesW(IntPtr module, IntPtr type, IntPtr name, Languages callback, IntPtr argument);
+            public static Entry[] Read(string path) {
+              var entries=new List<Entry>();
+              IntPtr module=LoadLibraryExW(path,IntPtr.Zero,0x02|0x20);
+              if(module==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(),"Read-only PE resource mapping failed");
+              Exception primary=null,callbackException=null,releaseException=null;
+              int callbackError=0,closeError=0; bool closed=false;
+              try {
+                Names names=delegate(IntPtr m,IntPtr type,IntPtr name,IntPtr argument) {
+                  try {
+                    bool numeric=((ulong)name.ToInt64()>>16)==0;
+                    Languages languages=delegate(IntPtr lm,IntPtr lt,IntPtr ln,ushort language,IntPtr la) {
+                      try {
+                        entries.Add(new Entry { Numeric=numeric,Id=numeric?(ushort)name.ToInt64():(ushort)0,Language=language });
+                        return true;
+                      } catch(Exception error) {
+                        if(callbackException==null) callbackException=error;
+                        return false;
+                      }
+                    };
+                    bool ok=EnumResourceLanguagesW(m,type,name,languages,IntPtr.Zero);
+                    int languageError=ok?0:Marshal.GetLastWin32Error();
+                    GC.KeepAlive(languages);
+                    if(!ok && callbackError==0) callbackError=languageError;
+                    return ok;
+                  } catch(Exception error) {
+                    if(callbackException==null) callbackException=error;
+                    return false;
+                  }
+                };
+                bool enumerated=EnumResourceNamesW(module,new IntPtr(24),names,IntPtr.Zero);
+                int enumerationError=enumerated?0:Marshal.GetLastWin32Error();
+                GC.KeepAlive(names);
+                if(callbackException!=null) ExceptionDispatchInfo.Capture(callbackException).Throw();
+                if(!enumerated) throw new Win32Exception(callbackError!=0?callbackError:enumerationError,"RT_MANIFEST enumeration failed");
+              } catch(Exception error) { primary=error; }
+              finally {
+                try { closed=FreeLibrary(module); if(!closed) closeError=Marshal.GetLastWin32Error(); }
+                catch(Exception error) { releaseException=error; }
+              }
+              if(!closed && releaseException==null) releaseException=new Win32Exception(closeError,"Resource mapping release failed");
+              if(primary!=null && releaseException!=null) throw new AggregateException(primary,releaseException);
+              if(primary!=null) ExceptionDispatchInfo.Capture(primary).Throw();
+              if(releaseException!=null) ExceptionDispatchInfo.Capture(releaseException).Throw();
+              return entries.ToArray();
+            }
+          }
+          '@
+              $resources = @([NativeProbeManifestRead]::Read($exe.FullName))
+              $manifestReceipt.resources = @($resources | ForEach-Object { @{ numeric = $_.Numeric; id = $_.Id; language = $_.Language; type = 24 } })
+              if ($resources.Count -ne 1 -or -not $resources[0].Numeric -or $resources[0].Id -ne 1 -or $resources[0].Language -ne $resourceLanguage) { throw 'Actual PE does not contain exactly resource24/1 at the compiled language' }
+              $manifestReceipt.phase = 'privilege-DPI-XML'
+              function Test-ManifestContract([string]$path) {
+                $settings = [Xml.XmlReaderSettings]::new(); $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
+                $reader = [Xml.XmlReader]::Create($path, $settings)
+                $document = [Xml.XmlDocument]::new(); $document.XmlResolver = $null
+                $primary = $null; $cleanup = $null
+                try { $document.Load($reader) } catch { $primary = $_.Exception }
+                finally { try { $reader.Dispose() } catch { $cleanup = $_.Exception } }
+                if ($primary -and $cleanup) { throw [AggregateException]::new($primary, $cleanup) }
+                if ($primary) { [Runtime.ExceptionServices.ExceptionDispatchInfo]::Capture($primary).Throw() }
+                if ($cleanup) { throw $cleanup }
+                $names = [Xml.XmlNamespaceManager]::new($document.NameTable)
+                $names.AddNamespace('a1','urn:schemas-microsoft-com:asm.v1'); $names.AddNamespace('a3','urn:schemas-microsoft-com:asm.v3')
+                $names.AddNamespace('w05','http://schemas.microsoft.com/SMI/2005/WindowsSettings'); $names.AddNamespace('w16','http://schemas.microsoft.com/SMI/2016/WindowsSettings')
+                $root = $document.DocumentElement
+                $levels = $document.SelectNodes('/a1:assembly/a3:trustInfo/a3:security/a3:requestedPrivileges/a3:requestedExecutionLevel',$names)
+                $dpi = $document.SelectNodes('/a1:assembly/a3:application/a3:windowsSettings/w16:dpiAwareness',$names)
+                $fallback = $document.SelectNodes('/a1:assembly/a3:application/a3:windowsSettings/w05:dpiAware',$names)
+                if ($root.LocalName -ne 'assembly' -or $root.NamespaceURI -ne 'urn:schemas-microsoft-com:asm.v1' -or $root.GetAttribute('manifestVersion') -ne '1.0' -or
+                    $levels.Count -ne 1 -or $document.SelectNodes('//*[local-name()="requestedExecutionLevel"]').Count -ne 1 -or
+                    $levels[0].GetAttribute('level') -ne 'asInvoker' -or $levels[0].GetAttribute('uiAccess') -ne 'false' -or
+                    $dpi.Count -ne 1 -or $document.SelectNodes('//*[local-name()="dpiAwareness"]').Count -ne 1 -or $dpi[0].InnerText.Trim() -ne 'PerMonitorV2' -or
+                    $fallback.Count -ne 1 -or $document.SelectNodes('//*[local-name()="dpiAware"]').Count -ne 1 -or $fallback[0].InnerText.Trim() -ne 'true/pm') { throw 'Actual XML execution privilege/DPI authority differs' }
+              }
+              Test-ManifestContract $generatedManifest
+              Test-ManifestContract $extractedPath
+              $manifestReceipt.xmlSha256 = (Get-FileHash -LiteralPath $extractedPath -Algorithm SHA256).Hash
+              $manifestReceipt.binarySha256After = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
+              if ($manifestReceipt.binarySha256After -ne $manifestReceipt.binarySha256Before) { throw 'Read-only manifest inspection changed executable' }
+              $manifestReceipt.mtLogs = @{ help = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'mt-help.log') -Algorithm SHA256).Hash
+                extract = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'mt-extract.log') -Algorithm SHA256).Hash
+                validate = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'mt-validate.log') -Algorithm SHA256).Hash }
+              $manifestReceipt.status = 'PASS'; $manifestReceipt.phase = 'complete'
+            } catch { $manifestReceipt.status = 'FAIL'; $manifestReceipt.error = $_.Exception.ToString(); throw }
+            finally {
+              if ($null -eq $manifestReceipt.binarySha256After) {
+                try { $manifestReceipt.binarySha256After = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash }
+                catch { $manifestReceipt.binaryHashError = $_.Exception.ToString() }
+              }
+              $manifestReceipt.completedUtc = [DateTime]::UtcNow.ToString('o')
+              $manifestReceipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $evidenceDir 'embedded-manifest-verification.json') -Encoding utf8
+              $compile.embeddedManifestVerification = @{ status = $manifestReceipt.status; binarySha256 = $manifestReceipt.binarySha256Before
+                xmlSha256 = $manifestReceipt.xmlSha256; receiptSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest-verification.json') -Algorithm SHA256).Hash }
+            }
             $compile.binary = @{ sha256 = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash; size = $exe.Length }
+            if ($compile.embeddedManifestVerification.status -ne 'PASS' -or $compile.binary.sha256 -ne $compile.embeddedManifestVerification.binarySha256 -or
+                (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest-verification.json') -Algorithm SHA256).Hash -ne $compile.embeddedManifestVerification.receiptSha256 -or
+                (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash -ne $compile.embeddedManifestVerification.xmlSha256) { throw 'Manifest verification drift before packaging the executable' }
             $packageDir = Join-Path $evidenceDir 'msvc-probe'
             New-Item -ItemType Directory -Path (Join-Path $packageDir 'source') | Out-Null
             Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $packageDir 'nstu-native-uia-probe.exe')
@@ -206,6 +475,11 @@ jobs:
               if ((Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash -ne $entry.Value) { throw 'Packaged source drift' }
             }
             if ((Get-FileHash -LiteralPath (Join-Path $packageDir 'nstu-native-uia-probe.exe') -Algorithm SHA256).Hash -ne $compile.binary.sha256) { throw 'Packaged executable drift' }
+            foreach ($name in @('embedded-manifest.xml','embedded-manifest-verification.json')) {
+              Copy-Item -LiteralPath (Join-Path $evidenceDir $name) -Destination (Join-Path $packageDir $name)
+              if ((Get-FileHash -LiteralPath (Join-Path $packageDir $name) -Algorithm SHA256).Hash -ne
+                  (Get-FileHash -LiteralPath (Join-Path $evidenceDir $name) -Algorithm SHA256).Hash) { throw 'Packaged manifest evidence differs' }
+            }
             $compile.status = 'PASS'
             $compile.phase = 'complete'
           } catch {
@@ -231,6 +505,7 @@ jobs:
                 MSVC_COMPILE = 'PASS'; compiler = $compile.compiler; settings = $compile.settings
                 translationUnits = $compile.translationUnits; activeAssertionsProof = $compile.activeAssertionsProof
                 WindowsSDK = $compile.WindowsSDK; PlatformToolset = $compile.PlatformToolset
+                embeddedManifestVerification = $compile.embeddedManifestVerification; embeddedManifest = 'msvc-probe/embedded-manifest.xml'; embeddedManifestReceipt = 'msvc-probe/embedded-manifest-verification.json'
                 OS = $compile.OS; UIAutomationCore = $compile.UIAutomationCore; imports = $compile.imports
                 warningDiagnosticLineCount = $compile.warningDiagnosticLineCount; warningDiagnostics = $compile.warningDiagnostics
                 D9025LineCount = $compile.D9025LineCount; compileReceiptSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'compile.json') -Algorithm SHA256).Hash
@@ -290,6 +565,13 @@ jobs:
             $receipt.count = @($inventory.tests).Count
             if ($receipt.count -ne 10 -or @($inventory.tests.name | Sort-Object -Unique).Count -ne 10) { throw 'CTest cohort missing or duplicated' }
             $exe = (Resolve-Path -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe')).Path
+            $manifestPath = Join-Path $evidenceDir 'embedded-manifest-verification.json'
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+            if ($manifest.status -ne 'PASS' -or $manifest.checkoutSha -ne $inputs.checkoutSha -or $manifest.workflowSha256 -ne $inputs.workflowSha256 -or
+                $manifest.binarySha256Before -ne (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -or $manifest.binarySha256After -ne $manifest.binarySha256Before -or
+                $manifest.xmlSha256 -ne (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash) { throw 'Manifest qualification is not bound to the exact inventory executable' }
+            $receipt.embeddedManifestVerificationSha256 = $manifestHash
             foreach ($expected in $inputs.expectedTests) {
               $matchingTests = @($inventory.tests | Where-Object { $_.name -eq $expected.name })
               if ($matchingTests.Count -ne 1) { throw "Missing exact test: $($expected.name)" }
@@ -318,6 +600,15 @@ jobs:
           $result = [ordered]@{ status = 'RUNNING'; CI_OWN_WINDOW = 'RUNNING'; testExit = $null; results = @()
             ROOT_MSVC_DIAGNOSTIC = 'PENDING_SEPARATE_ROOT_ADMISSION'; ACTUAL_NSTU_PHYSICAL = 'NOT_TESTED' }
           try {
+            $manifestPath = Join-Path $evidenceDir 'embedded-manifest-verification.json'
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $manifestHash = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+            if ($manifest.status -ne 'PASS' -or $manifest.checkoutSha -ne $inputs.checkoutSha -or $manifest.workflowSha256 -ne $inputs.workflowSha256 -or
+                $manifest.binarySha256Before -ne $compile.binary.sha256 -or $manifest.binarySha256After -ne $compile.binary.sha256 -or
+                $manifestHash -ne $compile.embeddedManifestVerification.receiptSha256 -or
+                $manifest.xmlSha256 -ne (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash -or
+                (Get-FileHash -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe') -Algorithm SHA256).Hash -ne $compile.binary.sha256) { throw 'Manifest verification prerequisite failed before native execution' }
+            $result.embeddedManifestVerificationSha256 = $manifestHash
             & ctest --test-dir $buildDir -C Release --parallel 1 --stop-on-failure --no-tests=error --verbose `
               --output-log (Join-Path $evidenceDir 'ctest.log') --output-junit (Join-Path $evidenceDir 'ctest-junit.xml')
             $result.testExit = $LASTEXITCODE
@@ -440,6 +731,7 @@ jobs:
               if ((Get-FileHash -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $entry.Name) -Algorithm SHA256).Hash -ne $entry.Value) { throw 'Source changed during runtime' }
             }
             if ((Get-FileHash -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe') -Algorithm SHA256).Hash -ne $compile.binary.sha256) { throw 'Executable changed during runtime' }
+            if ((Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash -ne $manifestHash -or (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash -ne $manifest.xmlSha256) { throw 'Manifest evidence changed during runtime' }
             $result.status = 'PASS'; $result.CI_OWN_WINDOW = 'PASS'
           } catch {
             $result.status = 'FAIL'; $result.CI_OWN_WINDOW = 'FAIL'; $result.error = $_.Exception.Message; throw
@@ -473,6 +765,15 @@ jobs:
           if (Test-Path -LiteralPath $contextPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $contextPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
           $testPath = Join-Path $evidenceDir 'test-result.json'
           if (Test-Path -LiteralPath $testPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $testPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
+          $manifestPath = Join-Path $evidenceDir 'embedded-manifest-verification.json'
+          $final.EMBEDDED_MANIFEST = 'NOT_RUN'
+          if (Test-Path -LiteralPath $manifestPath) {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $final.EMBEDDED_MANIFEST = $manifest.status
+            $final.embeddedManifestVerificationSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
+            $final.embeddedManifestXmlSha256 = $manifest.xmlSha256
+            $final.embeddedManifestBinarySha256 = $manifest.binarySha256Before
+          }
           foreach ($file in Get-ChildItem -LiteralPath $evidenceDir -Recurse -File) {
             $final.evidence += @{ path = [IO.Path]::GetRelativePath($evidenceDir, $file.FullName); sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash; size = $file.Length }
           }

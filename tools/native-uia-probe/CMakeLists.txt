@@ -29,6 +29,8 @@ if(MSVC)
     target_compile_options(nstu-native-uia-probe PRIVATE
         "$<$<COMPILE_LANGUAGE:CXX>:/W4;/WX;/permissive-;/UNDEBUG;/utf-8>")
     set_property(TARGET nstu-native-uia-probe PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)
+    # Keep probe.rc as the sole executable manifest authority.
+    target_link_options(nstu-native-uia-probe PRIVATE "/MANIFEST:NO")
 else()
     target_compile_options(nstu-native-uia-probe PRIVATE
         "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-Werror;-UNDEBUG>")
