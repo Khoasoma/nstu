@@ -660,24 +660,214 @@ jobs:
             }
             $result.embeddedManifestVerificationSha256 = $manifestHash
             $result.assemblyIdentity = $manifest.extractedAssemblyIdentity
+            if (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log') -PathType Leaf) { throw 'Pre-existing native execution log; freshness unqualified' }
             & ctest --test-dir $buildDir -C Release --parallel 1 --stop-on-failure --no-tests=error --verbose `
               --output-log (Join-Path $evidenceDir 'ctest.log') --output-junit (Join-Path $evidenceDir 'ctest-junit.xml')
             $result.testExit = $LASTEXITCODE
             if ($result.testExit -ne 0) { throw "Real Native UIA CTest failure: $($result.testExit)" }
-            [xml]$junit = Get-Content -LiteralPath (Join-Path $evidenceDir 'ctest-junit.xml') -Raw
+            function Read-NativeLockedBytes([string]$path) {
+              $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+              try {
+                $buffer = [IO.MemoryStream]::new()
+                try { $stream.CopyTo($buffer); return ,$buffer.ToArray() } finally { $buffer.Dispose() }
+              } finally { $stream.Dispose() }
+            }
+            function Get-NativeByteHash([byte[]]$bytes) {
+              return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+            }
+            function Convert-NativeUtf8([byte[]]$bytes) {
+              $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+              if ($text.Length -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+              return $text
+            }
+            function Write-NativeNewBytes([string]$path, [byte[]]$bytes) {
+              $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+              try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+              $expected = Get-NativeByteHash $bytes
+              if ((Get-NativeByteHash (Read-NativeLockedBytes $path)) -cne $expected) { throw 'New evidence copy differs from consumed bytes' }
+              return $expected
+            }
+            function Save-NativeEvidenceSnapshot([string]$source, [string]$destination, [string]$name) {
+              $bytes = Read-NativeLockedBytes $source
+              $hash = Write-NativeNewBytes $destination $bytes
+              return @{ name=$name; source=$source; destination=$destination; sha256=$hash; size=$bytes.Length; bytes=$bytes }
+            }
+            function Get-NativeSnapshotMetadata($snapshot) {
+              return @{ name=$snapshot.name; path='ctest-consumed/' + $snapshot.name; sha256=$snapshot.sha256; size=$snapshot.size }
+            }
+            function Assert-NativeSnapshotsStable($snapshots) {
+              foreach ($snapshot in $snapshots) {
+                if ((Get-NativeByteHash (Read-NativeLockedBytes $snapshot.destination)) -cne $snapshot.sha256) {
+                  throw ('Consumed snapshot changed: ' + $snapshot.name)
+                }
+                if ((Get-NativeByteHash (Read-NativeLockedBytes $snapshot.source)) -cne $snapshot.sha256) {
+                  throw ('Consumed source changed: ' + $snapshot.name)
+                }
+              }
+            }
+            function Confirm-NativeInventoryProfile($inventory, $expectedTests, [string]$expectedExe, [string]$expectedDirectory) {
+              if (@($inventory.tests).Count -ne 10 -or @($expectedTests).Count -ne 10) { throw 'Consumed inventory cohort differs' }
+              $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+              $expectedSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+              foreach ($expected in $expectedTests) {
+                if (-not $expectedSeen.Add([string]$expected.name)) { throw 'Expected test identity duplicated' }
+              }
+              foreach ($registration in $inventory.tests) {
+                if (-not $seen.Add([string]$registration.name)) { throw 'Consumed inventory test duplicated' }
+                $expected = @($expectedTests | Where-Object { [string]::Equals($_.name, $registration.name, [StringComparison]::Ordinal) })
+                if ($expected.Count -ne 1 -or @($registration.command).Count -ne 2 -or
+                    $registration.command[1] -cne $expected[0].mode -or
+                    -not [string]::Equals(([string]$registration.command[0]).Replace('\','/'), $expectedExe.Replace('\','/'), [StringComparison]::OrdinalIgnoreCase)) {
+                  throw 'Consumed inventory name, executable or mode differs'
+                }
+                $properties = @($registration.properties)
+                $timeouts = @($properties | Where-Object { $_.name -eq 'TIMEOUT' })
+                $directories = @($properties | Where-Object { $_.name -eq 'WORKING_DIRECTORY' })
+                if ($timeouts.Count -ne 1 -or [double]$timeouts[0].value -ne $expected[0].timeout -or
+                    $directories.Count -ne 1 -or
+                    -not [string]::Equals(([string]$directories[0].value).Replace('\','/'), $expectedDirectory.Replace('\','/'), [StringComparison]::OrdinalIgnoreCase)) {
+                  throw 'Consumed inventory TIMEOUT or working directory differs'
+                }
+                if (@($properties | Where-Object { $_.name -eq 'SKIP_RETURN_CODE' -or
+                      ($_.name -in @('DISABLED','WILL_FAIL') -and $_.value) }).Count) {
+                  throw 'Consumed inventory skip, disabled or WILL_FAIL override present'
+                }
+              }
+              if ($seen.Count -ne $expectedSeen.Count) { throw 'Consumed inventory identities incomplete' }
+            }
+
+            function Read-NativeCTestFullOutputs([string]$lastText, $inventory, $expectedTests, $cases) {
+              $separator = '----------------------------------------------------------'
+              $frame = '(?m)^(?<index>\d+)/(?<total>\d+) Testing: (?<name>native_uia_[a-z_]+)\r?\n' +
+                '\k<index>/\k<total> Test: \k<name>\r?\n' +
+                'Command: (?<command>[^\r\n]+)\r?\nDirectory: (?<directory>[^\r\n]+)\r?\n' +
+                '"\k<name>" start time: [^\r\n]+\r?\nOutput:\r?\n' + $separator + '\r?\n' +
+                '(?<output>[\s\S]*?)^<end of output>\r?\n' +
+                'Test time = +(?<seconds>\d+(?:\.\d+)?) sec\r?\n' + $separator + '\r?\n' +
+                'Test Passed\.\r?\n"\k<name>" end time: [^\r\n]+\r?\n' +
+                '"\k<name>" time elapsed: \d+:\d+:\d+\r?\n' + $separator + '\r?\n'
+              $blocks = [regex]::Matches($lastText, $frame, [Text.RegularExpressions.RegexOptions]::None,
+                [TimeSpan]::FromSeconds(2))
+              if ($blocks.Count -ne 10 -or @($inventory.tests).Count -ne 10 -or
+                  @($expectedTests).Count -ne 10 -or @($cases).Count -ne 10) { throw 'Complete CTest cohort unavailable' }
+              # Reject duplicate, partial, nested, substituted or truncated frames. No JUnit/log fallback.
+              foreach ($marker in @('^\d+/\d+ Testing: ', '^\d+/\d+ Test: ', '^Command: ', '^Directory: ',
+                  '^Output:\r?$', '^<end of output>\r?$', '^Test Passed\.\r?$')) {
+                if ([regex]::Matches($lastText, $marker, [Text.RegularExpressions.RegexOptions]::Multiline).Count -ne 10) {
+                  throw 'Ambiguous or incomplete CTest log framing'
+                }
+              }
+              if ($lastText -match '(?m)^Test Failed\.|\[This part of the test output was removed since it') {
+                throw 'Failed or truncated full CTest log'
+              }
+              if ([regex]::Matches($lastText, '(?m)^Start testing: [^\r\n]+\r?$').Count -ne 1 -or
+                  [regex]::Matches($lastText, '(?m)^End testing: [^\r\n]+\r?$').Count -ne 1) {
+                throw 'CTest session boundaries missing or ambiguous'
+              }
+              $sessionStart = [regex]::Match($lastText, '(?m)^Start testing: [^\r\n]+\r?$')
+              $sessionEnd = [regex]::Match($lastText, '(?m)^End testing: [^\r\n]+\r?$')
+              if ($blocks[0].Index -le $sessionStart.Index -or
+                  $blocks[$blocks.Count - 1].Index + $blocks[$blocks.Count - 1].Length -gt $sessionEnd.Index) {
+                throw 'CTest blocks escape their completed session'
+              }
+              $outputs = [Collections.Generic.Dictionary[string,string]]::new([StringComparer]::Ordinal)
+              $identities = [Collections.Generic.HashSet[int]]::new()
+              $records = @()
+              foreach ($block in $blocks) {
+                $index = [int]$block.Groups['index'].Value
+                $name = $block.Groups['name'].Value
+                if ([int]$block.Groups['total'].Value -ne 10 -or $index -lt 1 -or $index -gt 10 -or
+                    -not $identities.Add($index) -or $outputs.ContainsKey($name)) { throw 'CTest identity duplicated or invalid' }
+                $registration = $inventory.tests[$index - 1]
+                $expected = @($expectedTests | Where-Object { [string]::Equals($_.name, $name, [StringComparison]::Ordinal) })
+                $case = @($cases | Where-Object { [string]::Equals($_.GetAttribute('name'), $name, [StringComparison]::Ordinal) })
+                if ($expected.Count -ne 1 -or $case.Count -ne 1 -or
+                    -not [string]::Equals($registration.name, $name, [StringComparison]::Ordinal) -or
+                    $case[0].GetAttribute('status') -cne 'run' -or
+                    $case[0].GetAttribute('classname') -cne $name -or
+                    @($registration.command).Count -ne 2 -or $registration.command[1] -cne $expected[0].mode) {
+                  throw 'CTest log/JUnit/inventory exact identity differs'
+                }
+                foreach ($argument in $registration.command) {
+                  if ([string]$argument -match '["\r\n]') { throw 'Unsupported CTest command encoding' }
+                }
+                $expectedCommand = ($registration.command | ForEach-Object { '"' + $_ + '"' }) -join ' '
+                $directories = @($registration.properties | Where-Object { $_.name -ceq 'WORKING_DIRECTORY' })
+                if ($directories.Count -ne 1 -or
+                    -not [string]::Equals($block.Groups['command'].Value, $expectedCommand, [StringComparison]::Ordinal) -or
+                    -not [string]::Equals($block.Groups['directory'].Value, $directories[0].value, [StringComparison]::Ordinal)) {
+                  throw 'CTest log command or working directory substituted'
+                }
+                $fullOutput = $block.Groups['output'].Value
+                if (-not $fullOutput.Trim()) { throw 'Complete native case output missing' }
+                $outputs.Add($name, $fullOutput)
+                $records += @{ name = $name; testIndex = $index; command = @($registration.command)
+                  directory = $directories[0].value; outputOffset = $block.Groups['output'].Index
+                  outputCharacters = $block.Groups['output'].Length
+                  outputUtf8Bytes = [Text.Encoding]::UTF8.GetByteCount($fullOutput) }
+              }
+              return @{ outputs = $outputs; records = $records; source = 'ctest-consumed/LastTest.log' }
+            }
+
+            # Complete raw inputs are exclusively created in a consumed namespace. All parsing uses their held bytes.
+            $consumedDir = Join-Path $evidenceDir 'ctest-consumed'
+            New-Item -ItemType Directory -Path $consumedDir | Out-Null
+            $consumedSnapshots = @()
+            $result.evidenceExtraction = @{ status='RUNNING'; source='ctest-consumed/LastTest.log'; snapshots=@(); records=@() }
+            $sources = @(
+              @{ name='inventory-check.json'; path=(Join-Path $evidenceDir 'inventory-check.json') },
+              @{ name='test-inventory.json'; path=(Join-Path $evidenceDir 'test-inventory.json') },
+              @{ name='ctest-junit.xml'; path=(Join-Path $evidenceDir 'ctest-junit.xml') },
+              @{ name='LastTest.log'; path=(Join-Path $buildDir 'Testing/Temporary/LastTest.log') }
+            )
+            foreach ($source in $sources) {
+              $snapshot = Save-NativeEvidenceSnapshot $source.path (Join-Path $consumedDir $source.name) $source.name
+              $consumedSnapshots += $snapshot
+              $result.evidenceExtraction.snapshots += Get-NativeSnapshotMetadata $snapshot
+            }
+            $captureManifest = @{ checkoutSha=$inputs.checkoutSha; workflowSha256=$inputs.workflowSha256
+              runId=$inputs.runId; attempt=$inputs.attempt; binarySha256=$compile.binary.sha256
+              snapshots=$result.evidenceExtraction.snapshots }
+            $captureManifestBytes = [Text.UTF8Encoding]::new($false).GetBytes(($captureManifest | ConvertTo-Json -Depth 8))
+            $result.evidenceExtraction.captureManifestSha256 = Write-NativeNewBytes (Join-Path $consumedDir 'manifest.json') $captureManifestBytes
+            $inventoryReceipt = (Convert-NativeUtf8 $consumedSnapshots[0].bytes) | ConvertFrom-Json
+            if ($inventoryReceipt.status -cne 'PASS' -or $inventoryReceipt.inventoryExit -ne 0 -or
+                $inventoryReceipt.count -ne 10 -or $inventoryReceipt.embeddedManifestVerificationSha256 -cne $manifestHash) {
+              throw 'Consumed inventory qualification receipt differs'
+            }
+            $inventory = (Convert-NativeUtf8 $consumedSnapshots[1].bytes) | ConvertFrom-Json
+            Confirm-NativeInventoryProfile $inventory $inputs.expectedTests (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe') $buildDir
+            [xml]$junit = Convert-NativeUtf8 $consumedSnapshots[2].bytes
             $cases = @($junit.SelectNodes('//*[local-name()="testcase"]'))
             if ($cases.Count -ne 10 -or @($cases | ForEach-Object { $_.GetAttribute('name') } | Sort-Object -Unique).Count -ne 10 -or
-                $junit.SelectNodes('//*[local-name()="skipped" or local-name()="failure" or local-name()="error"]').Count) { throw 'JUnit does not prove ten executed successful cases' }
-            if (-not (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log') -PathType Leaf)) { throw 'Complete CTest temporary output missing' }
-            $outputs = @{}
-            foreach ($expected in $inputs.expectedTests) {
-              $case = @($cases | Where-Object { $_.GetAttribute('name') -eq $expected.name })
-              if ($case.Count -ne 1 -or -not $case[0].HasAttribute('time')) { throw 'Missing named result/duration' }
-              $outputNode = $case[0].SelectSingleNode('*[local-name()="system-out"]')
-              if (-not $outputNode -or -not $outputNode.InnerText.Trim()) { throw 'Native case output missing' }
-              $outputs[$expected.name] = $outputNode.InnerText
-              $result.results += @{ name = $expected.name; status = 'PASS'; seconds = [double]::Parse($case[0].GetAttribute('time'), [Globalization.CultureInfo]::InvariantCulture) }
+                $junit.SelectNodes('//*[local-name()="skipped" or local-name()="failure" or local-name()="error"]').Count) {
+              throw 'Consumed JUnit does not prove ten executed successful cases'
             }
+            $lastText = Convert-NativeUtf8 $consumedSnapshots[3].bytes
+            $extraction = Read-NativeCTestFullOutputs $lastText $inventory $inputs.expectedTests $cases
+            $outputs = $extraction.outputs
+            $caseOutputDir = Join-Path $evidenceDir 'native-case-output'
+            New-Item -ItemType Directory -Path $caseOutputDir | Out-Null
+            foreach ($record in $extraction.records) {
+              $record.path = 'native-case-output/' + $record.name + '.log'
+              $outputBytes = [Text.UTF8Encoding]::new($false).GetBytes($outputs[$record.name])
+              $record.sha256 = Write-NativeNewBytes (Join-Path $caseOutputDir ($record.name + '.log')) $outputBytes
+              $case = @($cases | Where-Object { [string]::Equals($_.GetAttribute('name'), $record.name, [StringComparison]::Ordinal) })
+              if ($case.Count -ne 1 -or -not $case[0].HasAttribute('time')) { throw 'Missing named result/duration' }
+              $seconds = [double]::Parse($case[0].GetAttribute('time'), [Globalization.CultureInfo]::InvariantCulture)
+              if ([double]::IsNaN($seconds) -or [double]::IsInfinity($seconds) -or $seconds -lt 0) { throw 'Invalid consumed JUnit duration' }
+              $result.results += @{ name=$record.name; status='PASS'; seconds=$seconds }
+            }
+            $result.evidenceExtraction.records = $extraction.records
+            $result.evidenceExtraction.inventorySha256 = $consumedSnapshots[1].sha256
+            $result.evidenceExtraction.junitSha256 = $consumedSnapshots[2].sha256
+            $result.evidenceExtraction.sourceSha256 = $consumedSnapshots[3].sha256
+            $result.evidenceExtraction.CTest = $compile.ctestVersion
+            $result.evidenceExtraction.JUnitUse = 'consumed execution status and duration only'
+            Assert-NativeSnapshotsStable $consumedSnapshots
+            if ((Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $consumedDir 'manifest.json'))) -cne
+                $result.evidenceExtraction.captureManifestSha256) { throw 'Consumed capture manifest changed' }
+            $result.evidenceExtraction.status = 'PASS'
 
             # Adjudicate only the native focus evidence actually printed by the frozen source.
             function Read-NativeFocusEpoch([string]$text) {
@@ -797,14 +987,162 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
           New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
-          $temporary = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release/Testing/Temporary'
-          if (Test-Path -LiteralPath $temporary -PathType Container) {
-            Copy-Item -LiteralPath $temporary -Destination (Join-Path $evidenceDir 'ctest-temporary') -Recurse
+          function Read-NativeLockedBytes([string]$path) {
+            $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+              $buffer = [IO.MemoryStream]::new()
+              try { $stream.CopyTo($buffer); return ,$buffer.ToArray() } finally { $buffer.Dispose() }
+            } finally { $stream.Dispose() }
           }
+          function Get-NativeByteHash([byte[]]$bytes) {
+            return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+          }
+          function Convert-NativeUtf8([byte[]]$bytes) {
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+            if ($text.Length -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+            return $text
+          }
+          function Write-NativeNewBytes([string]$path, [byte[]]$bytes) {
+            $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+            $expected = Get-NativeByteHash $bytes
+            if ((Get-NativeByteHash (Read-NativeLockedBytes $path)) -cne $expected) { throw 'New evidence copy differs from consumed bytes' }
+            return $expected
+          }
+          function Save-NativeEvidenceSnapshot([string]$source, [string]$destination, [string]$name) {
+            $bytes = Read-NativeLockedBytes $source
+            $hash = Write-NativeNewBytes $destination $bytes
+            return @{ name=$name; source=$source; destination=$destination; sha256=$hash; size=$bytes.Length; bytes=$bytes }
+          }
+          function Get-NativeSnapshotMetadata($snapshot) {
+            return @{ name=$snapshot.name; path='ctest-consumed/' + $snapshot.name; sha256=$snapshot.sha256; size=$snapshot.size }
+          }
+          function Assert-NativeSnapshotsStable($snapshots) {
+            foreach ($snapshot in $snapshots) {
+              if ((Get-NativeByteHash (Read-NativeLockedBytes $snapshot.destination)) -cne $snapshot.sha256) {
+                throw ('Consumed snapshot changed: ' + $snapshot.name)
+              }
+              if ((Get-NativeByteHash (Read-NativeLockedBytes $snapshot.source)) -cne $snapshot.sha256) {
+                throw ('Consumed source changed: ' + $snapshot.name)
+              }
+            }
+          }
+          function Confirm-NativeInventoryProfile($inventory, $expectedTests, [string]$expectedExe, [string]$expectedDirectory) {
+            if (@($inventory.tests).Count -ne 10 -or @($expectedTests).Count -ne 10) { throw 'Consumed inventory cohort differs' }
+            $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            $expectedSeen = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+            foreach ($expected in $expectedTests) {
+              if (-not $expectedSeen.Add([string]$expected.name)) { throw 'Expected test identity duplicated' }
+            }
+            foreach ($registration in $inventory.tests) {
+              if (-not $seen.Add([string]$registration.name)) { throw 'Consumed inventory test duplicated' }
+              $expected = @($expectedTests | Where-Object { [string]::Equals($_.name, $registration.name, [StringComparison]::Ordinal) })
+              if ($expected.Count -ne 1 -or @($registration.command).Count -ne 2 -or
+                  $registration.command[1] -cne $expected[0].mode -or
+                  -not [string]::Equals(([string]$registration.command[0]).Replace('\','/'), $expectedExe.Replace('\','/'), [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Consumed inventory name, executable or mode differs'
+              }
+              $properties = @($registration.properties)
+              $timeouts = @($properties | Where-Object { $_.name -eq 'TIMEOUT' })
+              $directories = @($properties | Where-Object { $_.name -eq 'WORKING_DIRECTORY' })
+              if ($timeouts.Count -ne 1 -or [double]$timeouts[0].value -ne $expected[0].timeout -or
+                  $directories.Count -ne 1 -or
+                  -not [string]::Equals(([string]$directories[0].value).Replace('\','/'), $expectedDirectory.Replace('\','/'), [StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Consumed inventory TIMEOUT or working directory differs'
+              }
+              if (@($properties | Where-Object { $_.name -eq 'SKIP_RETURN_CODE' -or
+                    ($_.name -in @('DISABLED','WILL_FAIL') -and $_.value) }).Count) {
+                throw 'Consumed inventory skip, disabled or WILL_FAIL override present'
+              }
+            }
+            if ($seen.Count -ne $expectedSeen.Count) { throw 'Consumed inventory identities incomplete' }
+          }
+
+          $temporary = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release/Testing/Temporary'
+          $collection = @{ status='RUNNING'; finalSources=@(); consumedChecks=@(); driftedInputs=@(); errors=@() }
+          $test = $null
+          $testPath = Join-Path $evidenceDir 'test-result.json'
+          if (Test-Path -LiteralPath $testPath -PathType Leaf) {
+            try {
+              $testBytes = Read-NativeLockedBytes $testPath
+              $collection.testResultSha256 = Get-NativeByteHash $testBytes
+              $test = (Convert-NativeUtf8 $testBytes) | ConvertFrom-Json
+            } catch { $collection.errors += 'Cannot read stable test-result bytes: ' + $_.Exception.Message }
+          }
+          $finalByName = @{}
+          try {
+            $finalLogDir = Join-Path $evidenceDir 'ctest-final'
+            New-Item -ItemType Directory -Path $finalLogDir | Out-Null
+            $finalSources = @(
+              @{ name='inventory-check.json'; source=(Join-Path $evidenceDir 'inventory-check.json'); relative='inventory-check.json' },
+              @{ name='test-inventory.json'; source=(Join-Path $evidenceDir 'test-inventory.json'); relative='test-inventory.json' },
+              @{ name='ctest-junit.xml'; source=(Join-Path $evidenceDir 'ctest-junit.xml'); relative='ctest-junit.xml' }
+            )
+            if (Test-Path -LiteralPath $temporary -PathType Container) {
+              foreach ($entry in Get-ChildItem -LiteralPath $temporary -Recurse -File -Force) {
+                $relative = [IO.Path]::GetRelativePath($temporary, $entry.FullName).Replace('\','/')
+                $finalSources += @{ name=if ($relative -ceq 'LastTest.log') { 'LastTest.log' } else { 'temporary/' + $relative }
+                  source=$entry.FullName; relative=if ($relative -ceq 'LastTest.log') { 'LastTest.log' } else { 'temporary/' + $relative } }
+              }
+            }
+            foreach ($source in $finalSources) {
+              if (-not (Test-Path -LiteralPath $source.source -PathType Leaf)) {
+                $collection.finalSources += @{ name=$source.name; status='NOT_OBSERVED' }
+                continue
+              }
+              try {
+                $destination = Join-Path $finalLogDir $source.relative
+                New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($destination)) -Force | Out-Null
+                $snapshot = Save-NativeEvidenceSnapshot $source.source $destination $source.name
+                $metadata = @{ name=$source.name; path='ctest-final/' + $source.relative; sha256=$snapshot.sha256; size=$snapshot.size; status='CAPTURED' }
+                $collection.finalSources += $metadata
+                $finalByName[$source.name] = $metadata
+              } catch { $collection.errors += 'Final source capture failed for ' + $source.name + ': ' + $_.Exception.Message }
+            }
+            foreach ($record in @($test.evidenceExtraction.snapshots)) {
+              if ($null -eq $record) { continue }
+              if ($record.name -cnotin @('inventory-check.json','test-inventory.json','ctest-junit.xml','LastTest.log') -or
+                  $record.path -cne ('ctest-consumed/' + $record.name)) {
+                $collection.errors += 'Consumed snapshot metadata identity differs'
+                continue
+              }
+              try {
+                $actual = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir $record.path))
+                $collection.consumedChecks += @{ name=$record.name; expectedSha256=$record.sha256; actualSha256=$actual; preserved=$actual -ceq $record.sha256 }
+                if ($actual -cne $record.sha256) { $collection.errors += 'Consumed snapshot drift: ' + $record.name }
+                if (-not $finalByName.ContainsKey($record.name) -or $finalByName[$record.name].sha256 -cne $record.sha256) {
+                  $collection.driftedInputs += $record.name
+                  $collection.errors += 'Final source absent or differs from consumed bytes: ' + $record.name
+                }
+              } catch { $collection.errors += 'Consumed snapshot check failed for ' + $record.name + ': ' + $_.Exception.Message }
+            }
+            if ($test.evidenceExtraction.captureManifestSha256) {
+              try {
+                $actual = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir 'ctest-consumed/manifest.json'))
+                $collection.consumedManifestSha256 = $actual
+                if ($actual -cne $test.evidenceExtraction.captureManifestSha256) { $collection.errors += 'Consumed capture manifest drift' }
+              } catch { $collection.errors += 'Consumed capture manifest unavailable: ' + $_.Exception.Message }
+            }
+            foreach ($record in @($test.evidenceExtraction.records)) {
+              if ($null -eq $record) { continue }
+              try {
+                if ($record.name -notmatch '^native_uia_[a-z_]+$' -or $record.path -cne ('native-case-output/' + $record.name + '.log')) { throw 'Derived output identity differs' }
+                if ((Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir $record.path))) -cne $record.sha256) { throw 'Derived output differs from consumed bytes' }
+              } catch { $collection.errors += 'Derived output check failed: ' + $_.Exception.Message }
+            }
+          } catch { $collection.errors += 'Final collection failed: ' + $_.Exception.Message }
+          $collection.status = if ($collection.errors.Count) { 'FAIL' } else { 'PASS' }
+          $collectionBytes = [Text.UTF8Encoding]::new($false).GetBytes(($collection | ConvertTo-Json -Depth 10))
+          $collectionHash = Write-NativeNewBytes (Join-Path $evidenceDir 'ctest-retention.json') $collectionBytes
+
           $final = [ordered]@{ MSVC_COMPILE = 'NOT_RUN'; CI_OWN_WINDOW = 'NOT_RUN'
             ROOT_MSVC_DIAGNOSTIC = 'PENDING_SEPARATE_ROOT_ADMISSION'; ACTUAL_NSTU_PHYSICAL = 'NOT_TESTED'
             checkoutSha = $env:GITHUB_SHA; runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT
             evidence = @(); warningDiagnosticLineCount = $null; D9025LineCount = $null }
+          $final.EVIDENCE_RETENTION = $collection.status
+          $final.ctestRetentionReceiptSha256 = $collectionHash
+          $final.testResultConsumedSha256 = $collection.testResultSha256
+          $final.ctestConsumedManifestObservedSha256 = $collection.consumedManifestSha256
           $compilePath = Join-Path $evidenceDir 'compile.json'
           if (Test-Path -LiteralPath $compilePath) {
             $compile = Get-Content -LiteralPath $compilePath -Raw | ConvertFrom-Json
@@ -814,8 +1152,7 @@ jobs:
           }
           $contextPath = Join-Path $evidenceDir 'context.json'
           if (Test-Path -LiteralPath $contextPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $contextPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
-          $testPath = Join-Path $evidenceDir 'test-result.json'
-          if (Test-Path -LiteralPath $testPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $testPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
+          if ($test) { $final.CI_OWN_WINDOW = $test.CI_OWN_WINDOW }
           $manifestPath = Join-Path $evidenceDir 'embedded-manifest-verification.json'
           $final.EMBEDDED_MANIFEST = 'NOT_RUN'
           $final.ASSEMBLY_IDENTITY = 'NOT_RUN'
@@ -832,11 +1169,12 @@ jobs:
             $final.evidence += @{ path = [IO.Path]::GetRelativePath($evidenceDir, $file.FullName); sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash; size = $file.Length }
           }
           $final | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $evidenceDir 'final-status.json') -Encoding utf8
-          if ($final.MSVC_COMPILE -eq 'PASS' -and $final.CI_OWN_WINDOW -eq 'PASS') {
+          if ($final.MSVC_COMPILE -eq 'PASS' -and $final.CI_OWN_WINDOW -eq 'PASS' -and $final.EVIDENCE_RETENTION -eq 'PASS') {
             "Standalone Native UIA MSVC Release compile qualified; ten CI own-window cases passed at this recorded runner context. Compiler diagnostic lines: $($final.warningDiagnosticLineCount), including D9025: $($final.D9025LineCount). Root-owned MSVC diagnostic adjudication pending the exact artifact. Actual NSTU / AT / TextPattern / IME / DPI / physical NOT TESTED." >> $env:GITHUB_STEP_SUMMARY
           } else {
-            "Standalone Native UIA evidence: MSVC_COMPILE=$($final.MSVC_COMPILE), CI_OWN_WINDOW=$($final.CI_OWN_WINDOW). Compiler diagnostic lines: $($final.warningDiagnosticLineCount), including D9025: $($final.D9025LineCount). Failed/unexecuted phases remain unqualified. Actual NSTU / AT / physical NOT TESTED." >> $env:GITHUB_STEP_SUMMARY
+            "Standalone Native UIA evidence: MSVC_COMPILE=$($final.MSVC_COMPILE), CI_OWN_WINDOW=$($final.CI_OWN_WINDOW), EVIDENCE_RETENTION=$($final.EVIDENCE_RETENTION). Compiler diagnostic lines: $($final.warningDiagnosticLineCount), including D9025: $($final.D9025LineCount). Failed/unexecuted phases remain unqualified. Actual NSTU / AT / physical NOT TESTED." >> $env:GITHUB_STEP_SUMMARY
           }
+          if ($collection.status -cne 'PASS') { throw 'Native evidence retention failed; original consumed and final snapshots preserved' }
 
       - name: Upload qualification evidence and exact MSVC probe package
         if: always()
