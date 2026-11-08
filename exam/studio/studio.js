@@ -127,6 +127,48 @@
     }
   }
 
+  function renderDocumentTitle(value) {
+    const text = typeof value === "string" ? value : "";
+    el("studio-document-title-summary").textContent = text || "Document title";
+    el("studio-document-title-summary").setAttribute("aria-label", text ? `Document title: ${text}` : "Document title");
+    el("studio-document-title-full").textContent = text;
+    layoutDocumentTitle();
+  }
+
+  function layoutDocumentTitle() {
+    const bar = el("studio-titlebar");
+    const title = el("studio-document-title");
+    const bounds = bar.getBoundingClientRect();
+    const left = el("studio-brand-section").getBoundingClientRect();
+    const right = el("btn-studio-theme").getBoundingClientRect();
+    const gap = parseFloat(getComputedStyle(bar).columnGap);
+    const minimum = parseFloat(getComputedStyle(title).getPropertyValue("--studio-title-minimum-width"));
+    const available = bounds.width - 2 * Math.max(left.left + left.width - bounds.left, bounds.left + bounds.width - right.left) - 2 * gap;
+    bar.classList.toggle("title-collision", available < minimum);
+    title.style.maxWidth = available >= minimum ? `${available}px` : "100%";
+  }
+
+  function handleDocumentTitleKey(event) {
+    const title = el("studio-document-title");
+    if (event.defaultPrevented || event.key !== "Escape" || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey ||
+        !title.open || el("export-modal").classList.contains("open")) return;
+    const summary = el("studio-document-title-summary");
+    const returnToSummary = title.contains(document.activeElement) && document.activeElement !== summary;
+    title.open = false;
+    if (returnToSummary) summary.focus({ preventScroll: true });
+    event.preventDefault();
+  }
+
+  function handleDocumentTitlePointer(event) {
+    const title = el("studio-document-title");
+    if (title.open && !el("export-modal").classList.contains("open") && !title.contains(event.target)) title.open = false;
+  }
+
+  function handleDocumentTitleFocusOut(event) {
+    const title = el("studio-document-title");
+    if (title.open && !el("export-modal").classList.contains("open") && event.relatedTarget && !title.contains(event.relatedTarget)) title.open = false;
+  }
+
   /* ========================================================================
      Editor: Render and Synchronize
      ======================================================================== */
@@ -135,6 +177,7 @@
     // Bind exam settings
     el("exam-id").value = currentExam.id || "";
     el("exam-title").value = currentExam.title || "";
+    renderDocumentTitle(currentExam.title);
     el("exam-subject").value = currentExam.subject || "";
     renderNumericField("exam-duration");
     el("exam-allowed-origins").value = Array.isArray(currentExam.allowedOrigins)
@@ -1318,6 +1361,7 @@
     } else {
       delete currentExam.allowedOrigins;
     }
+    renderDocumentTitle(currentExam.title);
   }
 
   let exportGeneration = 0;
@@ -1549,6 +1593,7 @@
       document.documentElement.dataset.theme = dark ? "dark" : "light";
       themeButton.textContent = dark ? "Light appearance" : "Dark appearance";
       themeButton.setAttribute("aria-label", `Switch to ${dark ? "light" : "dark"} appearance`);
+      layoutDocumentTitle();
     };
     let storedTheme = "light";
     try { storedTheme = localStorage.getItem("nstu-studio-theme") || "light"; } catch { /* Appearance stays local when storage is unavailable. */ }
@@ -1586,6 +1631,11 @@
     el("btn-close-export").addEventListener("click", closeExportDialog);
     el("btn-cancel-export").addEventListener("click", closeExportDialog);
     document.addEventListener("keydown", handleExportDialogKey);
+    document.addEventListener("keydown", handleDocumentTitleKey);
+    document.addEventListener("pointerdown", handleDocumentTitlePointer);
+    el("studio-document-title").addEventListener("focusout", handleDocumentTitleFocusOut);
+    el("exam-title").addEventListener("input", (event) => renderDocumentTitle(event.target.value));
+    window.addEventListener("resize", layoutDocumentTitle);
     window.addEventListener("resize", queueAuthoringFocusReveal);
     window.addEventListener("resize", queueMatchingFocusReveal);
     window.addEventListener("resize", queueChoiceFocusReveal);
