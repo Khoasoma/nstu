@@ -151,7 +151,8 @@
   function handleDocumentTitleKey(event) {
     const title = el("studio-document-title");
     if (event.defaultPrevented || event.key !== "Escape" || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey ||
-        !title.open || el("export-modal").classList.contains("open")) return;
+        !title.open || el("export-modal").classList.contains("open") ||
+        (el("studio-file-menu").open && el("studio-file-menu").contains(document.activeElement))) return;
     const summary = el("studio-document-title-summary");
     const returnToSummary = title.contains(document.activeElement) && document.activeElement !== summary;
     title.open = false;
@@ -167,6 +168,34 @@
   function handleDocumentTitleFocusOut(event) {
     const title = el("studio-document-title");
     if (title.open && !el("export-modal").classList.contains("open") && event.relatedTarget && !title.contains(event.relatedTarget)) title.open = false;
+  }
+
+  function closeFileDisclosureForCommand() {
+    const file = el("studio-file-menu");
+    if (!file.open || el("export-modal").classList.contains("open")) return;
+    file.open = false;
+    el("studio-file-summary").focus({ preventScroll: true });
+  }
+
+  function handleFileDisclosureKey(event) {
+    const file = el("studio-file-menu");
+    if (event.defaultPrevented || event.key !== "Escape" || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey ||
+        !file.open || el("export-modal").classList.contains("open")) return;
+    const summary = el("studio-file-summary");
+    const returnToSummary = file.contains(document.activeElement) && document.activeElement !== summary;
+    file.open = false;
+    if (returnToSummary) summary.focus({ preventScroll: true });
+    event.preventDefault();
+  }
+
+  function handleFileDisclosurePointer(event) {
+    const file = el("studio-file-menu");
+    if (file.open && !el("export-modal").classList.contains("open") && !file.contains(event.target)) file.open = false;
+  }
+
+  function handleFileDisclosureFocusOut(event) {
+    const file = el("studio-file-menu");
+    if (file.open && !el("export-modal").classList.contains("open") && event.relatedTarget && !file.contains(event.relatedTarget)) file.open = false;
   }
 
   /* ========================================================================
@@ -1609,6 +1638,8 @@
     el("btn-preview-exit").addEventListener("click", () => setMode("editor"));
 
     // Header actions
+    el("btn-load-sample").addEventListener("click", closeFileDisclosureForCommand);
+    el("btn-open-file").addEventListener("click", closeFileDisclosureForCommand);
     el("btn-load-sample").addEventListener("click", () => {
       currentExam = JSON.parse(JSON.stringify(DEFAULT_EXAM));
       activeQuestionIndex = 0;
@@ -1634,6 +1665,9 @@
     document.addEventListener("keydown", handleDocumentTitleKey);
     document.addEventListener("pointerdown", handleDocumentTitlePointer);
     el("studio-document-title").addEventListener("focusout", handleDocumentTitleFocusOut);
+    document.addEventListener("keydown", handleFileDisclosureKey);
+    document.addEventListener("pointerdown", handleFileDisclosurePointer);
+    el("studio-file-menu").addEventListener("focusout", handleFileDisclosureFocusOut);
     el("exam-title").addEventListener("input", (event) => renderDocumentTitle(event.target.value));
     window.addEventListener("resize", layoutDocumentTitle);
     window.addEventListener("resize", queueAuthoringFocusReveal);

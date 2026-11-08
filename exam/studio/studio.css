@@ -252,6 +252,33 @@ button { font-family: inherit; }
   gap: var(--nstu-spacing-sm);
 }
 
+.studio-file-menu {
+  /* Approved reference minimum; supported logical widths begin at 500px. */
+  --studio-file-minimum-width: 160px;
+  position: relative;
+}
+.studio-file-menu > summary {
+  display: list-item;
+  list-style-position: inside;
+  min-height: var(--nstu-controls-command-height);
+  white-space: nowrap;
+}
+.studio-file-commands {
+  position: absolute;
+  top: calc(100% + var(--nstu-spacing-xs));
+  left: 0;
+  min-width: var(--studio-file-minimum-width);
+  max-width: calc(100vw - 2 * var(--nstu-spacing-lg));
+  display: flex;
+  flex-direction: column;
+  gap: var(--nstu-spacing-xs);
+  padding: var(--nstu-spacing-sm);
+  background: var(--bg-card);
+  border: var(--nstu-controls-border-width) solid var(--border-input);
+  border-radius: var(--radius-sm);
+}
+.studio-file-commands > .btn { justify-content: flex-start; }
+
 .btn {
   display: inline-flex;
   align-items: center;
