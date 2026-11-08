@@ -12,39 +12,43 @@
 
   <!-- Top Studio Header -->
   <header class="studio-header" id="studio-header">
-    <div class="brand-section">
-      <div class="brand-logo">
-        <img class="nstu-brand-image" src="../web/assets/nstu-brand.png" alt="NSTU" width="2386" height="1037">
-        <span class="brand-title">Exam Studio</span>
+    <div class="studio-titlebar" id="studio-titlebar">
+      <div class="brand-section">
+        <div class="brand-logo">
+          <img class="nstu-brand-image" src="../web/assets/nstu-brand.png" alt="NSTU" width="2386" height="1037">
+          <span class="brand-title">Exam Studio</span>
+        </div>
+        <span class="brand-subtitle">Assessment Authoring & Packaging</span>
       </div>
-      <span class="brand-subtitle">Assessment Authoring & Packaging</span>
-    </div>
-
-    <!-- Mode Switcher -->
-    <div class="mode-toggle-group" role="tablist" aria-label="Studio Mode">
-      <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true">
-        <span>✍️</span> Authoring
-      </button>
-      <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false">
-        <span>👁️</span> IELTS Live Preview
-      </button>
-    </div>
-
-    <!-- Global Actions -->
-    <div class="header-actions">
       <button class="btn btn-secondary" id="btn-studio-theme" type="button" aria-label="Switch to dark appearance">Dark appearance</button>
-      <button class="btn btn-secondary" id="btn-load-sample" type="button" title="Load sample IELTS test">
-        <span>📋</span> Sample
-      </button>
-      <button class="btn btn-secondary" id="btn-open-file" type="button" title="Open existing .nstuexam or manifest.json">
-        <span>📂</span> Open
-      </button>
-      <button class="btn btn-primary" id="btn-save-draft" type="button" title="Save authoring draft JSON">
-        <span>💾</span> Save
-      </button>
-      <button class="btn btn-secondary" id="btn-export-pkg" type="button" title="Compile and export .nstuexam bundle">
-        <span>📦</span> Export .nstuexam
-      </button>
+    </div>
+
+    <div class="studio-commandbar" id="studio-commandbar">
+      <!-- Mode Switcher -->
+      <div class="mode-toggle-group" role="tablist" aria-label="Studio Mode">
+        <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true">
+          <span>✍️</span> Authoring
+        </button>
+        <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false">
+          <span>👁️</span> Preview
+        </button>
+      </div>
+
+      <!-- Document Actions -->
+      <div class="header-actions">
+        <button class="btn btn-secondary" id="btn-load-sample" type="button" title="Load sample IELTS test">
+          <span>📋</span> Sample
+        </button>
+        <button class="btn btn-secondary" id="btn-open-file" type="button" title="Open existing .nstuexam or manifest.json">
+          <span>📂</span> Open
+        </button>
+        <button class="btn btn-primary" id="btn-save-draft" type="button" title="Save authoring draft JSON">
+          <span>💾</span> Save
+        </button>
+        <button class="btn btn-secondary" id="btn-export-pkg" type="button" title="Compile and export .nstuexam bundle">
+          <span>📦</span> Export .nstuexam
+        </button>
+      </div>
     </div>
   </header>
 
