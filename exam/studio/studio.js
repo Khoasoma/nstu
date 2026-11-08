@@ -113,12 +113,16 @@
       previewView.style.display = "flex";
       btnEditor.classList.remove("active");
       btnPreview.classList.add("active");
+      btnEditor.setAttribute("aria-selected", "false");
+      btnPreview.setAttribute("aria-selected", "true");
       renderPreview();
     } else {
       previewView.style.display = "none";
       editorView.style.display = "grid";
       btnPreview.classList.remove("active");
       btnEditor.classList.add("active");
+      btnEditor.setAttribute("aria-selected", "true");
+      btnPreview.setAttribute("aria-selected", "false");
       renderEditor();
     }
   }
