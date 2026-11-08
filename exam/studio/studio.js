@@ -106,6 +106,9 @@
     const previewView = el("preview-view");
     const btnEditor = el("btn-mode-editor");
     const btnPreview = el("btn-mode-preview");
+    const active = document.activeElement;
+    const leavingPane = mode === "preview" ? editorView : previewView;
+    const restoreHiddenFocus = leavingPane.contains(active) && !el("export-modal").classList.contains("open");
 
     if (mode === "preview") {
       syncExamMetadata();
@@ -115,6 +118,8 @@
       btnPreview.classList.add("active");
       btnEditor.setAttribute("aria-selected", "false");
       btnPreview.setAttribute("aria-selected", "true");
+      btnEditor.tabIndex = -1;
+      btnPreview.tabIndex = 0;
       renderPreview();
     } else {
       previewView.style.display = "none";
@@ -123,8 +128,12 @@
       btnEditor.classList.add("active");
       btnEditor.setAttribute("aria-selected", "true");
       btnPreview.setAttribute("aria-selected", "false");
+      btnEditor.tabIndex = 0;
+      btnPreview.tabIndex = -1;
       renderEditor();
     }
+    const selectedTab = mode === "preview" ? btnPreview : btnEditor;
+    if (restoreHiddenFocus && usableExportFocus(selectedTab)) selectedTab.focus({ preventScroll: true });
   }
 
   function renderDocumentTitle(value) {
@@ -196,6 +205,25 @@
   function handleFileDisclosureFocusOut(event) {
     const file = el("studio-file-menu");
     if (file.open && !el("export-modal").classList.contains("open") && event.relatedTarget && !file.contains(event.relatedTarget)) file.open = false;
+  }
+
+  function handleModeTabKey(event) {
+    if (event.defaultPrevented || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey ||
+        el("export-modal").classList.contains("open")) return;
+    const tabs = [el("btn-mode-editor"), el("btn-mode-preview")];
+    const index = tabs.indexOf(event.currentTarget);
+    if (index < 0) return;
+    let next;
+    switch (event.key) {
+      case "ArrowLeft": next = (index + tabs.length - 1) % tabs.length; break;
+      case "ArrowRight": next = (index + 1) % tabs.length; break;
+      case "Home": next = 0; break;
+      case "End": next = tabs.length - 1; break;
+      default: return;
+    }
+    event.preventDefault();
+    tabs.forEach((tab, i) => { tab.tabIndex = i === next ? 0 : -1; });
+    tabs[next].focus({ preventScroll: true });
   }
 
   /* ========================================================================
@@ -1636,6 +1664,8 @@
     el("btn-mode-editor").addEventListener("click", () => setMode("editor"));
     el("btn-mode-preview").addEventListener("click", () => setMode("preview"));
     el("btn-preview-exit").addEventListener("click", () => setMode("editor"));
+    el("btn-mode-editor").addEventListener("keydown", handleModeTabKey);
+    el("btn-mode-preview").addEventListener("keydown", handleModeTabKey);
 
     // Header actions
     el("btn-load-sample").addEventListener("click", closeFileDisclosureForCommand);

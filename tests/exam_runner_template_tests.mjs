@@ -556,18 +556,22 @@ console.log(`Studio literal projection/native shape/UTF8/origin admission: ${exp
 
 const zipSource = await readFile(new URL('exam/studio/zip.js', root), 'utf8');
 const importInstrumentation = `
+  const modeSourceTrace = [];
+  const originalModeSync = syncExamMetadata;
+  syncExamMetadata = () => { modeSourceTrace.push('sync'); return originalModeSync(); };
   const importStats = { reset:0, editor:0, preview:0, matching:0, mc:0, compile:0, forms:[] };
   const originalImportReset=resetPreviewState, originalImportEditor=renderEditor,
     originalImportPreview=renderPreview, originalImportMatching=renderPreviewMatching,
     originalImportMc=renderPreviewMc, originalImportForm=renderActiveQuestionForm, originalImportCompiler=compileManifest;
   resetPreviewState=()=>{importStats.reset++;return originalImportReset();};
-  renderEditor=()=>{importStats.editor++;return originalImportEditor();};
-  renderPreview=()=>{importStats.preview++;return originalImportPreview();};
+  renderEditor=()=>{modeSourceTrace.push('editor');importStats.editor++;return originalImportEditor();};
+  renderPreview=()=>{modeSourceTrace.push('preview');importStats.preview++;return originalImportPreview();};
   renderPreviewMatching=q=>{importStats.matching++;return originalImportMatching(q);};
   renderPreviewMc=q=>{importStats.mc++;return originalImportMc(q);};
   renderActiveQuestionForm=()=>{importStats.forms.push(currentExam.questions[activeQuestionIndex]?.type);return originalImportForm();};
   compileManifest=exam=>{importStats.compile++;return originalImportCompiler(exam);};
   window.importProbe={
+    mode:setMode, modeSourceTrace,
     load:handleImportFile, save:saveDraft, sync:syncExamMetadata, stats:importStats,
     export:exportPackage,
     inspect:()=>({exam:currentExam,active:activeQuestionIndex,index:previewIndex,answers:previewAnswers,token:selectedTokenForPlacement}),
@@ -587,6 +591,15 @@ async function actualImportHarness(reader) {
   const getNode = id => { if (!nodes.has(id)){const node=new ImportDomNode(id);node.ownerDocument=doc;node.tabIndex=0;doc.body.appendChild(node);nodes.set(id,node);}return nodes.get(id); };
   // Model the real initial modal attributes and its existing button order.
   const html=await readFile(new URL('exam/studio/index.html',root),'utf8');
+  // Seed actual native tab/view attributes, not a desired result from the test.
+  for(const id of ['btn-mode-editor','btn-mode-preview','editor-view','preview-view']){
+    const tag=html.match(new RegExp('<(button|div)\\b[^>]*\\bid="'+id+'"[^>]*>'));
+    assert(tag,'actual mode/view tag exists: '+id);
+    const attrs=Object.fromEntries([...tag[0].matchAll(/\s([\w-]+)="([^"]*)"/g)].map(m=>[m[1],m[2]]));
+    const node=getNode(id);node.tagName=tag[1].toUpperCase();node.className=attrs.class||'';
+    node.tabIndex=Object.hasOwn(attrs,'tabindex')?Number(attrs.tabindex):tag[1]==='button'?0:-1;
+    for(const name of ['role','aria-selected','aria-controls','aria-labelledby'])if(Object.hasOwn(attrs,name))node.setAttribute(name,attrs[name]);
+  }
   const modalTag=html.match(/<div[^>]*id="export-modal"[^>]*>/)[0];
   const modal=getNode('export-modal');modal.inert=/\binert\b/.test(modalTag);modal.tabIndex=/tabindex="-1"/.test(modalTag)?-1:0;
   for(const id of ['btn-close-export','btn-cancel-export','btn-download-nstuexam']){const node=getNode(id);node.remove();node.tagName='BUTTON';modal.appendChild(node);}
@@ -675,6 +688,74 @@ let modeSelectionCases=0;
   h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before);
 }
 console.log(`Studio actual mode selection/pane/classes/raw caret/model/Save: ${modeSelectionCases} cases passed`);
+function modeKey(h,id,key,options={}){
+  const node=h.node(id),event={key,target:node,currentTarget:node,defaultPrevented:false,ctrlKey:false,altKey:false,metaKey:false,shiftKey:false,
+    prevented:0,preventDefault(){this.defaultPrevented=true;this.prevented++;},...options};
+  for(const callback of node.listeners.keydown||[])callback(event);
+  for(const callback of h.document.listeners.keydown||[])callback(event);
+  return event;
+}
+let modeKeyboardCases=0;
+{
+  const h=await numericHarness(),editor=h.node('btn-mode-editor'),preview=h.node('btn-mode-preview');
+  assert.deepEqual([editor.tabIndex,preview.tabIndex],[0,-1]);
+  assert.deepEqual([editor['aria-controls'],preview['aria-controls']],['editor-view','preview-view']);
+  assert.deepEqual(['editor-view','preview-view'].map(id=>[h.node(id).role,h.node(id)['aria-labelledby'],h.node(id).tabIndex]),
+    [['tabpanel','btn-mode-editor',-1],['tabpanel','btn-mode-preview',-1]]);modeKeyboardCases++;
+  for(const id of ['btn-mode-editor','btn-mode-preview']){assert.equal(h.node(id).listeners.click.length,1);assert.equal(h.node(id).listeners.keydown?.length,1);assert.equal(h.node(id).listeners.keydown[0].name,'handleModeTabKey');}
+  assert.equal(h.node('btn-preview-exit').listeners.click.length,1);assert.equal(h.node('btn-preview-exit').listeners.keydown?.length||0,0);
+  assert.deepEqual(h.document.listeners.keydown.map(cb=>cb.name),['handleExportDialogKey','handleDocumentTitleKey','handleFileDisclosureKey']);modeKeyboardCases++;
+  editor.click();h.probe.sync();numericInput(h,'q-points','12.');const points=h.node('q-points');points.selectionStart=1;points.selectionEnd=2;
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;answers['essay-a']='Source response e\u0302\u0301';
+  editor.focus();h.probe.modeSourceTrace.length=0;const frames=h.window.frames.size;
+  for(const [origin,key,target] of [['btn-mode-editor','ArrowRight','btn-mode-preview'],['btn-mode-preview','ArrowRight','btn-mode-editor'],
+    ['btn-mode-editor','ArrowLeft','btn-mode-preview'],['btn-mode-preview','ArrowLeft','btn-mode-editor'],['btn-mode-editor','End','btn-mode-preview'],
+    ['btn-mode-preview','Home','btn-mode-editor'],['btn-mode-editor','Home','btn-mode-editor'],['btn-mode-editor','End','btn-mode-preview'],['btn-mode-preview','End','btn-mode-preview']]){
+    assert.equal(modeKey(h,origin,key).prevented,1);assert.equal(h.document.activeElement,h.node(target));assert.equal(h.node(target).focusOptions.preventScroll,true);
+    assert.deepEqual([editor.tabIndex,preview.tabIndex],target==='btn-mode-editor'?[0,-1]:[-1,0]);
+    assert.equal(editor['aria-selected'],'true');assert.equal(preview['aria-selected'],'false');assert.equal(h.node('editor-view').style.display,'grid');assert.equal(h.node('preview-view').style.display,'none');
+    assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);assert.equal(answers['essay-a'],'Source response e\u0302\u0301');
+    assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);assert.equal(h.window.frames.size,frames);
+    assert.deepEqual(Array.from(h.probe.modeSourceTrace),[],'navigation does not call source metadata/render');modeKeyboardCases++;
+  }
+  for(const options of [{defaultPrevented:true},{ctrlKey:true},{altKey:true},{metaKey:true},{shiftKey:true}]){
+    const focus=h.document.activeElement,indices=[editor.tabIndex,preview.tabIndex];modeKey(h,'btn-mode-preview','Home',options);
+    assert.equal(h.document.activeElement,focus);assert.deepEqual([editor.tabIndex,preview.tabIndex],indices);assert.deepEqual(Array.from(h.probe.modeSourceTrace),[]);modeKeyboardCases++;
+  }
+  for(const key of ['ArrowUp','ArrowDown','Tab','Escape','Enter',' ']){
+    const focus=h.document.activeElement,indices=[editor.tabIndex,preview.tabIndex];assert.equal(modeKey(h,'btn-mode-preview',key).prevented,0);
+    assert.equal(h.document.activeElement,focus);assert.deepEqual([editor.tabIndex,preview.tabIndex],indices);assert.deepEqual(Array.from(h.probe.modeSourceTrace),[]);modeKeyboardCases++;
+  }
+  assert.equal(points.listeners.keydown?.length||0,0);points.focus();assert.equal(h.key('ArrowLeft').prevented,0);assert.equal(h.document.activeElement,points);modeKeyboardCases++;
+  for(const [id,key,trace] of [['btn-mode-preview','Enter',['sync','preview']],['btn-mode-preview',' ',['sync','preview']],['btn-mode-editor','Enter',['editor']],['btn-mode-editor',' ',['editor']]]){
+    h.node(id).focus();h.probe.modeSourceTrace.length=0;assert.equal(modeKey(h,id,key).prevented,0);assert.deepEqual(Array.from(h.probe.modeSourceTrace),[]);
+    // Native click default is qualified in Chrome; this faithfully dispatches its unchanged callback once.
+    h.node(id).click();assert.deepEqual(Array.from(h.probe.modeSourceTrace),trace);assert.deepEqual([editor.tabIndex,preview.tabIndex],id==='btn-mode-editor'?[0,-1]:[-1,0]);
+    assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);modeKeyboardCases++;
+  }
+  editor.focus();h.probe.modeSourceTrace.length=0;h.probe.mode('unexpected-default');assert.deepEqual(Array.from(h.probe.modeSourceTrace),['editor']);assert.deepEqual([editor.tabIndex,preview.tabIndex],[0,-1]);modeKeyboardCases++;
+  h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads.at(-1).blob.text())),before);modeKeyboardCases++;
+}
+{
+  const h=await numericHarness(),editor=h.node('editor-view'),preview=h.node('preview-view'),points=h.node('q-points');
+  h.node('btn-mode-editor').click();h.probe.sync();numericInput(h,'q-points','12.');points.selectionStart=1;points.selectionEnd=2;points.remove();editor.appendChild(points);points.focus();
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;h.probe.modeSourceTrace.length=0;h.probe.mode('preview');
+  assert.equal(h.document.activeElement,h.node('btn-mode-preview'));assert.equal(h.node('btn-mode-preview').focusOptions.preventScroll,true);assert.deepEqual(Array.from(h.probe.modeSourceTrace),['sync','preview']);
+  assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);modeKeyboardCases++;
+  const area=h.node('p-essay-input');area.remove();preview.appendChild(area);area.value='Response e\u0302\u0301';area.selectionStart=2;area.selectionEnd=5;area.oninput({target:area});area.focus();h.probe.mode('editor');
+  assert.equal(h.document.activeElement,h.node('btn-mode-editor'));assert.equal(h.node('btn-mode-editor').focusOptions.preventScroll,true);assert.equal(area.value,'Response e\u0302\u0301');assert.deepEqual([area.selectionStart,area.selectionEnd],[2,5]);assert.equal(answers['essay-a'],area.value);modeKeyboardCases++;
+  h.node('btn-mode-preview').click();const exit=h.node('btn-preview-exit');exit.remove();preview.appendChild(exit);exit.focus();h.probe.modeSourceTrace.length=0;exit.click();
+  assert.equal(h.document.activeElement,h.node('btn-mode-editor'));assert.deepEqual(Array.from(h.probe.modeSourceTrace),['editor']);assert.equal(answers['essay-a'],'Response e\u0302\u0301');modeKeyboardCases++;
+  const outside=h.node('btn-studio-theme');assert(!editor.contains(outside)&&!preview.contains(outside));outside.focus();const calls=h.node('btn-mode-preview').focusCalls;h.probe.mode('preview');assert.equal(h.document.activeElement,outside);assert.equal(h.node('btn-mode-preview').focusCalls,calls);modeKeyboardCases++;
+  h.node('btn-mode-editor').click();const title=h.node('exam-title');title.remove();editor.appendChild(title);title.selectionStart=1;title.selectionEnd=3;title.focus();h.probe.modeSourceTrace.length=0;h.probe.mode('preview');
+  assert.equal(h.document.activeElement,h.node('btn-mode-preview'));assert.deepEqual(Array.from(h.probe.modeSourceTrace),['sync','preview']);assert.deepEqual([title.selectionStart,title.selectionEnd],[1,3]);assert.equal(JSON.stringify(state.exam),before);modeKeyboardCases++;
+  h.node('btn-export-pkg').focus();await h.probe.export();const modalFocus=h.document.activeElement;assert.equal(modalFocus,h.node('btn-cancel-export'));
+  const indices=[h.node('btn-mode-editor').tabIndex,h.node('btn-mode-preview').tabIndex];h.probe.modeSourceTrace.length=0;modeKey(h,'btn-mode-editor','ArrowRight');
+  assert.equal(h.document.activeElement,modalFocus);assert.deepEqual([h.node('btn-mode-editor').tabIndex,h.node('btn-mode-preview').tabIndex],indices);assert.deepEqual(Array.from(h.probe.modeSourceTrace),[]);modeKeyboardCases++;
+  for(const [id,trace] of [['btn-mode-editor',['editor']],['btn-mode-preview',['sync','preview']]]){h.probe.modeSourceTrace.length=0;h.node(id).click();assert.deepEqual(Array.from(h.probe.modeSourceTrace),trace);assert.equal(h.document.activeElement,modalFocus);assert.equal(JSON.stringify(state.exam),before);modeKeyboardCases++;}
+  h.key('Escape');assert.equal(h.document.activeElement,h.node('btn-export-pkg'));assert.equal(h.node('btn-mode-preview')['aria-selected'],'true');modeKeyboardCases++;
+}
+console.log(`Studio actual manual mode-key focus/selection/panels/activation/trace/data/return/modal: ${modeKeyboardCases} cases passed`);
 let documentTitleCases=0;
 for(const text of ['Numeric draft','Tựa đề ế e\u0302\u0301 <b>literal</b> & retained','Line 1\nDòng 2 ế e\u0302\u0301']){
   const model=numericFixture();model.title=text;const h=await numericHarness(model);
