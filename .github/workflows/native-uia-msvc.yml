@@ -592,12 +592,202 @@ jobs:
           $buildDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release'
           $evidenceDir = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-evidence'
           $inputs = Get-Content -LiteralPath (Join-Path $evidenceDir 'inputs.json') -Raw | ConvertFrom-Json
-          $receipt = [ordered]@{ status = 'RUNNING'; inventoryExit = $null; count = $null }
+          function Read-NativeLockedBytes([string]$path) {
+            $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+            try {
+              $buffer = [IO.MemoryStream]::new()
+              try { $stream.CopyTo($buffer); return ,$buffer.ToArray() } finally { $buffer.Dispose() }
+            } finally { $stream.Dispose() }
+          }
+          function Get-NativeByteHash([byte[]]$bytes) {
+            return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+          }
+          function Convert-NativeUtf8([byte[]]$bytes) {
+            $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+            if ($text.Length -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+            return $text
+          }
+          function Write-NativeNewBytes([string]$path, [byte[]]$bytes) {
+            $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+            try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+            $expected = Get-NativeByteHash $bytes
+            if ((Get-NativeByteHash (Read-NativeLockedBytes $path)) -cne $expected) { throw 'New evidence copy differs from consumed bytes' }
+            return $expected
+          }
+          function Save-NativeEvidenceSnapshot([string]$source, [string]$destination, [string]$name) {
+            $bytes = Read-NativeLockedBytes $source
+            $hash = Write-NativeNewBytes $destination $bytes
+            return @{ name=$name; source=$source; destination=$destination; sha256=$hash; size=$bytes.Length; bytes=$bytes }
+          }
+
+          function Confirm-NativeInventoryOnlyLog([byte[]]$bytes) {
+            $text = Convert-NativeUtf8 $bytes
+            $format = '\AStart testing: [^\r\n]+\r?\n----------------------------------------------------------\r?\nEnd testing: [^\r\n]+\r?\n\z'
+            if (-not [regex]::IsMatch($text,$format)) { throw 'Inventory log contains unexpected/stale execution evidence or malformed framing' }
+          }
+          function Preserve-NativeInventoryLog([string]$buildDir,[string]$evidenceDir,$receipt) {
+            $inventoryDir = Join-Path $evidenceDir 'ctest-inventory'
+            $source = Join-Path $buildDir 'Testing/Temporary/LastTest.log'
+            $snapshot = Save-NativeEvidenceSnapshot $source (Join-Path $inventoryDir 'LastTest.snapshot.log') 'LastTest.snapshot.log'
+            $receipt.inventoryLogSnapshotSha256 = $snapshot.sha256
+            $receipt.inventoryLogSnapshotBytes = $snapshot.size
+            Confirm-NativeInventoryOnlyLog $snapshot.bytes
+            if ((Get-NativeByteHash (Read-NativeLockedBytes $source)) -cne $snapshot.sha256) { throw 'Inventory-generated log changed before preserved transfer' }
+            $moved = Join-Path $inventoryDir 'LastTest.moved.log'
+            if (Test-Path -LiteralPath $moved) { throw 'Inventory transfer destination already exists' }
+            $expectedSource = [IO.Path]::GetFullPath((Join-Path $buildDir 'Testing/Temporary/LastTest.log'))
+            $expectedDestination = [IO.Path]::GetFullPath((Join-Path $evidenceDir 'ctest-inventory/LastTest.moved.log'))
+            if (-not [string]::Equals([IO.Path]::GetFullPath($source),$expectedSource,[StringComparison]::OrdinalIgnoreCase) -or
+                -not [string]::Equals([IO.Path]::GetFullPath($moved),$expectedDestination,[StringComparison]::OrdinalIgnoreCase)) { throw 'Inventory transfer path escaped exact admitted boundary' }
+            Move-Item -LiteralPath $source -Destination $moved
+            $movedHash = Get-NativeByteHash (Read-NativeLockedBytes $moved)
+            $receipt.inventoryLogMovedSha256 = $movedHash
+            if ($movedHash -cne $snapshot.sha256 -or (Test-Path -LiteralPath $source)) { throw 'Inventory source transfer drift or original path remains' }
+            $receipt.inventoryLogTransferred = $true
+          }
+          function Confirm-NativeArchivedInventory([string]$evidenceDir,$receipt) {
+            if ($receipt.status -cne 'PASS' -or $receipt.inventoryExit -ne 0 -or $receipt.count -ne 10 -or
+                $receipt.preInventoryLogAbsent -isnot [bool] -or -not $receipt.preInventoryLogAbsent -or
+                $receipt.inventoryLogTransferred -isnot [bool] -or -not $receipt.inventoryLogTransferred) { throw 'Qualified inventory freshness boundary missing' }
+            foreach ($entry in @(
+                @{path='ctest-inventory/LastTest.snapshot.log';hash=$receipt.inventoryLogSnapshotSha256;inventoryLog=$true},
+                @{path='ctest-inventory/LastTest.moved.log';hash=$receipt.inventoryLogMovedSha256;inventoryLog=$true},
+                @{path='ctest-inventory/test-inventory.json';hash=$receipt.inventoryJsonSnapshotSha256;inventoryLog=$false},
+                @{path='test-inventory.json';hash=$receipt.inventoryJsonSnapshotSha256;inventoryLog=$false})) {
+              $bytes = Read-NativeLockedBytes (Join-Path $evidenceDir $entry.path)
+              if (-not $entry.hash -or (Get-NativeByteHash $bytes) -cne $entry.hash) { throw 'Qualified inventory preserved/current bytes drifted' }
+              if ($entry.inventoryLog) { Confirm-NativeInventoryOnlyLog $bytes }
+            }
+            if ($receipt.inventoryLogSnapshotSha256 -cne $receipt.inventoryLogMovedSha256) { throw 'Inventory preserved transfer hashes differ' }
+          }
+          function Confirm-NativePreExecutionInventory([string]$buildDir,[string]$evidenceDir,[string]$manifestHash) {
+            $receiptBytes = Read-NativeLockedBytes (Join-Path $evidenceDir 'inventory-check.json')
+            $receipt = (Convert-NativeUtf8 $receiptBytes) | ConvertFrom-Json
+            Confirm-NativeInventoryPhaseBinding $evidenceDir (Get-NativeByteHash $receiptBytes)
+            if ($receipt.embeddedManifestVerificationSha256 -cne $manifestHash) { throw 'Inventory freshness manifest binding differs' }
+            Confirm-NativeArchivedInventory $evidenceDir $receipt
+            if (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log')) { throw 'Unexpected native execution log after qualified inventory transfer' }
+            return @{ receipt=$receipt; receiptSha256=(Get-NativeByteHash $receiptBytes) }
+          }
+          function Write-NativeInventoryPhaseEvidence([string]$evidenceDir,[string]$inventoryDir,[bool]$created,$receipt) {
+            $phaseBytes = [Text.UTF8Encoding]::new($false).GetBytes(($receipt | ConvertTo-Json -Depth 8))
+            $phaseHash = Write-NativeNewBytes (Join-Path $evidenceDir 'inventory-check.json') $phaseBytes
+            if (-not $created) { return }
+            $null = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-receipt.json') $phaseBytes
+            $binding = @{ phaseReceiptSha256=$phaseHash; phaseStatus=$receipt.status; archiveHashes=@{
+              'LastTest.snapshot.log'=$receipt.inventoryLogSnapshotSha256
+              'LastTest.moved.log'=$receipt.inventoryLogMovedSha256
+              'test-inventory.json'=$receipt.inventoryJsonSnapshotSha256 } }
+            $bindingBytes = [Text.UTF8Encoding]::new($false).GetBytes(($binding | ConvertTo-Json -Depth 8))
+            $bindingHash = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-binding.json') $bindingBytes
+            $null = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-binding.sha256') ([Text.Encoding]::ASCII.GetBytes($bindingHash+"`n"))
+          }
+          function Confirm-NativeInventoryPhaseBinding([string]$evidenceDir,[string]$expectedCurrentHash) {
+            $directory = Join-Path $evidenceDir 'ctest-inventory'
+            $bindingBytes = Read-NativeLockedBytes (Join-Path $directory 'phase-binding.json')
+            $digest = Convert-NativeUtf8 (Read-NativeLockedBytes (Join-Path $directory 'phase-binding.sha256'))
+            if ($digest -notmatch '\A[0-9A-F]{64}\n\z' -or (Get-NativeByteHash $bindingBytes) -cne $digest.TrimEnd("`n")) { throw 'Inventory phase-binding bytes changed/unbound' }
+            $binding = (Convert-NativeUtf8 $bindingBytes) | ConvertFrom-Json
+            $snapshotHash = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $directory 'phase-receipt.json'))
+            $currentHash = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir 'inventory-check.json'))
+            if ($snapshotHash -cne $binding.phaseReceiptSha256 -or $currentHash -cne $snapshotHash -or $currentHash -cne $expectedCurrentHash) { throw 'Inventory phase receipt bytes changed/unbound' }
+          }
+          function Observe-NativeInventoryPhaseRetention([string]$evidenceDir,$collection) {
+            # Inspect all available inputs even if no preExecutionInventory return was recorded.
+            $directory = Join-Path $evidenceDir 'ctest-inventory'
+            $sources = @(
+              @{name='inventory-check.current.json';source=(Join-Path $evidenceDir 'inventory-check.json')},
+              @{name='test-inventory.current.json';source=(Join-Path $evidenceDir 'test-inventory.json')},
+              @{name='phase-receipt.json';source=(Join-Path $directory 'phase-receipt.json')},
+              @{name='phase-binding.json';source=(Join-Path $directory 'phase-binding.json')},
+              @{name='phase-binding.sha256';source=(Join-Path $directory 'phase-binding.sha256')},
+              @{name='LastTest.snapshot.log';source=(Join-Path $directory 'LastTest.snapshot.log')},
+              @{name='LastTest.moved.log';source=(Join-Path $directory 'LastTest.moved.log')},
+              @{name='test-inventory.json';source=(Join-Path $directory 'test-inventory.json')})
+            $available = @($sources | Where-Object { Test-Path -LiteralPath $_.source -PathType Leaf })
+            $observation = @{phaseStatus='NOT_RUN';qualified=$false;captures=@();checks=@()}
+            $collection.inventoryPhaseObservation = $observation
+            if ($available.Count -eq 0) { return }
+            $snapshots = @{}
+            $finalDirectory = Join-Path $evidenceDir 'ctest-final/inventory-archive'
+            $copyDirectoryCreated = $false
+            try { New-Item -ItemType Directory -Path $finalDirectory | Out-Null; $copyDirectoryCreated = $true }
+            catch { $collection.errors += 'Inventory phase final-copy directory unavailable: '+$_.Exception.Message }
+            foreach ($source in $sources) {
+              if (-not (Test-Path -LiteralPath $source.source -PathType Leaf)) {
+                $observation.captures += @{name=$source.name;status='NOT_AVAILABLE'}
+                continue
+              }
+              try {
+                $bytes = Read-NativeLockedBytes $source.source
+                $snapshot = @{name=$source.name;bytes=$bytes;sha256=(Get-NativeByteHash $bytes);size=$bytes.Length}
+                $snapshots[$source.name] = $snapshot
+                $copyStatus = 'COPY_UNAVAILABLE'
+                if ($copyDirectoryCreated) {
+                  try { $null = Write-NativeNewBytes (Join-Path $finalDirectory $source.name) $bytes; $copyStatus = 'CAPTURED' }
+                  catch { $collection.errors += 'Inventory phase final-copy failed for '+$source.name+': '+$_.Exception.Message }
+                }
+                $observation.captures += @{name=$source.name;status=$copyStatus;sha256=$snapshot.sha256;size=$snapshot.size;path=if($copyStatus -ceq 'CAPTURED'){'ctest-final/inventory-archive/'+$source.name}else{$null}}
+              } catch { $collection.errors += 'Inventory phase capture failed for '+$source.name+': '+$_.Exception.Message }
+            }
+            $binding = $null
+            $bindingTrusted = $false
+            if ($snapshots.ContainsKey('phase-binding.json')) {
+              try { $binding = (Convert-NativeUtf8 $snapshots['phase-binding.json'].bytes) | ConvertFrom-Json }
+              catch { $collection.errors += 'Inventory phase-binding JSON invalid: '+$_.Exception.Message }
+            }
+            if ($binding -and $snapshots.ContainsKey('phase-binding.sha256')) {
+              $digest = Convert-NativeUtf8 $snapshots['phase-binding.sha256'].bytes
+              $bindingTrusted = $digest -match '\A[0-9A-F]{64}\n\z' -and $snapshots['phase-binding.json'].sha256 -ceq $digest.TrimEnd("`n")
+            }
+            if (-not $bindingTrusted) { $collection.errors += 'Inventory phase binding missing, invalid or changed' }
+            $observation.bindingTrusted = $bindingTrusted
+            $expected = @{}
+            if ($binding) {
+              $expected['phase-receipt.json'] = $binding.phaseReceiptSha256
+              $expected['inventory-check.current.json'] = $binding.phaseReceiptSha256
+              foreach ($name in @('LastTest.snapshot.log','LastTest.moved.log','test-inventory.json')) { $expected[$name] = $binding.archiveHashes.$name }
+              $expected['test-inventory.current.json'] = $binding.archiveHashes.'test-inventory.json'
+            }
+            foreach ($name in @('phase-receipt.json','inventory-check.current.json','LastTest.snapshot.log','LastTest.moved.log','test-inventory.json','test-inventory.current.json')) {
+              $hash = $expected[$name]
+              $present = $snapshots.ContainsKey($name)
+              $known = $hash -is [string] -and $hash -match '\A[0-9A-Fa-f]{64}\z'
+              $matched = $present -and $known -and $snapshots[$name].sha256 -eq $hash
+              $observation.checks += @{name=$name;present=$present;expectedHashKnown=$known;expectedSha256=$hash;actualSha256=if($present){$snapshots[$name].sha256}else{$null};hashMatched=$matched;bindingTrusted=$bindingTrusted}
+              if ($present -and -not $known) { $collection.errors += 'Available inventory phase/archive bytes are unbound: '+$name }
+              elseif ($known -and -not $matched) { $collection.errors += 'Inventory phase/archive bytes missing or changed: '+$name }
+            }
+            $phase = $null
+            $phaseSource = if ($snapshots.ContainsKey('phase-receipt.json')) { 'phase-receipt.json' } elseif ($snapshots.ContainsKey('inventory-check.current.json')) { 'inventory-check.current.json' } else { $null }
+            if ($phaseSource) {
+              try { $phase = (Convert-NativeUtf8 $snapshots[$phaseSource].bytes) | ConvertFrom-Json; $observation.phaseStatus=$phase.status }
+              catch { $observation.phaseStatus='INVALID';$collection.errors += 'Inventory phase receipt JSON invalid: '+$_.Exception.Message }
+            } else { $observation.phaseStatus='MISSING';$collection.errors += 'Inventory phase receipt missing beside available inputs' }
+            if ($observation.phaseStatus -cne 'PASS') { $collection.errors += 'Inventory phase failed or partial: '+$observation.phaseStatus }
+            if ($phase -and $phase.status -ceq 'PASS') {
+              if ($phase.inventoryExit -ne 0 -or $phase.count -ne 10 -or $phase.preInventoryLogAbsent -isnot [bool] -or -not $phase.preInventoryLogAbsent -or
+                  $phase.inventoryLogTransferred -isnot [bool] -or -not $phase.inventoryLogTransferred) { $collection.errors += 'Inventory phase completeness/freshness facts invalid' }
+              foreach ($name in @('phase-receipt.json','inventory-check.current.json','LastTest.snapshot.log','LastTest.moved.log','test-inventory.json','test-inventory.current.json')) {
+                if (-not $snapshots.ContainsKey($name) -or -not $expected[$name]) { $collection.errors += 'Successful inventory phase is incomplete/unbound: '+$name }
+              }
+            }
+            # Captures/checks do not promote any failed/partial phase or establish native execution.
+          }
+          $inventoryDirCreated = $false
+          $receipt = [ordered]@{ status = 'RUNNING'; inventoryExit = $null; count = $null; preInventoryLogAbsent = $false; inventoryLogTransferred = $false }
           try {
+            $inventoryDir = Join-Path $evidenceDir 'ctest-inventory'
+            New-Item -ItemType Directory -Path $inventoryDir | Out-Null
+            $inventoryDirCreated = $true
+            if (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log')) { throw 'Pre-inventory log already exists; provenance unqualified' }
+            $receipt.preInventoryLogAbsent = $true
             & ctest --test-dir $buildDir -C Release --show-only=json-v1 > (Join-Path $evidenceDir 'test-inventory.json')
             $receipt.inventoryExit = $LASTEXITCODE
             if ($receipt.inventoryExit -ne 0) { throw 'CTest inventory failed' }
-            $inventory = Get-Content -LiteralPath (Join-Path $evidenceDir 'test-inventory.json') -Raw | ConvertFrom-Json
+            $inventoryJson = Save-NativeEvidenceSnapshot (Join-Path $evidenceDir 'test-inventory.json') (Join-Path $inventoryDir 'test-inventory.json') 'test-inventory.json'
+            $receipt.inventoryJsonSnapshotSha256 = $inventoryJson.sha256
+            $inventory = (Convert-NativeUtf8 $inventoryJson.bytes) | ConvertFrom-Json
             $receipt.count = @($inventory.tests).Count
             if ($receipt.count -ne 10 -or @($inventory.tests.name | Sort-Object -Unique).Count -ne 10) { throw 'CTest cohort missing or duplicated' }
             $exe = (Resolve-Path -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe')).Path
@@ -626,11 +816,13 @@ jobs:
               if (@($test.properties | Where-Object { $_.name -eq 'SKIP_RETURN_CODE' -or
                     ($_.name -in @('DISABLED', 'WILL_FAIL') -and $_.value) }).Count) { throw 'CTest skip or nonzero override present' }
             }
+            if ((Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir 'test-inventory.json'))) -cne $receipt.inventoryJsonSnapshotSha256) { throw 'Inventory JSON changed before qualification transfer' }
+            Preserve-NativeInventoryLog $buildDir $evidenceDir $receipt
             $receipt.status = 'PASS'
           } catch {
             $receipt.status = 'FAIL'; $receipt.error = $_.Exception.Message; throw
           } finally {
-            $receipt | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $evidenceDir 'inventory-check.json') -Encoding utf8
+            Write-NativeInventoryPhaseEvidence $evidenceDir $inventoryDir $inventoryDirCreated $receipt
           }
 
       - name: Execute ten native cases once and validate complete evidence
@@ -660,7 +852,190 @@ jobs:
             }
             $result.embeddedManifestVerificationSha256 = $manifestHash
             $result.assemblyIdentity = $manifest.extractedAssemblyIdentity
-            if (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log') -PathType Leaf) { throw 'Pre-existing native execution log; freshness unqualified' }
+            function Read-NativeLockedBytes([string]$path) {
+              $stream = [IO.FileStream]::new($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+              try {
+                $buffer = [IO.MemoryStream]::new()
+                try { $stream.CopyTo($buffer); return ,$buffer.ToArray() } finally { $buffer.Dispose() }
+              } finally { $stream.Dispose() }
+            }
+            function Get-NativeByteHash([byte[]]$bytes) {
+              return [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+            }
+            function Convert-NativeUtf8([byte[]]$bytes) {
+              $text = [Text.UTF8Encoding]::new($false, $true).GetString($bytes)
+              if ($text.Length -and $text[0] -eq [char]0xFEFF) { $text = $text.Substring(1) }
+              return $text
+            }
+            function Write-NativeNewBytes([string]$path, [byte[]]$bytes) {
+              $stream = [IO.FileStream]::new($path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+              try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+              $expected = Get-NativeByteHash $bytes
+              if ((Get-NativeByteHash (Read-NativeLockedBytes $path)) -cne $expected) { throw 'New evidence copy differs from consumed bytes' }
+              return $expected
+            }
+            function Save-NativeEvidenceSnapshot([string]$source, [string]$destination, [string]$name) {
+              $bytes = Read-NativeLockedBytes $source
+              $hash = Write-NativeNewBytes $destination $bytes
+              return @{ name=$name; source=$source; destination=$destination; sha256=$hash; size=$bytes.Length; bytes=$bytes }
+            }
+
+            function Confirm-NativeInventoryOnlyLog([byte[]]$bytes) {
+              $text = Convert-NativeUtf8 $bytes
+              $format = '\AStart testing: [^\r\n]+\r?\n----------------------------------------------------------\r?\nEnd testing: [^\r\n]+\r?\n\z'
+              if (-not [regex]::IsMatch($text,$format)) { throw 'Inventory log contains unexpected/stale execution evidence or malformed framing' }
+            }
+            function Preserve-NativeInventoryLog([string]$buildDir,[string]$evidenceDir,$receipt) {
+              $inventoryDir = Join-Path $evidenceDir 'ctest-inventory'
+              $source = Join-Path $buildDir 'Testing/Temporary/LastTest.log'
+              $snapshot = Save-NativeEvidenceSnapshot $source (Join-Path $inventoryDir 'LastTest.snapshot.log') 'LastTest.snapshot.log'
+              $receipt.inventoryLogSnapshotSha256 = $snapshot.sha256
+              $receipt.inventoryLogSnapshotBytes = $snapshot.size
+              Confirm-NativeInventoryOnlyLog $snapshot.bytes
+              if ((Get-NativeByteHash (Read-NativeLockedBytes $source)) -cne $snapshot.sha256) { throw 'Inventory-generated log changed before preserved transfer' }
+              $moved = Join-Path $inventoryDir 'LastTest.moved.log'
+              if (Test-Path -LiteralPath $moved) { throw 'Inventory transfer destination already exists' }
+              $expectedSource = [IO.Path]::GetFullPath((Join-Path $buildDir 'Testing/Temporary/LastTest.log'))
+              $expectedDestination = [IO.Path]::GetFullPath((Join-Path $evidenceDir 'ctest-inventory/LastTest.moved.log'))
+              if (-not [string]::Equals([IO.Path]::GetFullPath($source),$expectedSource,[StringComparison]::OrdinalIgnoreCase) -or
+                  -not [string]::Equals([IO.Path]::GetFullPath($moved),$expectedDestination,[StringComparison]::OrdinalIgnoreCase)) { throw 'Inventory transfer path escaped exact admitted boundary' }
+              Move-Item -LiteralPath $source -Destination $moved
+              $movedHash = Get-NativeByteHash (Read-NativeLockedBytes $moved)
+              $receipt.inventoryLogMovedSha256 = $movedHash
+              if ($movedHash -cne $snapshot.sha256 -or (Test-Path -LiteralPath $source)) { throw 'Inventory source transfer drift or original path remains' }
+              $receipt.inventoryLogTransferred = $true
+            }
+            function Confirm-NativeArchivedInventory([string]$evidenceDir,$receipt) {
+              if ($receipt.status -cne 'PASS' -or $receipt.inventoryExit -ne 0 -or $receipt.count -ne 10 -or
+                  $receipt.preInventoryLogAbsent -isnot [bool] -or -not $receipt.preInventoryLogAbsent -or
+                  $receipt.inventoryLogTransferred -isnot [bool] -or -not $receipt.inventoryLogTransferred) { throw 'Qualified inventory freshness boundary missing' }
+              foreach ($entry in @(
+                  @{path='ctest-inventory/LastTest.snapshot.log';hash=$receipt.inventoryLogSnapshotSha256;inventoryLog=$true},
+                  @{path='ctest-inventory/LastTest.moved.log';hash=$receipt.inventoryLogMovedSha256;inventoryLog=$true},
+                  @{path='ctest-inventory/test-inventory.json';hash=$receipt.inventoryJsonSnapshotSha256;inventoryLog=$false},
+                  @{path='test-inventory.json';hash=$receipt.inventoryJsonSnapshotSha256;inventoryLog=$false})) {
+                $bytes = Read-NativeLockedBytes (Join-Path $evidenceDir $entry.path)
+                if (-not $entry.hash -or (Get-NativeByteHash $bytes) -cne $entry.hash) { throw 'Qualified inventory preserved/current bytes drifted' }
+                if ($entry.inventoryLog) { Confirm-NativeInventoryOnlyLog $bytes }
+              }
+              if ($receipt.inventoryLogSnapshotSha256 -cne $receipt.inventoryLogMovedSha256) { throw 'Inventory preserved transfer hashes differ' }
+            }
+            function Confirm-NativePreExecutionInventory([string]$buildDir,[string]$evidenceDir,[string]$manifestHash) {
+              $receiptBytes = Read-NativeLockedBytes (Join-Path $evidenceDir 'inventory-check.json')
+              $receipt = (Convert-NativeUtf8 $receiptBytes) | ConvertFrom-Json
+              Confirm-NativeInventoryPhaseBinding $evidenceDir (Get-NativeByteHash $receiptBytes)
+              if ($receipt.embeddedManifestVerificationSha256 -cne $manifestHash) { throw 'Inventory freshness manifest binding differs' }
+              Confirm-NativeArchivedInventory $evidenceDir $receipt
+              if (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log')) { throw 'Unexpected native execution log after qualified inventory transfer' }
+              return @{ receipt=$receipt; receiptSha256=(Get-NativeByteHash $receiptBytes) }
+            }
+            function Write-NativeInventoryPhaseEvidence([string]$evidenceDir,[string]$inventoryDir,[bool]$created,$receipt) {
+              $phaseBytes = [Text.UTF8Encoding]::new($false).GetBytes(($receipt | ConvertTo-Json -Depth 8))
+              $phaseHash = Write-NativeNewBytes (Join-Path $evidenceDir 'inventory-check.json') $phaseBytes
+              if (-not $created) { return }
+              $null = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-receipt.json') $phaseBytes
+              $binding = @{ phaseReceiptSha256=$phaseHash; phaseStatus=$receipt.status; archiveHashes=@{
+                'LastTest.snapshot.log'=$receipt.inventoryLogSnapshotSha256
+                'LastTest.moved.log'=$receipt.inventoryLogMovedSha256
+                'test-inventory.json'=$receipt.inventoryJsonSnapshotSha256 } }
+              $bindingBytes = [Text.UTF8Encoding]::new($false).GetBytes(($binding | ConvertTo-Json -Depth 8))
+              $bindingHash = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-binding.json') $bindingBytes
+              $null = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-binding.sha256') ([Text.Encoding]::ASCII.GetBytes($bindingHash+"`n"))
+            }
+            function Confirm-NativeInventoryPhaseBinding([string]$evidenceDir,[string]$expectedCurrentHash) {
+              $directory = Join-Path $evidenceDir 'ctest-inventory'
+              $bindingBytes = Read-NativeLockedBytes (Join-Path $directory 'phase-binding.json')
+              $digest = Convert-NativeUtf8 (Read-NativeLockedBytes (Join-Path $directory 'phase-binding.sha256'))
+              if ($digest -notmatch '\A[0-9A-F]{64}\n\z' -or (Get-NativeByteHash $bindingBytes) -cne $digest.TrimEnd("`n")) { throw 'Inventory phase-binding bytes changed/unbound' }
+              $binding = (Convert-NativeUtf8 $bindingBytes) | ConvertFrom-Json
+              $snapshotHash = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $directory 'phase-receipt.json'))
+              $currentHash = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir 'inventory-check.json'))
+              if ($snapshotHash -cne $binding.phaseReceiptSha256 -or $currentHash -cne $snapshotHash -or $currentHash -cne $expectedCurrentHash) { throw 'Inventory phase receipt bytes changed/unbound' }
+            }
+            function Observe-NativeInventoryPhaseRetention([string]$evidenceDir,$collection) {
+              # Inspect all available inputs even if no preExecutionInventory return was recorded.
+              $directory = Join-Path $evidenceDir 'ctest-inventory'
+              $sources = @(
+                @{name='inventory-check.current.json';source=(Join-Path $evidenceDir 'inventory-check.json')},
+                @{name='test-inventory.current.json';source=(Join-Path $evidenceDir 'test-inventory.json')},
+                @{name='phase-receipt.json';source=(Join-Path $directory 'phase-receipt.json')},
+                @{name='phase-binding.json';source=(Join-Path $directory 'phase-binding.json')},
+                @{name='phase-binding.sha256';source=(Join-Path $directory 'phase-binding.sha256')},
+                @{name='LastTest.snapshot.log';source=(Join-Path $directory 'LastTest.snapshot.log')},
+                @{name='LastTest.moved.log';source=(Join-Path $directory 'LastTest.moved.log')},
+                @{name='test-inventory.json';source=(Join-Path $directory 'test-inventory.json')})
+              $available = @($sources | Where-Object { Test-Path -LiteralPath $_.source -PathType Leaf })
+              $observation = @{phaseStatus='NOT_RUN';qualified=$false;captures=@();checks=@()}
+              $collection.inventoryPhaseObservation = $observation
+              if ($available.Count -eq 0) { return }
+              $snapshots = @{}
+              $finalDirectory = Join-Path $evidenceDir 'ctest-final/inventory-archive'
+              $copyDirectoryCreated = $false
+              try { New-Item -ItemType Directory -Path $finalDirectory | Out-Null; $copyDirectoryCreated = $true }
+              catch { $collection.errors += 'Inventory phase final-copy directory unavailable: '+$_.Exception.Message }
+              foreach ($source in $sources) {
+                if (-not (Test-Path -LiteralPath $source.source -PathType Leaf)) {
+                  $observation.captures += @{name=$source.name;status='NOT_AVAILABLE'}
+                  continue
+                }
+                try {
+                  $bytes = Read-NativeLockedBytes $source.source
+                  $snapshot = @{name=$source.name;bytes=$bytes;sha256=(Get-NativeByteHash $bytes);size=$bytes.Length}
+                  $snapshots[$source.name] = $snapshot
+                  $copyStatus = 'COPY_UNAVAILABLE'
+                  if ($copyDirectoryCreated) {
+                    try { $null = Write-NativeNewBytes (Join-Path $finalDirectory $source.name) $bytes; $copyStatus = 'CAPTURED' }
+                    catch { $collection.errors += 'Inventory phase final-copy failed for '+$source.name+': '+$_.Exception.Message }
+                  }
+                  $observation.captures += @{name=$source.name;status=$copyStatus;sha256=$snapshot.sha256;size=$snapshot.size;path=if($copyStatus -ceq 'CAPTURED'){'ctest-final/inventory-archive/'+$source.name}else{$null}}
+                } catch { $collection.errors += 'Inventory phase capture failed for '+$source.name+': '+$_.Exception.Message }
+              }
+              $binding = $null
+              $bindingTrusted = $false
+              if ($snapshots.ContainsKey('phase-binding.json')) {
+                try { $binding = (Convert-NativeUtf8 $snapshots['phase-binding.json'].bytes) | ConvertFrom-Json }
+                catch { $collection.errors += 'Inventory phase-binding JSON invalid: '+$_.Exception.Message }
+              }
+              if ($binding -and $snapshots.ContainsKey('phase-binding.sha256')) {
+                $digest = Convert-NativeUtf8 $snapshots['phase-binding.sha256'].bytes
+                $bindingTrusted = $digest -match '\A[0-9A-F]{64}\n\z' -and $snapshots['phase-binding.json'].sha256 -ceq $digest.TrimEnd("`n")
+              }
+              if (-not $bindingTrusted) { $collection.errors += 'Inventory phase binding missing, invalid or changed' }
+              $observation.bindingTrusted = $bindingTrusted
+              $expected = @{}
+              if ($binding) {
+                $expected['phase-receipt.json'] = $binding.phaseReceiptSha256
+                $expected['inventory-check.current.json'] = $binding.phaseReceiptSha256
+                foreach ($name in @('LastTest.snapshot.log','LastTest.moved.log','test-inventory.json')) { $expected[$name] = $binding.archiveHashes.$name }
+                $expected['test-inventory.current.json'] = $binding.archiveHashes.'test-inventory.json'
+              }
+              foreach ($name in @('phase-receipt.json','inventory-check.current.json','LastTest.snapshot.log','LastTest.moved.log','test-inventory.json','test-inventory.current.json')) {
+                $hash = $expected[$name]
+                $present = $snapshots.ContainsKey($name)
+                $known = $hash -is [string] -and $hash -match '\A[0-9A-Fa-f]{64}\z'
+                $matched = $present -and $known -and $snapshots[$name].sha256 -eq $hash
+                $observation.checks += @{name=$name;present=$present;expectedHashKnown=$known;expectedSha256=$hash;actualSha256=if($present){$snapshots[$name].sha256}else{$null};hashMatched=$matched;bindingTrusted=$bindingTrusted}
+                if ($present -and -not $known) { $collection.errors += 'Available inventory phase/archive bytes are unbound: '+$name }
+                elseif ($known -and -not $matched) { $collection.errors += 'Inventory phase/archive bytes missing or changed: '+$name }
+              }
+              $phase = $null
+              $phaseSource = if ($snapshots.ContainsKey('phase-receipt.json')) { 'phase-receipt.json' } elseif ($snapshots.ContainsKey('inventory-check.current.json')) { 'inventory-check.current.json' } else { $null }
+              if ($phaseSource) {
+                try { $phase = (Convert-NativeUtf8 $snapshots[$phaseSource].bytes) | ConvertFrom-Json; $observation.phaseStatus=$phase.status }
+                catch { $observation.phaseStatus='INVALID';$collection.errors += 'Inventory phase receipt JSON invalid: '+$_.Exception.Message }
+              } else { $observation.phaseStatus='MISSING';$collection.errors += 'Inventory phase receipt missing beside available inputs' }
+              if ($observation.phaseStatus -cne 'PASS') { $collection.errors += 'Inventory phase failed or partial: '+$observation.phaseStatus }
+              if ($phase -and $phase.status -ceq 'PASS') {
+                if ($phase.inventoryExit -ne 0 -or $phase.count -ne 10 -or $phase.preInventoryLogAbsent -isnot [bool] -or -not $phase.preInventoryLogAbsent -or
+                    $phase.inventoryLogTransferred -isnot [bool] -or -not $phase.inventoryLogTransferred) { $collection.errors += 'Inventory phase completeness/freshness facts invalid' }
+                foreach ($name in @('phase-receipt.json','inventory-check.current.json','LastTest.snapshot.log','LastTest.moved.log','test-inventory.json','test-inventory.current.json')) {
+                  if (-not $snapshots.ContainsKey($name) -or -not $expected[$name]) { $collection.errors += 'Successful inventory phase is incomplete/unbound: '+$name }
+                }
+              }
+              # Captures/checks do not promote any failed/partial phase or establish native execution.
+            }
+            $inventoryGate = Confirm-NativePreExecutionInventory $buildDir $evidenceDir $manifestHash
+            $result.preExecutionInventory = $inventoryGate
             & ctest --test-dir $buildDir -C Release --parallel 1 --stop-on-failure --no-tests=error --verbose `
               --output-log (Join-Path $evidenceDir 'ctest.log') --output-junit (Join-Path $evidenceDir 'ctest-junit.xml')
             $result.testExit = $LASTEXITCODE
@@ -832,7 +1207,9 @@ jobs:
             $result.evidenceExtraction.captureManifestSha256 = Write-NativeNewBytes (Join-Path $consumedDir 'manifest.json') $captureManifestBytes
             $inventoryReceipt = (Convert-NativeUtf8 $consumedSnapshots[0].bytes) | ConvertFrom-Json
             if ($inventoryReceipt.status -cne 'PASS' -or $inventoryReceipt.inventoryExit -ne 0 -or
-                $inventoryReceipt.count -ne 10 -or $inventoryReceipt.embeddedManifestVerificationSha256 -cne $manifestHash) {
+                $inventoryReceipt.count -ne 10 -or $inventoryReceipt.embeddedManifestVerificationSha256 -cne $manifestHash -or
+                $consumedSnapshots[0].sha256 -cne $inventoryGate.receiptSha256 -or
+                $inventoryReceipt.inventoryJsonSnapshotSha256 -cne $consumedSnapshots[1].sha256) {
               throw 'Consumed inventory qualification receipt differs'
             }
             $inventory = (Convert-NativeUtf8 $consumedSnapshots[1].bytes) | ConvertFrom-Json
@@ -1058,6 +1435,160 @@ jobs:
             if ($seen.Count -ne $expectedSeen.Count) { throw 'Consumed inventory identities incomplete' }
           }
 
+          function Confirm-NativeInventoryOnlyLog([byte[]]$bytes) {
+            $text = Convert-NativeUtf8 $bytes
+            $format = '\AStart testing: [^\r\n]+\r?\n----------------------------------------------------------\r?\nEnd testing: [^\r\n]+\r?\n\z'
+            if (-not [regex]::IsMatch($text,$format)) { throw 'Inventory log contains unexpected/stale execution evidence or malformed framing' }
+          }
+          function Preserve-NativeInventoryLog([string]$buildDir,[string]$evidenceDir,$receipt) {
+            $inventoryDir = Join-Path $evidenceDir 'ctest-inventory'
+            $source = Join-Path $buildDir 'Testing/Temporary/LastTest.log'
+            $snapshot = Save-NativeEvidenceSnapshot $source (Join-Path $inventoryDir 'LastTest.snapshot.log') 'LastTest.snapshot.log'
+            $receipt.inventoryLogSnapshotSha256 = $snapshot.sha256
+            $receipt.inventoryLogSnapshotBytes = $snapshot.size
+            Confirm-NativeInventoryOnlyLog $snapshot.bytes
+            if ((Get-NativeByteHash (Read-NativeLockedBytes $source)) -cne $snapshot.sha256) { throw 'Inventory-generated log changed before preserved transfer' }
+            $moved = Join-Path $inventoryDir 'LastTest.moved.log'
+            if (Test-Path -LiteralPath $moved) { throw 'Inventory transfer destination already exists' }
+            $expectedSource = [IO.Path]::GetFullPath((Join-Path $buildDir 'Testing/Temporary/LastTest.log'))
+            $expectedDestination = [IO.Path]::GetFullPath((Join-Path $evidenceDir 'ctest-inventory/LastTest.moved.log'))
+            if (-not [string]::Equals([IO.Path]::GetFullPath($source),$expectedSource,[StringComparison]::OrdinalIgnoreCase) -or
+                -not [string]::Equals([IO.Path]::GetFullPath($moved),$expectedDestination,[StringComparison]::OrdinalIgnoreCase)) { throw 'Inventory transfer path escaped exact admitted boundary' }
+            Move-Item -LiteralPath $source -Destination $moved
+            $movedHash = Get-NativeByteHash (Read-NativeLockedBytes $moved)
+            $receipt.inventoryLogMovedSha256 = $movedHash
+            if ($movedHash -cne $snapshot.sha256 -or (Test-Path -LiteralPath $source)) { throw 'Inventory source transfer drift or original path remains' }
+            $receipt.inventoryLogTransferred = $true
+          }
+          function Confirm-NativeArchivedInventory([string]$evidenceDir,$receipt) {
+            if ($receipt.status -cne 'PASS' -or $receipt.inventoryExit -ne 0 -or $receipt.count -ne 10 -or
+                $receipt.preInventoryLogAbsent -isnot [bool] -or -not $receipt.preInventoryLogAbsent -or
+                $receipt.inventoryLogTransferred -isnot [bool] -or -not $receipt.inventoryLogTransferred) { throw 'Qualified inventory freshness boundary missing' }
+            foreach ($entry in @(
+                @{path='ctest-inventory/LastTest.snapshot.log';hash=$receipt.inventoryLogSnapshotSha256;inventoryLog=$true},
+                @{path='ctest-inventory/LastTest.moved.log';hash=$receipt.inventoryLogMovedSha256;inventoryLog=$true},
+                @{path='ctest-inventory/test-inventory.json';hash=$receipt.inventoryJsonSnapshotSha256;inventoryLog=$false},
+                @{path='test-inventory.json';hash=$receipt.inventoryJsonSnapshotSha256;inventoryLog=$false})) {
+              $bytes = Read-NativeLockedBytes (Join-Path $evidenceDir $entry.path)
+              if (-not $entry.hash -or (Get-NativeByteHash $bytes) -cne $entry.hash) { throw 'Qualified inventory preserved/current bytes drifted' }
+              if ($entry.inventoryLog) { Confirm-NativeInventoryOnlyLog $bytes }
+            }
+            if ($receipt.inventoryLogSnapshotSha256 -cne $receipt.inventoryLogMovedSha256) { throw 'Inventory preserved transfer hashes differ' }
+          }
+          function Confirm-NativePreExecutionInventory([string]$buildDir,[string]$evidenceDir,[string]$manifestHash) {
+            $receiptBytes = Read-NativeLockedBytes (Join-Path $evidenceDir 'inventory-check.json')
+            $receipt = (Convert-NativeUtf8 $receiptBytes) | ConvertFrom-Json
+            Confirm-NativeInventoryPhaseBinding $evidenceDir (Get-NativeByteHash $receiptBytes)
+            if ($receipt.embeddedManifestVerificationSha256 -cne $manifestHash) { throw 'Inventory freshness manifest binding differs' }
+            Confirm-NativeArchivedInventory $evidenceDir $receipt
+            if (Test-Path -LiteralPath (Join-Path $buildDir 'Testing/Temporary/LastTest.log')) { throw 'Unexpected native execution log after qualified inventory transfer' }
+            return @{ receipt=$receipt; receiptSha256=(Get-NativeByteHash $receiptBytes) }
+          }
+          function Write-NativeInventoryPhaseEvidence([string]$evidenceDir,[string]$inventoryDir,[bool]$created,$receipt) {
+            $phaseBytes = [Text.UTF8Encoding]::new($false).GetBytes(($receipt | ConvertTo-Json -Depth 8))
+            $phaseHash = Write-NativeNewBytes (Join-Path $evidenceDir 'inventory-check.json') $phaseBytes
+            if (-not $created) { return }
+            $null = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-receipt.json') $phaseBytes
+            $binding = @{ phaseReceiptSha256=$phaseHash; phaseStatus=$receipt.status; archiveHashes=@{
+              'LastTest.snapshot.log'=$receipt.inventoryLogSnapshotSha256
+              'LastTest.moved.log'=$receipt.inventoryLogMovedSha256
+              'test-inventory.json'=$receipt.inventoryJsonSnapshotSha256 } }
+            $bindingBytes = [Text.UTF8Encoding]::new($false).GetBytes(($binding | ConvertTo-Json -Depth 8))
+            $bindingHash = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-binding.json') $bindingBytes
+            $null = Write-NativeNewBytes (Join-Path $inventoryDir 'phase-binding.sha256') ([Text.Encoding]::ASCII.GetBytes($bindingHash+"`n"))
+          }
+          function Confirm-NativeInventoryPhaseBinding([string]$evidenceDir,[string]$expectedCurrentHash) {
+            $directory = Join-Path $evidenceDir 'ctest-inventory'
+            $bindingBytes = Read-NativeLockedBytes (Join-Path $directory 'phase-binding.json')
+            $digest = Convert-NativeUtf8 (Read-NativeLockedBytes (Join-Path $directory 'phase-binding.sha256'))
+            if ($digest -notmatch '\A[0-9A-F]{64}\n\z' -or (Get-NativeByteHash $bindingBytes) -cne $digest.TrimEnd("`n")) { throw 'Inventory phase-binding bytes changed/unbound' }
+            $binding = (Convert-NativeUtf8 $bindingBytes) | ConvertFrom-Json
+            $snapshotHash = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $directory 'phase-receipt.json'))
+            $currentHash = Get-NativeByteHash (Read-NativeLockedBytes (Join-Path $evidenceDir 'inventory-check.json'))
+            if ($snapshotHash -cne $binding.phaseReceiptSha256 -or $currentHash -cne $snapshotHash -or $currentHash -cne $expectedCurrentHash) { throw 'Inventory phase receipt bytes changed/unbound' }
+          }
+          function Observe-NativeInventoryPhaseRetention([string]$evidenceDir,$collection) {
+            # Inspect all available inputs even if no preExecutionInventory return was recorded.
+            $directory = Join-Path $evidenceDir 'ctest-inventory'
+            $sources = @(
+              @{name='inventory-check.current.json';source=(Join-Path $evidenceDir 'inventory-check.json')},
+              @{name='test-inventory.current.json';source=(Join-Path $evidenceDir 'test-inventory.json')},
+              @{name='phase-receipt.json';source=(Join-Path $directory 'phase-receipt.json')},
+              @{name='phase-binding.json';source=(Join-Path $directory 'phase-binding.json')},
+              @{name='phase-binding.sha256';source=(Join-Path $directory 'phase-binding.sha256')},
+              @{name='LastTest.snapshot.log';source=(Join-Path $directory 'LastTest.snapshot.log')},
+              @{name='LastTest.moved.log';source=(Join-Path $directory 'LastTest.moved.log')},
+              @{name='test-inventory.json';source=(Join-Path $directory 'test-inventory.json')})
+            $available = @($sources | Where-Object { Test-Path -LiteralPath $_.source -PathType Leaf })
+            $observation = @{phaseStatus='NOT_RUN';qualified=$false;captures=@();checks=@()}
+            $collection.inventoryPhaseObservation = $observation
+            if ($available.Count -eq 0) { return }
+            $snapshots = @{}
+            $finalDirectory = Join-Path $evidenceDir 'ctest-final/inventory-archive'
+            $copyDirectoryCreated = $false
+            try { New-Item -ItemType Directory -Path $finalDirectory | Out-Null; $copyDirectoryCreated = $true }
+            catch { $collection.errors += 'Inventory phase final-copy directory unavailable: '+$_.Exception.Message }
+            foreach ($source in $sources) {
+              if (-not (Test-Path -LiteralPath $source.source -PathType Leaf)) {
+                $observation.captures += @{name=$source.name;status='NOT_AVAILABLE'}
+                continue
+              }
+              try {
+                $bytes = Read-NativeLockedBytes $source.source
+                $snapshot = @{name=$source.name;bytes=$bytes;sha256=(Get-NativeByteHash $bytes);size=$bytes.Length}
+                $snapshots[$source.name] = $snapshot
+                $copyStatus = 'COPY_UNAVAILABLE'
+                if ($copyDirectoryCreated) {
+                  try { $null = Write-NativeNewBytes (Join-Path $finalDirectory $source.name) $bytes; $copyStatus = 'CAPTURED' }
+                  catch { $collection.errors += 'Inventory phase final-copy failed for '+$source.name+': '+$_.Exception.Message }
+                }
+                $observation.captures += @{name=$source.name;status=$copyStatus;sha256=$snapshot.sha256;size=$snapshot.size;path=if($copyStatus -ceq 'CAPTURED'){'ctest-final/inventory-archive/'+$source.name}else{$null}}
+              } catch { $collection.errors += 'Inventory phase capture failed for '+$source.name+': '+$_.Exception.Message }
+            }
+            $binding = $null
+            $bindingTrusted = $false
+            if ($snapshots.ContainsKey('phase-binding.json')) {
+              try { $binding = (Convert-NativeUtf8 $snapshots['phase-binding.json'].bytes) | ConvertFrom-Json }
+              catch { $collection.errors += 'Inventory phase-binding JSON invalid: '+$_.Exception.Message }
+            }
+            if ($binding -and $snapshots.ContainsKey('phase-binding.sha256')) {
+              $digest = Convert-NativeUtf8 $snapshots['phase-binding.sha256'].bytes
+              $bindingTrusted = $digest -match '\A[0-9A-F]{64}\n\z' -and $snapshots['phase-binding.json'].sha256 -ceq $digest.TrimEnd("`n")
+            }
+            if (-not $bindingTrusted) { $collection.errors += 'Inventory phase binding missing, invalid or changed' }
+            $observation.bindingTrusted = $bindingTrusted
+            $expected = @{}
+            if ($binding) {
+              $expected['phase-receipt.json'] = $binding.phaseReceiptSha256
+              $expected['inventory-check.current.json'] = $binding.phaseReceiptSha256
+              foreach ($name in @('LastTest.snapshot.log','LastTest.moved.log','test-inventory.json')) { $expected[$name] = $binding.archiveHashes.$name }
+              $expected['test-inventory.current.json'] = $binding.archiveHashes.'test-inventory.json'
+            }
+            foreach ($name in @('phase-receipt.json','inventory-check.current.json','LastTest.snapshot.log','LastTest.moved.log','test-inventory.json','test-inventory.current.json')) {
+              $hash = $expected[$name]
+              $present = $snapshots.ContainsKey($name)
+              $known = $hash -is [string] -and $hash -match '\A[0-9A-Fa-f]{64}\z'
+              $matched = $present -and $known -and $snapshots[$name].sha256 -eq $hash
+              $observation.checks += @{name=$name;present=$present;expectedHashKnown=$known;expectedSha256=$hash;actualSha256=if($present){$snapshots[$name].sha256}else{$null};hashMatched=$matched;bindingTrusted=$bindingTrusted}
+              if ($present -and -not $known) { $collection.errors += 'Available inventory phase/archive bytes are unbound: '+$name }
+              elseif ($known -and -not $matched) { $collection.errors += 'Inventory phase/archive bytes missing or changed: '+$name }
+            }
+            $phase = $null
+            $phaseSource = if ($snapshots.ContainsKey('phase-receipt.json')) { 'phase-receipt.json' } elseif ($snapshots.ContainsKey('inventory-check.current.json')) { 'inventory-check.current.json' } else { $null }
+            if ($phaseSource) {
+              try { $phase = (Convert-NativeUtf8 $snapshots[$phaseSource].bytes) | ConvertFrom-Json; $observation.phaseStatus=$phase.status }
+              catch { $observation.phaseStatus='INVALID';$collection.errors += 'Inventory phase receipt JSON invalid: '+$_.Exception.Message }
+            } else { $observation.phaseStatus='MISSING';$collection.errors += 'Inventory phase receipt missing beside available inputs' }
+            if ($observation.phaseStatus -cne 'PASS') { $collection.errors += 'Inventory phase failed or partial: '+$observation.phaseStatus }
+            if ($phase -and $phase.status -ceq 'PASS') {
+              if ($phase.inventoryExit -ne 0 -or $phase.count -ne 10 -or $phase.preInventoryLogAbsent -isnot [bool] -or -not $phase.preInventoryLogAbsent -or
+                  $phase.inventoryLogTransferred -isnot [bool] -or -not $phase.inventoryLogTransferred) { $collection.errors += 'Inventory phase completeness/freshness facts invalid' }
+              foreach ($name in @('phase-receipt.json','inventory-check.current.json','LastTest.snapshot.log','LastTest.moved.log','test-inventory.json','test-inventory.current.json')) {
+                if (-not $snapshots.ContainsKey($name) -or -not $expected[$name]) { $collection.errors += 'Successful inventory phase is incomplete/unbound: '+$name }
+              }
+            }
+            # Captures/checks do not promote any failed/partial phase or establish native execution.
+          }
           $temporary = Join-Path $env:GITHUB_WORKSPACE 'build/native-uia-msvc-release/Testing/Temporary'
           $collection = @{ status='RUNNING'; finalSources=@(); consumedChecks=@(); driftedInputs=@(); errors=@() }
           $test = $null
@@ -1131,6 +1662,8 @@ jobs:
               } catch { $collection.errors += 'Derived output check failed: ' + $_.Exception.Message }
             }
           } catch { $collection.errors += 'Final collection failed: ' + $_.Exception.Message }
+          try { Observe-NativeInventoryPhaseRetention $evidenceDir $collection }
+          catch { $collection.errors += 'Inventory phase/archive observation failed: ' + $_.Exception.Message }
           $collection.status = if ($collection.errors.Count) { 'FAIL' } else { 'PASS' }
           $collectionBytes = [Text.UTF8Encoding]::new($false).GetBytes(($collection | ConvertTo-Json -Depth 10))
           $collectionHash = Write-NativeNewBytes (Join-Path $evidenceDir 'ctest-retention.json') $collectionBytes
