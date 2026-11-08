@@ -21,7 +21,9 @@ const required = [
   'tests/ui_desktop_token_tests.mjs', 'scripts/generate-ui-desktop-tokens.mjs',
   'tests/exam_origin_package_projection.mjs', 'packaging/stage-exam-package.ps1',
   'packaging/test-exam-origin-contract.ps1', 'packaging/test-exam-package-staging.ps1',
-  'scripts/tests/verify-required-regressions-tests.mjs'
+  'scripts/tests/verify-required-regressions-tests.mjs',
+  'scripts/tests/owned-regression-process.mjs', 'scripts/tests/owned-regression-process.ps1',
+  'scripts/tests/owned-regression-process-tests.mjs'
 ];
 function failure(message) { throw new Error(message); }
 function run(command, args, env = process.env) {

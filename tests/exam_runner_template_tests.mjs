@@ -30,6 +30,20 @@ const canonicalRunner=context.window.NSTU_RUNNER_TEMPLATE;
 
 // Fault-inject the actual private reader helper without exporting production APIs.
 const studioSource = await readFile(new URL('exam/studio/studio.js', root), 'utf8');
+const titleHelperStart=studioSource.indexOf('  function renderDocumentTitle(');
+const titleHelperEnd=studioSource.indexOf('  function renderEditor() {');
+const titleSource=titleHelperStart>=0?studioSource.slice(titleHelperStart,titleHelperEnd):'';
+const titleFixtureStyle=node=>({visibility:node.style?.visibility||'visible',display:node.style?.display||'block',columnGap:'16px',
+  getPropertyValue(name){assert.equal(name,'--studio-title-minimum-width');return '160px';}});
+function titleFixtureRect(id){
+  return {'studio-titlebar':{left:0,width:1366},'studio-brand-section':{left:24,width:362},'btn-studio-theme':{left:1208,width:134}}[id]||{left:0,width:1000};
+}
+function titleFixtureClassList(node){return{
+  add(name){if(!this.contains(name))node.className=(node.className+' '+name).trim();},
+  remove(name){node.className=node.className.split(' ').filter(x=>x!==name).join(' ');},
+  contains(name){return node.className.split(' ').includes(name);},
+  toggle(name,force){const next=force===undefined?!this.contains(name):!!force;if(next)this.add(name);else this.remove(name);return next;}
+};}
 const dialogStart=studioSource.indexOf('  let exportDialogOpener =');
 const dialogEnd=studioSource.indexOf('  function syncExamMetadata() {');
 assert.ok(dialogStart>=0&&dialogEnd>dialogStart);
@@ -107,8 +121,9 @@ assert.ok(initStart >= 0 && initEnd > initStart && compileStart >= 0 && compileE
 const fieldNodes = new Map();
 function fieldNode(id) {
   if (!fieldNodes.has(id)) fieldNodes.set(id, {
-    value: '', children: [], listeners: {},
-    classList: { add() {}, remove() {} }, setAttribute() {},
+    value: '', children: [], listeners: {}, style:{},className:'',textContent:'',
+    get classList(){return titleFixtureClassList(this);},setAttribute(name,value){this[name]=String(value);},
+    getBoundingClientRect(){return titleFixtureRect(id);},contains(target){return target===this||this.children.some(c=>c.contains?.(target));},
     addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
   });
   return fieldNodes.get(id);
@@ -125,6 +140,7 @@ const fields = vm.runInNewContext(`(() => {
     renderPreview = () => {}, showToast = () => {}, handleImportFile = () => {},
     saveDraft = () => {}, exportPackage = () => {}, addQuestion = () => {};
   ${studioSource.slice(compileStart, compileEnd)}
+  ${titleSource}
   ${dialogSource}
   ${studioSource.slice(initStart, initEnd)}
   init();
@@ -132,7 +148,7 @@ const fields = vm.runInNewContext(`(() => {
     manifest() { return compileManifest(currentExam); } };
 })()`, { getNode: fieldNode, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
-  localStorage: { getItem() { return null; }, setItem() {} } });
+  getComputedStyle:titleFixtureStyle,localStorage: { getItem() { return null; }, setItem() {} } });
 function placeholderInput(value) {
   const node = fieldNode('q-sa-placeholder'); node.value = value;
   for (const callback of node.listeners.input || []) callback({ target: node });
@@ -165,7 +181,8 @@ const originsEnd = studioSource.indexOf('  function validateOrigin(', originsSta
 assert.ok([renderStart, renderEnd, addStart, addEnd, syncStart, syncEnd, originsStart, originsEnd].every(index => index >= 0));
 const transitionNodes = new Map();
 function transitionNode(id = '') {
-  const node = { value: '', children: [], listeners: {}, textContent: '',
+  const node = { value: '', children: [], listeners: {}, textContent: '',style:{},className:'',
+    get classList(){return titleFixtureClassList(this);},getBoundingClientRect(){return titleFixtureRect(id);},
     setAttribute(name,value) { this[name]=String(value); },
     contains(target) { return target === this || this.children.some(child => child.contains?.(target)); },
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); },
@@ -181,6 +198,7 @@ const transitions = vm.runInNewContext(`(() => {
   const previewAnswers = {}; // Existing addQuestion now reads retained Preview identities.
   const el = getNode, escapeHtml = value => value;
   const renderActiveQuestionForm = () => {}, showToast = () => {};
+  ${titleSource}
   ${dialogSource}
   ${studioSource.slice(renderStart, renderEnd)}
   ${studioSource.slice(addStart, addEnd)}
@@ -189,7 +207,7 @@ const transitions = vm.runInNewContext(`(() => {
   renderEditor();
   return { exam: currentExam, add: addQuestion, selectedIndex() { return activeQuestionIndex; } };
 })()`, { getNode: id => transitionNodes.get(id) || transitionNode(id),
-  document: { createElement: () => transitionNode() } });
+  getComputedStyle:titleFixtureStyle,document: { createElement: () => transitionNode() } });
 function editTransitionMetadata(title) {
   const values = { 'exam-id': ' new-id ', 'exam-title': title, 'exam-subject': ' New subject ',
     'exam-duration': '43', 'exam-allowed-origins': ' https://example.test\nhttps://example.test ' };
@@ -296,7 +314,9 @@ assert.ok(importStart >= 0 && importEnd > importStart && previewStateStart >= 0 
 const replacementNodes = new Map();
 function replacementNode(id) {
   if (!replacementNodes.has(id)) replacementNodes.set(id, {
-    listeners: {}, style: { display: 'none' }, setAttribute() {}, classList: { add() {}, remove() {} },
+    listeners: {}, style: { display: 'none' },className:'',children:[],textContent:'',
+    setAttribute(name,value){this[name]=String(value);},get classList(){return titleFixtureClassList(this);},
+    getBoundingClientRect(){return titleFixtureRect(id);},contains(target){return target===this||this.children.some(c=>c.contains?.(target));},
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
   });
   return replacementNodes.get(id);
@@ -312,16 +332,17 @@ const replacements = vm.runInNewContext(`(() => {
     addQuestion = () => {}, renderPreview = () => { ++previewRenders; }, initSplitter = () => {};
   ${studioSource.slice(previewStateStart, previewStateEnd)}
   ${studioSource.slice(importStart, importEnd)}
+  ${titleSource}
   ${dialogSource}
   ${studioSource.slice(initStart, initEnd)}
   init();
   return { importFile: handleImportFile,
     seedPreview() { previewIndex = 3; previewAnswers = { shared: 'Old answer' }; selectedTokenForPlacement = 2; activeQuestionIndex = 1; },
     inspect() { return { currentExam, previewIndex, previewAnswers, selectedTokenForPlacement, activeQuestionIndex, renderCount, previewRenders }; },
-    sample() { el('btn-load-sample').listeners.click[0](); } };
+    sample() { const node=el('btn-load-sample');for(const callback of node.listeners.click)callback({target:node,currentTarget:node}); } };
 })()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
-  localStorage: { getItem() { return null; }, setItem() {} },
+  getComputedStyle:titleFixtureStyle,localStorage: { getItem() { return null; }, setItem() {} },
   NstuZip: { Reader: class { async readEntries() {
     return [{ path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(zipManifest)) }];
   } } } });
@@ -370,12 +391,13 @@ console.log('Studio Preview reset/refresh on model replacement: 8 scenarios pass
 class ImportDomNode {
   constructor(id = '') { this.id = id; this.children = []; this.style = {}; this.dataset = {}; this.listeners = {}; this.className = ''; this._html = ''; this._value = ''; this.textContent = ''; this.queries = new Map(); }
   get value() { return this._value; }
-  set value(value) { this._value = String(value ?? ''); }
+  set value(value) { const text=String(value??'');this._value=this.id==='exam-title'?text.replace(/[\r\n]/g,''):text; }
   get innerHTML() { return this._html; }
   set innerHTML(value) { this._html = String(value); for(const child of this.children)child.parentNode=null; this.children = []; this.queries.clear(); }
-  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name) }; }
+  get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name), toggle: (name,force) => { const present=this.className.split(' ').includes(name),next=force===undefined?!present:!!force;if(next&&!present)this.className+=' '+name;if(!next)this.className=this.className.split(' ').filter(x=>x!==name).join(' ');return next; } }; }
   appendChild(child) { this.children.push(child); child.parentNode = this; return child; }
   append(...children) { children.forEach(child => this.appendChild(child)); }
+  prepend(child) { this.children.unshift(child); child.parentNode = this; }
   querySelector(selector) {
     const find=node=>{for(const child of node.children){if(selector.startsWith('.')&&child.className.split(/\s+/).includes(selector.slice(1)))return child;const nested=find(child);if(nested)return nested;}return null;};
     const actual=find(this);if(actual)return actual;
@@ -383,7 +405,7 @@ class ImportDomNode {
   }
   addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
   setAttribute(name, value) { this[name] = String(value); }
-  getBoundingClientRect() { return { left: 0, width: 1000 }; }
+  getBoundingClientRect() { return titleFixtureRect(this.id); }
   remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; }
   click() { (this.listeners.click || []).forEach(listener => listener({ target: this, currentTarget: this, preventDefault() {}, stopPropagation() {} })); }
   get isConnected() { return this === this.ownerDocument?.body || !!this.parentNode?.isConnected; }
@@ -392,7 +414,7 @@ class ImportDomNode {
   matches(selector) { assert.equal(selector, ':disabled');for(let n=this;n;n=n.parentNode)if(n.disabled)return true;return false; }
   contains(node) { for(let n=node;n;n=n.parentNode)if(n===this)return true;return false; }
   querySelectorAll(selector) { assert.equal(selector,'button');const result=[];const walk=n=>{for(const c of n.children){if(c.tagName==='BUTTON')result.push(c);walk(c);}};walk(this);return result; }
-  focus() { this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1)this.ownerDocument.activeElement=this; }
+  focus(options) { this.focusOptions=options;this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1){const previous=this.ownerDocument.activeElement;this.ownerDocument.activeElement=this;if(previous!==this)for(const callback of this.listeners.focus||[])callback({target:this,currentTarget:this});} }
   scrollIntoView(options) { (this.scrolls ||= []).push(options); }
 }
 
@@ -572,9 +594,9 @@ async function actualImportHarness(reader) {
   const downloads = [], blobs = new Map();
   class DownloadURL extends URL { static createObjectURL(blob) { const url='blob:test-'+blobs.size;blobs.set(url,blob);return url; } static revokeObjectURL() {} }
   getNode('preview-view').style.display = 'none';
-  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.tagName=tag.toUpperCase();node.tabIndex=tag==='button'?0:-1;node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
+  doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.tagName=tag.toUpperCase();node.tabIndex=['button','input'].includes(tag)?0:-1;node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
   const globals = { window:win, document: doc, atob, btoa,
-    getComputedStyle:node=>({visibility:node.style.visibility||'visible',display:node.style.display||'block'}),
+    getComputedStyle:titleFixtureStyle,
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
     TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
     crypto: (await import('node:crypto')).webcrypto, URL:DownloadURL, location: { origin:'http://studio.test' } };
@@ -591,7 +613,7 @@ async function actualImportHarness(reader) {
   return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip, downloads, document:doc,
     window:win,resize(){for(const callback of win.listeners.resize||[])callback({type:'resize'});},
     flushFrames(){const callbacks=[...win.frames.values()];win.frames.clear();callbacks.forEach(callback=>callback());},
-    key(key,options={}){const event={key,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,prevented:0,preventDefault(){this.prevented++;},...options};for(const callback of doc.listeners.keydown||[])callback(event);return event;},
+    key(key,options={}){const event={key,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,prevented:0,defaultPrevented:false,preventDefault(){this.prevented++;this.defaultPrevented=true;},...options};for(const callback of doc.listeners.keydown||[])callback(event);return event;},
     seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
 }
 const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
@@ -601,7 +623,10 @@ async function resizeHarness(){const h=await actualImportHarness();h.seed(false)
 let resizeCases=0;
 {
   const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueAuthoringFocusReveal').length,1,'one actual authoring resize listener is installed');
-  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');assert.equal(h.window.listeners.resize.length,2,'no duplicate resize registrations');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueChoiceFocusReveal').length,1,'one choice resize listener is installed');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queuePreviewTextFocusReveal').length,1,'one text Preview resize listener is installed');assert.equal(h.window.listeners.resize.filter(callback=>callback.name!=='layoutDocumentTitle').length,4,'no duplicate preexisting resize registrations');
+  assert.equal(h.window.listeners.resize.filter(callback=>callback.name==='layoutDocumentTitle').length,1,'exactly one synchronous title resize registration');
   const before=h.probe.inspect(),model=JSON.stringify(before.exam),answers=before.answers,stats=JSON.stringify(h.probe.stats),focusCalls=field.focusCalls;
   h.resize();h.resize();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'opaque RAF id0 must be cancelled');h.flushFrames();
   assert.equal(field.scrolls.length,1);assert.equal(field.scrolls[0].block,'nearest');assert.equal(field.scrolls[0].inline,'nearest');assert.equal(field.scrolls[0].behavior,'instant');
@@ -632,6 +657,146 @@ const numericFixture=()=>({id:'numeric-draft',title:'Numeric draft',subject:'',d
 async function numericHarness(model=numericFixture()) { const h=await actualImportHarness();await h.probe.load({name:'numeric.json',text:async()=>JSON.stringify(model)});return h; }
 function numericInput(h,id,raw,valid=true,badInput=false){const node=h.node(id);node.value=raw;node.valueAsNumber=Number(raw);node.validity={valid,badInput};for(const callback of node.listeners.input||[])callback({target:node,currentTarget:node});}
 function numericNavigate(h){h.node('question-nav-list').children[1].click();h.node('question-nav-list').children[0].click();}
+let modeSelectionCases=0;
+{
+  const h=await numericHarness();h.probe.sync();
+  // The whole-controller DOM harness seeds the source HTML's initial tab attributes.
+  h.node('btn-mode-editor').setAttribute('aria-selected','true');h.node('btn-mode-preview').setAttribute('aria-selected','false');
+  numericInput(h,'q-points','12.');const field=h.node('q-points');field.selectionStart=1;field.selectionEnd=2;field.focus();
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  for(const [id,preview] of [['btn-mode-preview',true],['btn-mode-preview',true],['btn-mode-editor',false],['btn-mode-editor',false],['btn-mode-preview',true],['btn-preview-exit',false],['btn-preview-exit',false]]){
+    h.node(id).click();
+    assert.equal(h.node('btn-mode-editor')['aria-selected'],String(!preview));assert.equal(h.node('btn-mode-preview')['aria-selected'],String(preview));
+    assert.equal(h.node('editor-view').style.display,preview?'none':'grid');assert.equal(h.node('preview-view').style.display,preview?'flex':'none');
+    assert.equal(h.node('btn-mode-editor').classList.contains('active'),!preview);assert.equal(h.node('btn-mode-preview').classList.contains('active'),preview);
+    assert.equal(h.probe.inspect().exam,state.exam);assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);
+    assert.equal(field.value,'12.');assert.equal(field.selectionStart,1);assert.equal(field.selectionEnd,2);assert.equal(field['aria-invalid'],'true');modeSelectionCases++;
+  }
+  h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before);
+}
+console.log(`Studio actual mode selection/pane/classes/raw caret/model/Save: ${modeSelectionCases} cases passed`);
+let documentTitleCases=0;
+for(const text of ['Numeric draft','Tựa đề ế e\u0302\u0301 <b>literal</b> & retained','Line 1\nDòng 2 ế e\u0302\u0301']){
+  const model=numericFixture();model.title=text;const h=await numericHarness(model);
+  assert.equal(h.node('studio-document-title-summary').textContent,text,'actual imported title must appear in the identity bar');
+  assert.equal(h.node('studio-document-title-full').textContent,text);assert.equal(h.node('studio-document-title-summary')['aria-label'],'Document title: '+text);
+  assert.equal(JSON.stringify(h.probe.inspect().exam),JSON.stringify(model));documentTitleCases++;
+}
+{
+  const h=await numericHarness(),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  numericInput(h,'q-points','12.');const points=h.node('q-points');points.selectionStart=1;points.selectionEnd=2;
+  for(const raw of ['  Việt e\u0302\u0301 <script>literal</script>  ','','x'.repeat(5000)]){
+    numericInput(h,'exam-title',raw);assert.equal(h.node('studio-document-title-full').textContent,raw);
+    assert.equal(h.node('studio-document-title-summary').textContent,raw||'Document title');
+    assert.equal(JSON.stringify(state.exam),before,'title display does not synchronize the model');assert.equal(h.probe.inspect().answers,answers);
+    assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);documentTitleCases++;
+  }
+  numericInput(h,'exam-title','  Normalized only at Save e\u0302\u0301  ');h.probe.save();
+  assert.equal(h.node('studio-document-title-full').textContent,'Normalized only at Save e\u0302\u0301');
+  assert.equal(h.node('exam-title').value,'  Normalized only at Save e\u0302\u0301  ');
+  const saved=JSON.parse(await h.downloads[0].blob.text());assert.deepEqual(saved,{...JSON.parse(before),title:'Normalized only at Save e\u0302\u0301'});documentTitleCases++;
+  const displayed=h.node('studio-document-title-full').textContent;await h.probe.load({name:'broken.json',text:async()=>'{broken'});
+  assert.equal(h.node('studio-document-title-full').textContent,displayed);assert.equal(h.node('exam-title').value,'  Normalized only at Save e\u0302\u0301  ');documentTitleCases++;
+  const replacement=numericFixture();replacement.title='Replacement ế e\u0302\u0301';await h.probe.load({name:'replacement.json',text:async()=>JSON.stringify(replacement)});
+  assert.equal(h.node('studio-document-title-full').textContent,replacement.title);h.node('btn-load-sample').click();
+  assert.equal(h.node('studio-document-title-full').textContent,'IELTS Academic Reading & Listening Mock Assessment');documentTitleCases++;
+}
+{
+  const h=await numericHarness(),details=h.node('studio-document-title'),summary=h.node('studio-document-title-summary'),full=h.node('studio-document-title-full');
+  for(const node of [summary,full]){node.remove();details.appendChild(node);}summary.focus();details.open=true;
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),focus=summary.focusCalls,answers=state.answers;
+  h.key('Escape',{defaultPrevented:true});assert.equal(details.open,true);h.key('Escape',{ctrlKey:true});assert.equal(details.open,true);
+  h.key('Escape');assert.equal(details.open,false);assert.equal(h.document.activeElement,summary);assert.equal(summary.focusCalls,focus);documentTitleCases++;
+  details.open=true;for(const cb of h.document.listeners.pointerdown||[])cb({target:full});assert.equal(details.open,true);
+  for(const cb of h.document.listeners.pointerdown||[])cb({target:h.node('btn-mode-editor')});assert.equal(details.open,false);documentTitleCases++;
+  details.open=true;for(const cb of details.listeners.focusout||[])cb({relatedTarget:full});assert.equal(details.open,true);
+  for(const cb of details.listeners.focusout||[])cb({relatedTarget:null});assert.equal(details.open,true,'a null destination does not prove outside focus');documentTitleCases++;
+  for(const cb of details.listeners.focusout||[])cb({relatedTarget:h.node('btn-studio-theme')});assert.equal(details.open,false);documentTitleCases++;
+  details.open=true;full.focus();const summaryCalls=summary.focusCalls;h.key('Escape');assert.equal(details.open,false);assert.equal(h.document.activeElement,summary);assert.equal(summary.focusCalls,summaryCalls+1);documentTitleCases++;
+  const points=h.node('q-points');numericInput(h,'q-points','12.');points.selectionStart=1;points.selectionEnd=2;points.focus();details.open=true;
+  const externalSummaryCalls=summary.focusCalls;h.key('Escape');assert.equal(details.open,false);assert.equal(h.document.activeElement,points);assert.equal(summary.focusCalls,externalSummaryCalls);assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);documentTitleCases++;
+  details.open=true;h.node('btn-export-pkg').focus();await h.probe.export();assert.equal(h.node('export-modal').classList.contains('open'),true);
+  h.key('Escape');assert.equal(h.node('export-modal').classList.contains('open'),false);assert.equal(details.open,true,'Export Escape has precedence');assert.equal(h.document.activeElement,h.node('btn-export-pkg'));documentTitleCases++;
+  assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);
+}
+{
+  const h=await numericHarness(),layout=h.window.listeners.resize.find(callback=>callback.name==='layoutDocumentTitle');assert.equal(typeof layout,'function');
+  const before=JSON.stringify(h.probe.inspect().exam),frames=h.window.frames.size;
+  for(const [width,leftWidth,rightLeft,rightWidth,expected] of [[1366,362,1208,134,562],[1600,620,1420,156,280],[1600,200,900,676,168],[948,362,798,134,160],[947,362,797,134,null],[500,362,16,134,null],[1366,362,1208,134,562]]){
+    h.node('studio-titlebar').getBoundingClientRect=()=>({left:0,width});h.node('studio-brand-section').getBoundingClientRect=()=>({left:width===1366||width===1600?24:16,width:leftWidth});
+    h.node('btn-studio-theme').getBoundingClientRect=()=>({left:rightLeft,width:rightWidth});layout();
+    assert.equal(h.node('studio-titlebar').classList.contains('title-collision'),expected===null);assert.equal(h.node('studio-document-title').style.maxWidth,expected===null?'100%':expected+'px');
+    assert.equal(h.window.frames.size,frames,'measuring title must not allocate a RAF');assert.equal(JSON.stringify(h.probe.inspect().exam),before);documentTitleCases++;
+  }
+}
+console.log(`Studio actual title display/raw/model/dismissal/lifetime/geometry boundaries: ${documentTitleCases} cases passed`);
+// File uses native details/button state. Dispatch every actual init listener in
+// registration order; synthetic DOM fixtures do not qualify browser keyboard.
+async function fileDisclosureHarness(){
+  const h=await numericHarness(),file=h.node('studio-file-menu'),summary=h.node('studio-file-summary');
+  for(const id of ['studio-file-summary','btn-load-sample','btn-open-file']){const node=h.node(id);node.remove();file.appendChild(node);}
+  file.open=false;
+  return {h,file,summary,pointer(target){for(const cb of h.document.listeners.pointerdown||[])cb({target});},
+    focusout(relatedTarget){for(const cb of file.listeners.focusout||[])cb({relatedTarget});}};
+}
+let fileDisclosureCases=0;
+{
+  const {h,file,summary,pointer,focusout}=await fileDisclosureHarness();
+  assert.equal(file.listeners.focusout?.length,1,'one File lifetime listener');
+  assert.deepEqual(h.document.listeners.keydown.map(cb=>cb.name),['handleExportDialogKey','handleDocumentTitleKey','handleFileDisclosureKey']);
+  assert.deepEqual(h.document.listeners.pointerdown.map(cb=>cb.name),['handleDocumentTitlePointer','handleFileDisclosurePointer']);
+  for(const id of ['btn-load-sample','btn-open-file']){
+    assert.equal(h.node(id).listeners.click.length,2,'existing source callback plus exactly one File closer');
+    assert.equal(h.node(id).listeners.click[0].name,'closeFileDisclosureForCommand');
+  }
+  fileDisclosureCases++;
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  const field=h.node('q-points');numericInput(h,'q-points','12.');field.selectionStart=1;field.selectionEnd=2;field.focus();
+  const unchanged=()=>{assert.equal(JSON.stringify(h.probe.inspect().exam),before);assert.equal(h.probe.inspect().answers,answers);assert.equal(field.value,'12.');assert.deepEqual([field.selectionStart,field.selectionEnd],[1,2]);};
+  assert.equal(file.open,false);pointer(field);focusout(field);h.key('Escape');assert.equal(h.document.activeElement,field);unchanged();fileDisclosureCases++;
+  file.open=true;pointer(h.node('btn-open-file'));assert.equal(file.open,true);focusout(h.node('btn-load-sample'));assert.equal(file.open,true);fileDisclosureCases++;
+  focusout(null);assert.equal(file.open,true,'null focus destination must not synchronously hide a clicked command');fileDisclosureCases++;
+  focusout(field);assert.equal(file.open,false);assert.equal(h.document.activeElement,field);unchanged();fileDisclosureCases++;
+  file.open=true;pointer(field);assert.equal(file.open,false);assert.equal(h.document.activeElement,field);unchanged();fileDisclosureCases++;
+  for(const options of [{defaultPrevented:true},{ctrlKey:true},{altKey:true},{metaKey:true},{shiftKey:true}]){
+    file.open=true;h.key('Escape',options);assert.equal(file.open,true);unchanged();fileDisclosureCases++;
+  }
+  for(const id of ['studio-file-summary','btn-load-sample','btn-open-file']){
+    file.open=true;h.node(id).focus();const calls=summary.focusCalls||0;const event=h.key('Escape');
+    assert.equal(file.open,false);assert.equal(h.document.activeElement,summary);assert.equal(summary.focusCalls||0,calls+(id==='studio-file-summary'?0:1));if(id!=='studio-file-summary')assert.equal(summary.focusOptions.preventScroll,true);assert.equal(event.prevented,1);unchanged();fileDisclosureCases++;
+  }
+  field.focus();file.open=true;const calls=summary.focusCalls;h.key('Escape');assert.equal(file.open,false);assert.equal(h.document.activeElement,field);assert.equal(summary.focusCalls,calls);unchanged();fileDisclosureCases++;
+  file.open=true;summary.focus();const title=h.node('studio-document-title');title.open=true;
+  h.node('btn-open-file').focus();h.key('Escape');assert.equal(file.open,false);assert.equal(title.open,true,'File-owned Escape resolves File first');assert.equal(h.document.activeElement,summary);fileDisclosureCases++;
+  file.open=true;const full=h.node('studio-document-title-full');full.remove();title.appendChild(full);full.focus();h.key('Escape');assert.equal(title.open,false);assert.equal(file.open,true,'title-owned Escape retains title priority');fileDisclosureCases++;
+  title.open=true;pointer(summary);assert.equal(title.open,false);assert.equal(file.open,true);fileDisclosureCases++;
+  pointer(full);assert.equal(file.open,false);fileDisclosureCases++;
+  file.open=true;h.node('btn-export-pkg').focus();await h.probe.export();assert.equal(h.node('export-modal').classList.contains('open'),true);
+  pointer(field);focusout(field);assert.equal(file.open,true,'active Export owns modal lifetime');h.key('Escape');assert.equal(file.open,true);assert.equal(h.document.activeElement,h.node('btn-export-pkg'));fileDisclosureCases++;
+}
+{
+  const {h,file,summary}=await fileDisclosureHarness();let activations=0;
+  h.node('file-import-input').click=()=>{activations++;assert.equal(file.open,false,'close runs before the unchanged native picker callback');assert.equal(h.document.activeElement,summary,'picker opener stays visible');};
+  file.open=true;h.node('btn-open-file').focus();h.node('btn-open-file').click();assert.equal(activations,1);assert.equal(h.document.activeElement,summary);fileDisclosureCases++;
+  const calls=summary.focusCalls;h.node('btn-open-file').click();assert.equal(activations,2);assert.equal(summary.focusCalls,calls,'closed programmatic activation adds no focus changes');fileDisclosureCases++;
+  const before=JSON.stringify(h.probe.inspect().exam);await h.probe.load({name:'bad.json',text:async()=>'{bad'});assert.equal(JSON.stringify(h.probe.inspect().exam),before);assert.equal(h.document.activeElement,summary);fileDisclosureCases++;
+  file.open=true;h.node('btn-load-sample').focus();let atSource=false;
+  const source=h.node('btn-load-sample').listeners.click[1];h.node('btn-load-sample').listeners.click[1]=event=>{assert.equal(file.open,false);assert.equal(h.document.activeElement,summary);atSource=true;source(event);};
+  h.node('btn-load-sample').click();assert.equal(atSource,true);assert.equal(h.probe.inspect().exam.id,'ielts-sample-01');assert.equal(Object.keys(h.probe.inspect().answers).length,0);fileDisclosureCases++;
+}
+console.log(`Studio actual File grouping/listener order/dismissal/focus/model/command contracts: ${fileDisclosureCases} cases passed`);
+for(const command of ['btn-open-file','btn-load-sample']){
+  const {h,file}=await fileDisclosureHarness();file.open=true;
+  h.node('btn-export-pkg').focus();await h.probe.export();
+  const modal=h.node('export-modal'),ownedFocus=h.document.activeElement;assert.equal(modal.classList.contains('open'),true);assert(modal.contains(ownedFocus));
+  let invoked=0;const source=h.node(command).listeners.click[1];
+  h.node(command).listeners.click[1]=event=>{invoked++;assert.equal(file.open,true,'active Export retains File lifetime before source callback');assert.equal(h.document.activeElement,ownedFocus,'File closer must defer to Export focus');source(event);};
+  let pickers=0;h.node('file-import-input').click=()=>{pickers++;};
+  h.node(command).click();assert.equal(invoked,1,'original programmatic callback still runs once');assert.equal(pickers,command==='btn-open-file'?1:0);
+  assert.equal(file.open,true);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.activeElement,ownedFocus);
+  if(command==='btn-load-sample')assert.equal(h.probe.inspect().exam.id,'ielts-sample-01');
+}
+console.log('Studio actual File command activation under active Export: 2 cases passed');
 let numericCases=0;
 for(const id of ['exam-duration','q-points','q-essay-limit']){
   const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,'1e');numericNavigate(h);
@@ -826,6 +991,99 @@ for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=tru
 }
 console.log(`Studio actual matching resize lifecycle/guards/current focus: ${matchingResizeCases} cases passed`);
 
+// Native single-choice controls must project answers without replacing the focused radio.
+const choiceFixture=type=>({id:'choice-preview',title:'Choices',subject:'',durationSeconds:600,questions:[
+  {id:'choice-a',type,prompt:'Choose ế',options:['A "ế" <b>one</b>','B e\u0302\u0301','C']},
+  {id:'choice-b',type:'multiple_choice',prompt:'Other',options:['Other A','Other B']}]});
+const choiceRadio=(h,index)=>h.node('p-mc-surface').children[index].children[0];
+function choiceChange(radio){radio.checked=true;for(const callback of radio.listeners.change||[])callback({target:radio,currentTarget:radio});}
+let choiceKeyboardCases=0;
+for(const type of ['multiple_choice','reading','listening']){
+  const h=await numericHarness(choiceFixture(type)),state=h.probe.inspect(),before=JSON.stringify(state.exam);
+  h.node('btn-mode-preview').click();const surface=h.node('p-mc-surface');
+  assert.equal(surface.role,'radiogroup');assert.equal(surface['aria-labelledby'],'p-question-prompt');
+  assert.equal(Object.hasOwn(state.answers,'choice-a'),false,'Rendering does not initialize an answer');
+  for(let index=0;index<3;index++){
+    const radio=choiceRadio(h,index);assert.equal(radio.tagName,'INPUT');assert.equal(radio.type,'radio');assert.equal(radio.name,'nstu-preview-choice-choice-a');
+    assert.equal(radio.value,String(index));assert.equal(radio['aria-label'],`Option ${index+1}: ${state.exam.questions[0].options[index]}`);assert.equal(radio.checked,false);assert.equal(radio.listeners.focus.length,1,'one focus listener per rendered radio');
+    assert.equal(surface.children[index].listeners.click?.length||0,0,'Native change owns selection; no legacy label-click path');
+  }
+  const labels=[...surface.children],radio=choiceRadio(h,1);radio.focus();const stats=JSON.stringify(h.probe.stats);choiceChange(radio);
+  assert.equal(state.answers['choice-a'],1);assert.equal(h.document.activeElement,radio);assert.equal(radio.isConnected,true);assert.deepEqual(surface.children,labels);
+  assert.equal(JSON.stringify(h.probe.stats),stats,'Selecting does not render');assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,state.answers);
+  assert.equal(choiceRadio(h,0).checked,false);assert.equal(radio.checked,true);assert.equal(surface.children[1].classList.contains('checked'),true);
+  choiceChange(choiceRadio(h,0));assert.equal(state.answers['choice-a'],0);assert.equal(choiceRadio(h,0).checked,true);assert.equal(radio.checked,false);
+  choiceChange(choiceRadio(h,0));assert.equal(state.answers['choice-a'],0);assert.deepEqual(surface.children,labels);
+  h.node('btn-p-next').click();assert.equal(Object.hasOwn(state.answers,'choice-b'),false);choiceChange(choiceRadio(h,1));assert.equal(state.answers['choice-b'],1);
+  h.node('btn-p-prev').click();assert.equal(choiceRadio(h,0).checked,true);assert.equal(state.answers['choice-b'],1);
+  h.node('btn-mode-editor').click();h.node('btn-mode-preview').click();assert.equal(choiceRadio(h,0).checked,true);assert.equal(JSON.stringify(state.exam),before);choiceKeyboardCases++;
+}
+{
+  const h=await numericHarness(choiceFixture('multiple_choice')),state=h.probe.inspect();state.answers['choice-a']=0;
+  const unrelated=h.node('btn-save-draft');unrelated.focus();h.node('btn-mode-preview').click();assert.equal(h.document.activeElement,unrelated,'Rendering does not focus a radio');
+  assert.equal(choiceRadio(h,0).checked,true);assert.equal(choiceRadio(h,1).checked,false);assert.match(h.node('p-mc-surface').children[0].innerHTML,/&lt;b&gt;one&lt;\/b&gt;/);
+  const input=choiceRadio(h,1);input.checked=false;for(const callback of input.listeners.change)callback({target:input});assert.equal(state.answers['choice-a'],0,'Unchecked change cannot clear or select a response');choiceKeyboardCases++;
+}
+{
+  const h=await numericHarness(choiceFixture('multiple_choice')),state=h.probe.inspect();state.exam.questions[0].options=[];
+  h.node('btn-mode-preview').click();assert.equal(h.node('p-mc-surface').children.length,0);assert.equal(Object.hasOwn(state.answers,'choice-a'),false);choiceKeyboardCases++;
+}
+{
+  const h=await numericHarness(choiceFixture('multiple_choice'));h.node('btn-mode-preview').click();choiceChange(choiceRadio(h,0));const state=h.probe.inspect(),before=JSON.stringify(state.exam);h.probe.save();
+  assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before,'Native choice responses do not alter the whole authoring Save');
+  const fresh={...choiceFixture('reading'),id:'fresh-choice'};await h.probe.load({name:'fresh.json',text:async()=>JSON.stringify(fresh)});
+  assert.equal(Object.hasOwn(h.probe.inspect().answers,'choice-a'),false);assert.equal(choiceRadio(h,0).checked,false);assert.equal(choiceRadio(h,1).checked,false);choiceKeyboardCases++;
+}
+console.log(`Studio actual single-choice native semantics/stable focus/response indices: ${choiceKeyboardCases} cases passed`);
+
+async function choiceResizeHarness(){const h=await numericHarness(choiceFixture('multiple_choice'));h.node('btn-mode-preview').click();const surface=h.node('p-mc-surface'),field=choiceRadio(h,2);field.focus();return{h,field,surface,label:field.parentNode,queue:()=>h.window.listeners.resize.find(callback=>callback.name==='queueChoiceFocusReveal')({type:'resize'})};}
+let choiceResizeCases=0;
+{
+  const {h,field,label,queue}=await choiceResizeHarness(),state=h.probe.inspect(),model=JSON.stringify(state.exam),stats=JSON.stringify(h.probe.stats),focus=field.focusCalls;
+  assert.equal(label.scrolls.length,1,'ordinary radio focus reveals full proxy before resize');queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0]);h.flushFrames();
+  assert.equal(label.scrolls.length,2);assert.deepEqual({...label.scrolls[1]},{block:'nearest',inline:'nearest',behavior:'instant'});assert.equal(field.focusCalls,focus);assert.equal(h.document.activeElement,field);
+  assert.equal(JSON.stringify(state.exam),model);assert.equal(h.probe.inspect().answers,state.answers);assert.equal(JSON.stringify(h.probe.stats),stats);choiceResizeCases++;
+}
+for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({surface})=>surface.style.display='none',({h})=>h.node('preview-view').style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus(),({h})=>h.probe.inspect().exam.questions[0].isMatching=true,({h})=>h.probe.inspect().exam.questions[0].type='essay',({field})=>field.type='text']){
+  const ctx=await choiceResizeHarness();assert.equal(ctx.label.scrolls.length,1);ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),model=JSON.stringify(state.exam),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.label.scrolls.length,1,'ineligible queued resize adds no reveal');assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),model);assert.equal(ctx.h.probe.inspect().answers,state.answers);choiceResizeCases++;
+}
+{
+  const {h,field,label,queue}=await choiceResizeHarness();queue();const next=choiceRadio(h,0);next.focus();assert.equal(next.parentNode.scrolls.length,1,'new current radio has separate native focus reveal');h.flushFrames();assert.equal(label.scrolls.length,1);assert.equal(next.parentNode.scrolls.length,2);assert.equal(h.document.activeElement,next);choiceResizeCases++;
+}
+console.log(`Studio actual single-choice resize ownership/lifecycle/guards: ${choiceResizeCases} cases passed`);
+
+const previewTextFixture=()=>({id:'text-preview',title:'Text Preview',subject:'',durationSeconds:600,questions:[
+  {id:'essay',type:'essay',prompt:'Essay',points:0,wordLimit:250},{id:'short',type:'short_answer',prompt:'Short',points:1}]});
+async function previewTextResizeHarness(short=false){const h=await numericHarness(previewTextFixture());h.node('btn-mode-preview').click();if(short)h.node('btn-p-next').click();const field=h.node(short?'p-sa-input':'p-essay-input'),view=h.node('preview-view');field.remove();view.appendChild(field);field.value='A e\u0302\u0301 Việt';field.selectionStart=2;field.selectionEnd=5;field.oninput({target:field});field.focus();return{h,field,view,queue:()=>h.window.listeners.resize.find(callback=>callback.name==='queuePreviewTextFocusReveal')({type:'resize'})};}
+let previewTextResizeCases=0;
+for(const short of [false,true]){
+  const {h,field,queue}=await previewTextResizeHarness(short),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=JSON.stringify(state.answers),stats=JSON.stringify(h.probe.stats),focus=field.focusCalls,value=field.value;
+  assert.equal(field.listeners.focus.length,1,'one native focus listener per persistent text control');assert.equal(field.scrolls.length,1,'ordinary native focus reveals independently of resize');
+  queue();queue();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0]);h.flushFrames();assert.equal(field.scrolls.length,2);assert.deepEqual({...field.scrolls[1]},{block:'nearest',inline:'nearest',behavior:'instant'});
+  assert.equal(field.focusCalls,focus);assert.equal(h.document.activeElement,field);assert.equal(field.value,value);assert.equal(field.selectionStart,2);assert.equal(field.selectionEnd,5);assert.equal(JSON.stringify(state.exam),before);assert.equal(JSON.stringify(state.answers),answers);assert.equal(h.probe.inspect().answers,state.answers);assert.equal(JSON.stringify(h.probe.stats),stats);previewTextResizeCases++;
+}
+for(const invalidate of [({field})=>field.hidden=true,({field})=>field.inert=true,({field})=>field.disabled=true,({field})=>field.remove(),({field})=>field.ownerDocument={},({field})=>field.style.visibility='hidden',({view})=>view.style.display='none',({h})=>h.node('export-modal').classList.add('open'),({h})=>h.node('btn-save-draft').focus(),({h})=>h.probe.inspect().exam.questions[0].type='reading',({h,field})=>{field.remove();h.document.body.appendChild(field);},({h})=>h.probe.inspect().exam.questions[0].isMatching=true]){
+  const ctx=await previewTextResizeHarness();assert.equal(ctx.field.scrolls.length,1);ctx.queue();invalidate(ctx);const state=ctx.h.probe.inspect(),before=JSON.stringify(state.exam),answers=JSON.stringify(state.answers),active=ctx.h.document.activeElement;ctx.h.flushFrames();assert.equal(ctx.field.scrolls.length,1,'ineligible queued resize adds no reveal');assert.equal(ctx.h.document.activeElement,active);assert.equal(JSON.stringify(state.exam),before);assert.equal(JSON.stringify(state.answers),answers);previewTextResizeCases++;
+}
+{
+  const {h,field,view,queue}=await previewTextResizeHarness();queue();h.node('btn-p-next').click();const next=h.node('p-sa-input');next.remove();view.appendChild(next);next.focus();assert.equal(next.scrolls.length,1,'new current input receives ordinary native reveal');const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=JSON.stringify(state.answers);h.flushFrames();assert.equal(field.scrolls.length,1);assert.equal(next.scrolls.length,2);assert.equal(h.document.activeElement,next);assert.equal(JSON.stringify(state.exam),before);assert.equal(JSON.stringify(state.answers),answers);previewTextResizeCases++;
+}
+console.log(`Studio actual text Preview resize ownership/caret/guards: ${previewTextResizeCases} cases passed`);
+
+let previewReferenceCases=0;
+for(const type of ['essay','short_answer','reading','multiple_choice','listening'])for(const kind of ['passage','audio','both','none']){
+  const q={id:'ref',type,prompt:'Authored prompt ế',points:0,options:['A','B']};if(kind==='passage'||kind==='both')q.passage='Authored passage <b>literal</b>';if(kind==='audio'||kind==='both')q.audio='media/listening-01.mp3';
+  const model={id:'reference-metadata',title:'Reference metadata',subject:'',durationSeconds:600,questions:[q,{id:'no-ref',type:'short_answer',prompt:'No reference'},{id:'last-ref',type:'essay',prompt:'Last',passage:'Last passage'}]},h=await numericHarness(model),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  h.node('btn-mode-preview').click();const label=kind==='audio'?'Audio reference':'Reference material';assert.equal(h.node('p-passage-heading').textContent,label);assert.equal(h.node('preview-pane-left')['aria-label'],label);assert.equal(h.node('p-passage-sub').textContent,kind==='none'?'':'Question 1 of 3');assert.equal(h.node('preview-pane-left').style.display,kind==='none'?'none':'block');
+  if(q.audio)assert.equal(h.node('p-audio-player').src,q.audio);assert.equal(h.node('p-question-prompt').textContent,q.prompt);assert.equal(h.node('p-question-points').textContent,'0 points');assert.equal(h.node('preview-timer').textContent,'10:00');
+  h.node('btn-p-next').click();assert.equal(h.node('p-passage-sub').textContent,'');assert.equal(h.node('preview-pane-left').style.display,'none');h.node('btn-p-next').click();assert.equal(h.node('p-passage-sub').textContent,'Question 3 of 3');assert.equal(h.node('p-passage-heading').textContent,'Reference material');assert.equal(h.node('preview-pane-left')['aria-label'],'Reference material');
+  assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().exam,state.exam);assert.equal(h.probe.inspect().answers,answers);h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before);previewReferenceCases++;
+}
+{
+  const h=await numericHarness({id:'empty-reference',title:'Empty reference',subject:'',durationSeconds:600,questions:[{id:'empty',type:'short_answer',prompt:'Empty',passage:'',audio:''}]});h.node('btn-mode-preview').click();assert.equal(h.node('p-passage-sub').textContent,'');assert.equal(h.node('preview-pane-left').style.display,'none');previewReferenceCases++;
+}
+console.log(`Studio actual reference metadata/kind/current ordinal/state/Save: ${previewReferenceCases} cases passed`);
+
 // Missing open/close helpers, stale Tab candidates or an unguarded listener must fail these real-controller cases.
 let dialogCases=0;
 for(const preview of [false,true]){
@@ -836,7 +1094,9 @@ for(const preview of [false,true]){
   assert.equal(h.key('Tab').prevented,0);assert.equal(h.key('Escape').prevented,0);
   const snapshot=h.probe.inspect(),modelContent=JSON.stringify(snapshot.exam),mode=h.node('preview-view').style.display;
   exportButton.click();assert.equal(h.document.activeElement,h.node('btn-cancel-export'),'Export starts on safe Cancel');
-  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.length,1);
+  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.filter(callback=>!['handleDocumentTitleKey','handleFileDisclosureKey'].includes(callback.name)).length,1);
+  assert.equal(h.document.listeners.keydown.filter(callback=>callback.name==='handleFileDisclosureKey').length,1,'exactly one additional File Escape registration');
+  assert.equal(h.document.listeners.keydown.filter(callback=>callback.name==='handleDocumentTitleKey').length,1,'exactly one disclosure Escape registration');
   const postSync=JSON.stringify(h.probe.inspect().exam);
   for(const [key,want] of [['Tab','btn-close-export'],['Tab','btn-cancel-export'],['Tab','btn-close-export']]){assert.equal(h.key(key).prevented,1);assert.equal(h.document.activeElement,h.node(want));}
   h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('btn-cancel-export'));

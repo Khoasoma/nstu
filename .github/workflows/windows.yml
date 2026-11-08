@@ -34,6 +34,110 @@ jobs:
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: MSVC Release assertion proof in spaced paths
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $utf8NoBom = [Text.UTF8Encoding]::new($false)
+          if ($env:CL -or $env:_CL_) { throw 'Unexpected MSVC option environment.' }
+          $proofRoot = Join-Path $env:GITHUB_WORKSPACE 'build/assertion proof project'
+          if (Test-Path -LiteralPath $proofRoot) { throw 'Assertion proof path already exists; preserve it.' }
+          $sourceRoot = Join-Path $proofRoot 'source with spaces'
+          $buildRoot = Join-Path $proofRoot 'build with spaces'
+          $logRoot = Join-Path $proofRoot 'raw logs'
+          New-Item -ItemType Directory -Path $sourceRoot, $logRoot -ErrorAction Stop | Out-Null
+          $cmake = (Get-Command cmake -ErrorAction Stop).Source
+          function Invoke-AssertionProofNative {
+            param([string]$Name, [string]$Program, [string[]]$ArgumentList, [int]$ExpectedExit, [switch]$CheckWarnings)
+            $stdout = Join-Path $logRoot ($Name + '.stdout')
+            $stderr = Join-Path $logRoot ($Name + '.stderr')
+            & $Program @ArgumentList 1> $stdout 2> $stderr
+            $nativeExit = $LASTEXITCODE
+            $receipt = @{ program = $Program; argv = $ArgumentList; actualExit = $nativeExit; expectedExit = $ExpectedExit }
+            [IO.File]::WriteAllText((Join-Path $logRoot ($Name + '.json')), ($receipt | ConvertTo-Json -Depth 4), $utf8NoBom)
+            $raw = [IO.File]::ReadAllText($stdout) + "`n" + [IO.File]::ReadAllText($stderr)
+            if ($CheckWarnings -and $raw -match '(?im)^(?!\s*0\s+Warning\(s\)\s*$).*\bwarning\b|\bD9025\b') { throw "$Name emitted a warning; raw logs retained." }
+            if ($null -eq $nativeExit -or $nativeExit -ne $ExpectedExit) { throw "$Name native exit $nativeExit; expected $ExpectedExit" }
+          }
+          try {
+            $cmakeInput = Join-Path $env:GITHUB_WORKSPACE 'tests/CMakeLists.txt'
+            $headerInput = Join-Path $env:GITHUB_WORKSPACE 'tests/assertions_enabled.hpp'
+            $checkout = & git -C $env:GITHUB_WORKSPACE rev-parse HEAD
+            $gitExit = $LASTEXITCODE
+            if ($gitExit -ne 0 -or $checkout -notmatch '^[0-9a-f]{40}$') { throw 'Checked-out commit could not be identified.' }
+            $cmakeHash = (Get-FileHash -LiteralPath $cmakeInput).Hash
+            $headerHash = (Get-FileHash -LiteralPath $headerInput).Hash
+            $match = [regex]::Match([IO.File]::ReadAllText($cmakeInput), '\Afunction\(nstu_enable_test_assertions target\)\r?\n.*?\r?\nendfunction\(\)', [Text.RegularExpressions.RegexOptions]::Singleline)
+            if (-not $match.Success) { throw 'Exact first production assertion function not found.' }
+            $helperCopy = Join-Path $sourceRoot 'assertion helper.cmake'
+            $headerCopy = Join-Path $sourceRoot 'assertions_enabled.hpp'
+            [IO.File]::WriteAllText($helperCopy, $match.Value, $utf8NoBom)
+            [IO.File]::Copy($headerInput, $headerCopy, $false)
+            $helperHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($utf8NoBom.GetBytes($match.Value)))
+            if ((Get-FileHash -LiteralPath $helperCopy).Hash -ne $helperHash) { throw 'Copied helper bytes differ.' }
+            if ((Get-FileHash -LiteralPath $headerCopy).Hash -ne $headerHash -or (Get-FileHash -LiteralPath $headerInput).Hash -ne $headerHash -or (Get-FileHash -LiteralPath $cmakeInput).Hash -ne $cmakeHash) { throw 'Source/copy provenance changed.' }
+            $provenance = @{ checkout = $checkout; sourceCMake = $cmakeInput; sourceCMakeSHA256 = $cmakeHash; sourceHeader = $headerInput; sourceHeaderSHA256 = $headerHash; extractedHelperSHA256 = $helperHash; helperCopy = $helperCopy; headerCopy = $headerCopy }
+            [IO.File]::WriteAllText((Join-Path $logRoot 'provenance.json'), ($provenance | ConvertTo-Json), $utf8NoBom)
+            $probe = @'
+          #include <cassert>
+          int main() {
+              int n = 0;
+              assert(++n == 1);
+              return n == 1 ? 0 : 1;
+          }
+          '@
+            [IO.File]::WriteAllText((Join-Path $sourceRoot 'probe.cpp'), $probe, $utf8NoBom)
+            $project = @'
+          cmake_minimum_required(VERSION 3.25)
+          project(NstuAssertionProof LANGUAGES CXX)
+          if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR NOT MSVC OR NOT CMAKE_GENERATOR MATCHES "^Visual Studio")
+              message(FATAL_ERROR "Actual MSVC Visual Studio proof required")
+          endif()
+          message(STATUS "Assertion proof compiler=${CMAKE_CXX_COMPILER_ID}; version=${CMAKE_CXX_COMPILER_VERSION}; path=${CMAKE_CXX_COMPILER}; generator=${CMAKE_GENERATOR}; platform=${CMAKE_GENERATOR_PLATFORM}; toolset=${CMAKE_VS_PLATFORM_TOOLSET}; toolset_version=${CMAKE_VS_PLATFORM_TOOLSET_VERSION}; VS_instance=${CMAKE_GENERATOR_INSTANCE}; VS_build=${CMAKE_VS_VERSION_BUILD_NUMBER}; configuration=Release")
+          include("${CMAKE_CURRENT_LIST_DIR}/assertion helper.cmake")
+          foreach(target IN ITEMS assertion_negative assertion_positive)
+              add_executable(${target} probe.cpp)
+              target_compile_features(${target} PRIVATE cxx_std_20)
+              target_compile_options(${target} PRIVATE /W4 /WX /permissive-)
+          endforeach()
+          nstu_enable_test_assertions(assertion_positive)
+          '@
+            [IO.File]::WriteAllText((Join-Path $sourceRoot 'CMakeLists.txt'), $project, $utf8NoBom)
+            # This witness proves expression evaluation; standard <cassert> semantics are independently reviewed.
+            $inputs = Get-ChildItem -LiteralPath $sourceRoot -File | Get-FileHash | Select-Object Path, Hash
+            [IO.File]::WriteAllText((Join-Path $proofRoot 'input-hashes.json'), ($inputs | ConvertTo-Json), $utf8NoBom)
+            Write-Host ($inputs | ConvertTo-Json)
+            Invoke-AssertionProofNative -Name configure -Program $cmake -ArgumentList @('-S', $sourceRoot, '-B', $buildRoot, '-G', 'Visual Studio 17 2022', '-A', 'x64', '-DCMAKE_CXX_FLAGS=') -ExpectedExit 0 -CheckWarnings
+            foreach ($target in @('assertion_negative', 'assertion_positive')) {
+              $projectPath = Join-Path $buildRoot ($target + '.vcxproj')
+              [xml]$vs = [IO.File]::ReadAllText($projectPath)
+              $release = @($vs.Project.ItemDefinitionGroup | Where-Object { $_.Condition -like '*Release|x64*' })
+              if ($release.Count -ne 1) { throw "$target Release x64 settings missing or ambiguous." }
+              $compile = $release[0].ClCompile
+              if ($compile.WarningLevel -ne 'Level4' -or $compile.TreatWarningAsError -ne 'true' -or $compile.ConformanceMode -ne 'true' -or $compile.LanguageStandard -ne 'stdcpp20') { throw "$target strict MSVC settings drift." }
+              if ([string]$compile.PreprocessorDefinitions -notmatch '(^|;)NDEBUG(;|$)') { throw "$target lacks standard Release NDEBUG." }
+              $forced = @(([string]$compile.ForcedIncludeFiles).Split(';') | Where-Object { $_ -and $_ -ne '%(ForcedIncludeFiles)' })
+              if ($target -eq 'assertion_positive') {
+                if ($forced.Count -ne 1 -or [IO.Path]::GetFullPath($forced[0]) -ne [IO.Path]::GetFullPath($headerCopy)) { throw 'Production helper forced-include path not preserved.' }
+              } elseif ($forced.Count -ne 0) { throw 'Negative control received a forced include.' }
+              Write-Host "$target Release|x64 /W4 /WX /permissive- stdcpp20 NDEBUG; ForcedIncludeFiles=$($compile.ForcedIncludeFiles)"
+              Write-Host "$projectPath SHA256=$((Get-FileHash -LiteralPath $projectPath).Hash)"
+            }
+            Invoke-AssertionProofNative -Name build -Program $cmake -ArgumentList @('--build', $buildRoot, '--config', 'Release', '--target', 'assertion_negative', 'assertion_positive', '--verbose', '--', '/nologo', '/v:normal') -ExpectedExit 0 -CheckWarnings
+            Invoke-AssertionProofNative -Name negative -Program (Join-Path $buildRoot 'Release/assertion_negative.exe') -ArgumentList @() -ExpectedExit 1
+            Invoke-AssertionProofNative -Name positive -Program (Join-Path $buildRoot 'Release/assertion_positive.exe') -ArgumentList @() -ExpectedExit 0
+          } catch {
+            [IO.File]::WriteAllText((Join-Path $proofRoot 'failure.txt'), ($_ | Out-String), $utf8NoBom)
+            throw
+          } finally {
+            $retainedText = @(Get-ChildItem -LiteralPath $logRoot -File) + @(Get-ChildItem -LiteralPath $sourceRoot -File) + @(Get-ChildItem -LiteralPath $buildRoot -Filter 'assertion_*.vcxproj' -File -ErrorAction SilentlyContinue)
+            foreach ($file in $retainedText) {
+              Write-Host "::group::$($file.FullName)"
+              Write-Host ([IO.File]::ReadAllText($file.FullName))
+              Write-Host '::endgroup::'
+            }
+          }
       - name: Validate installer and exam assets
         shell: pwsh
         run: |

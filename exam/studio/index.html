@@ -12,39 +12,52 @@
 
   <!-- Top Studio Header -->
   <header class="studio-header" id="studio-header">
-    <div class="brand-section">
-      <div class="brand-logo">
-        <img class="nstu-brand-image" src="../web/assets/nstu-brand.png" alt="NSTU" width="2386" height="1037">
-        <span class="brand-title">Exam Studio</span>
+    <div class="studio-titlebar" id="studio-titlebar">
+      <div class="brand-section" id="studio-brand-section">
+        <div class="brand-logo">
+          <img class="nstu-brand-image" src="../web/assets/nstu-brand.png" alt="NSTU" width="2386" height="1037">
+          <span class="brand-title">Exam Studio</span>
+        </div>
+        <span class="brand-subtitle">Assessment Authoring & Packaging</span>
       </div>
-      <span class="brand-subtitle">Assessment Authoring & Packaging</span>
-    </div>
-
-    <!-- Mode Switcher -->
-    <div class="mode-toggle-group" role="tablist" aria-label="Studio Mode">
-      <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true">
-        <span>✍️</span> Authoring
-      </button>
-      <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false">
-        <span>👁️</span> IELTS Live Preview
-      </button>
-    </div>
-
-    <!-- Global Actions -->
-    <div class="header-actions">
       <button class="btn btn-secondary" id="btn-studio-theme" type="button" aria-label="Switch to dark appearance">Dark appearance</button>
-      <button class="btn btn-secondary" id="btn-load-sample" type="button" title="Load sample IELTS test">
-        <span>📋</span> Sample
-      </button>
-      <button class="btn btn-secondary" id="btn-open-file" type="button" title="Open existing .nstuexam or manifest.json">
-        <span>📂</span> Open
-      </button>
-      <button class="btn btn-primary" id="btn-save-draft" type="button" title="Save authoring draft JSON">
-        <span>💾</span> Save
-      </button>
-      <button class="btn btn-secondary" id="btn-export-pkg" type="button" title="Compile and export .nstuexam bundle">
-        <span>📦</span> Export .nstuexam
-      </button>
+      <details class="studio-document-title" id="studio-document-title">
+        <summary id="studio-document-title-summary" aria-label="Document title">Document title</summary>
+        <div class="document-title-full" id="studio-document-title-full" role="region" aria-label="Full document title" tabindex="0"></div>
+      </details>
+    </div>
+
+    <div class="studio-commandbar" id="studio-commandbar">
+      <!-- Mode Switcher -->
+      <div class="mode-toggle-group" role="tablist" aria-label="Studio Mode">
+        <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true">
+          <span>✍️</span> Authoring
+        </button>
+        <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false">
+          <span>👁️</span> Preview
+        </button>
+      </div>
+
+      <!-- Document Actions -->
+      <div class="header-actions">
+        <details class="studio-file-menu" id="studio-file-menu">
+          <summary class="btn btn-secondary" id="studio-file-summary">File</summary>
+          <div class="studio-file-commands">
+        <button class="btn btn-secondary" id="btn-load-sample" type="button" title="Load sample IELTS test">
+          <span>📋</span> Sample
+        </button>
+        <button class="btn btn-secondary" id="btn-open-file" type="button" title="Open existing .nstuexam or manifest.json">
+          <span>📂</span> Open
+        </button>
+          </div>
+        </details>
+        <button class="btn btn-primary" id="btn-save-draft" type="button" title="Save authoring draft JSON">
+          <span>💾</span> Save
+        </button>
+        <button class="btn btn-secondary" id="btn-export-pkg" type="button" title="Compile and export .nstuexam bundle">
+          <span>📦</span> Export .nstuexam
+        </button>
+      </div>
     </div>
   </header>
 
@@ -242,10 +255,10 @@
     <div class="preview-split-container" id="preview-split-container">
       
       <!-- Left Column: Reading Passage / Stimulus -->
-      <section class="preview-pane-left" id="preview-pane-left" aria-label="Reading Passage">
+      <section class="preview-pane-left" id="preview-pane-left" aria-label="Reference material">
         <article class="ielts-passage-article">
-          <h2 class="ielts-passage-title" id="p-passage-heading">Reading Passage</h2>
-          <div class="ielts-passage-subtitle" id="p-passage-sub">You should spend about 20 minutes on Questions 1–4, which are based on the reading passage below.</div>
+          <h2 class="ielts-passage-title" id="p-passage-heading">Reference material</h2>
+          <div class="ielts-passage-subtitle" id="p-passage-sub"></div>
           <div id="p-passage-content">
             <!-- Formatted paragraphs with [Paragraph A] badges -->
           </div>
