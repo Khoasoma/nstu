@@ -30,6 +30,20 @@ const canonicalRunner=context.window.NSTU_RUNNER_TEMPLATE;
 
 // Fault-inject the actual private reader helper without exporting production APIs.
 const studioSource = await readFile(new URL('exam/studio/studio.js', root), 'utf8');
+const titleHelperStart=studioSource.indexOf('  function renderDocumentTitle(');
+const titleHelperEnd=studioSource.indexOf('  function renderEditor() {');
+const titleSource=titleHelperStart>=0?studioSource.slice(titleHelperStart,titleHelperEnd):'';
+const titleFixtureStyle=node=>({visibility:node.style?.visibility||'visible',display:node.style?.display||'block',columnGap:'16px',
+  getPropertyValue(name){assert.equal(name,'--studio-title-minimum-width');return '160px';}});
+function titleFixtureRect(id){
+  return {'studio-titlebar':{left:0,width:1366},'studio-brand-section':{left:24,width:362},'btn-studio-theme':{left:1208,width:134}}[id]||{left:0,width:1000};
+}
+function titleFixtureClassList(node){return{
+  add(name){if(!this.contains(name))node.className=(node.className+' '+name).trim();},
+  remove(name){node.className=node.className.split(' ').filter(x=>x!==name).join(' ');},
+  contains(name){return node.className.split(' ').includes(name);},
+  toggle(name,force){const next=force===undefined?!this.contains(name):!!force;if(next)this.add(name);else this.remove(name);return next;}
+};}
 const dialogStart=studioSource.indexOf('  let exportDialogOpener =');
 const dialogEnd=studioSource.indexOf('  function syncExamMetadata() {');
 assert.ok(dialogStart>=0&&dialogEnd>dialogStart);
@@ -107,8 +121,9 @@ assert.ok(initStart >= 0 && initEnd > initStart && compileStart >= 0 && compileE
 const fieldNodes = new Map();
 function fieldNode(id) {
   if (!fieldNodes.has(id)) fieldNodes.set(id, {
-    value: '', children: [], listeners: {},
-    classList: { add() {}, remove() {} }, setAttribute() {},
+    value: '', children: [], listeners: {}, style:{},className:'',textContent:'',
+    get classList(){return titleFixtureClassList(this);},setAttribute(name,value){this[name]=String(value);},
+    getBoundingClientRect(){return titleFixtureRect(id);},contains(target){return target===this||this.children.some(c=>c.contains?.(target));},
     addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
   });
   return fieldNodes.get(id);
@@ -125,6 +140,7 @@ const fields = vm.runInNewContext(`(() => {
     renderPreview = () => {}, showToast = () => {}, handleImportFile = () => {},
     saveDraft = () => {}, exportPackage = () => {}, addQuestion = () => {};
   ${studioSource.slice(compileStart, compileEnd)}
+  ${titleSource}
   ${dialogSource}
   ${studioSource.slice(initStart, initEnd)}
   init();
@@ -132,7 +148,7 @@ const fields = vm.runInNewContext(`(() => {
     manifest() { return compileManifest(currentExam); } };
 })()`, { getNode: fieldNode, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
-  localStorage: { getItem() { return null; }, setItem() {} } });
+  getComputedStyle:titleFixtureStyle,localStorage: { getItem() { return null; }, setItem() {} } });
 function placeholderInput(value) {
   const node = fieldNode('q-sa-placeholder'); node.value = value;
   for (const callback of node.listeners.input || []) callback({ target: node });
@@ -165,7 +181,8 @@ const originsEnd = studioSource.indexOf('  function validateOrigin(', originsSta
 assert.ok([renderStart, renderEnd, addStart, addEnd, syncStart, syncEnd, originsStart, originsEnd].every(index => index >= 0));
 const transitionNodes = new Map();
 function transitionNode(id = '') {
-  const node = { value: '', children: [], listeners: {}, textContent: '',
+  const node = { value: '', children: [], listeners: {}, textContent: '',style:{},className:'',
+    get classList(){return titleFixtureClassList(this);},getBoundingClientRect(){return titleFixtureRect(id);},
     setAttribute(name,value) { this[name]=String(value); },
     contains(target) { return target === this || this.children.some(child => child.contains?.(target)); },
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); },
@@ -181,6 +198,7 @@ const transitions = vm.runInNewContext(`(() => {
   const previewAnswers = {}; // Existing addQuestion now reads retained Preview identities.
   const el = getNode, escapeHtml = value => value;
   const renderActiveQuestionForm = () => {}, showToast = () => {};
+  ${titleSource}
   ${dialogSource}
   ${studioSource.slice(renderStart, renderEnd)}
   ${studioSource.slice(addStart, addEnd)}
@@ -189,7 +207,7 @@ const transitions = vm.runInNewContext(`(() => {
   renderEditor();
   return { exam: currentExam, add: addQuestion, selectedIndex() { return activeQuestionIndex; } };
 })()`, { getNode: id => transitionNodes.get(id) || transitionNode(id),
-  document: { createElement: () => transitionNode() } });
+  getComputedStyle:titleFixtureStyle,document: { createElement: () => transitionNode() } });
 function editTransitionMetadata(title) {
   const values = { 'exam-id': ' new-id ', 'exam-title': title, 'exam-subject': ' New subject ',
     'exam-duration': '43', 'exam-allowed-origins': ' https://example.test\nhttps://example.test ' };
@@ -296,7 +314,9 @@ assert.ok(importStart >= 0 && importEnd > importStart && previewStateStart >= 0 
 const replacementNodes = new Map();
 function replacementNode(id) {
   if (!replacementNodes.has(id)) replacementNodes.set(id, {
-    listeners: {}, style: { display: 'none' }, setAttribute() {}, classList: { add() {}, remove() {} },
+    listeners: {}, style: { display: 'none' },className:'',children:[],textContent:'',
+    setAttribute(name,value){this[name]=String(value);},get classList(){return titleFixtureClassList(this);},
+    getBoundingClientRect(){return titleFixtureRect(id);},contains(target){return target===this||this.children.some(c=>c.contains?.(target));},
     addEventListener(type, callback) { (this.listeners[type] ||= []).push(callback); }
   });
   return replacementNodes.get(id);
@@ -312,6 +332,7 @@ const replacements = vm.runInNewContext(`(() => {
     addQuestion = () => {}, renderPreview = () => { ++previewRenders; }, initSplitter = () => {};
   ${studioSource.slice(previewStateStart, previewStateEnd)}
   ${studioSource.slice(importStart, importEnd)}
+  ${titleSource}
   ${dialogSource}
   ${studioSource.slice(initStart, initEnd)}
   init();
@@ -321,7 +342,7 @@ const replacements = vm.runInNewContext(`(() => {
     sample() { el('btn-load-sample').listeners.click[0](); } };
 })()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
-  localStorage: { getItem() { return null; }, setItem() {} },
+  getComputedStyle:titleFixtureStyle,localStorage: { getItem() { return null; }, setItem() {} },
   NstuZip: { Reader: class { async readEntries() {
     return [{ path: 'manifest.json', bytes: new TextEncoder().encode(JSON.stringify(zipManifest)) }];
   } } } });
@@ -370,7 +391,7 @@ console.log('Studio Preview reset/refresh on model replacement: 8 scenarios pass
 class ImportDomNode {
   constructor(id = '') { this.id = id; this.children = []; this.style = {}; this.dataset = {}; this.listeners = {}; this.className = ''; this._html = ''; this._value = ''; this.textContent = ''; this.queries = new Map(); }
   get value() { return this._value; }
-  set value(value) { this._value = String(value ?? ''); }
+  set value(value) { const text=String(value??'');this._value=this.id==='exam-title'?text.replace(/[\r\n]/g,''):text; }
   get innerHTML() { return this._html; }
   set innerHTML(value) { this._html = String(value); for(const child of this.children)child.parentNode=null; this.children = []; this.queries.clear(); }
   get classList() { return { add: name => { this.className += ' ' + name; }, remove: name => { this.className = this.className.split(' ').filter(x => x !== name).join(' '); }, contains: name => this.className.split(' ').includes(name), toggle: (name,force) => { const present=this.className.split(' ').includes(name),next=force===undefined?!present:!!force;if(next&&!present)this.className+=' '+name;if(!next)this.className=this.className.split(' ').filter(x=>x!==name).join(' ');return next; } }; }
@@ -384,7 +405,7 @@ class ImportDomNode {
   }
   addEventListener(type, listener) { (this.listeners[type] ||= []).push(listener); }
   setAttribute(name, value) { this[name] = String(value); }
-  getBoundingClientRect() { return { left: 0, width: 1000 }; }
+  getBoundingClientRect() { return titleFixtureRect(this.id); }
   remove() { if (this.parentNode) this.parentNode.children = this.parentNode.children.filter(child => child !== this); this.parentNode = null; }
   click() { (this.listeners.click || []).forEach(listener => listener({ target: this, currentTarget: this, preventDefault() {}, stopPropagation() {} })); }
   get isConnected() { return this === this.ownerDocument?.body || !!this.parentNode?.isConnected; }
@@ -575,7 +596,7 @@ async function actualImportHarness(reader) {
   getNode('preview-view').style.display = 'none';
   doc.getElementById=getNode;doc.createElement=tag=>{const node=new ImportDomNode();node.tagName=tag.toUpperCase();node.tabIndex=['button','input'].includes(tag)?0:-1;node.ownerDocument=doc;if(tag==='a')node.click=()=>downloads.push({filename:node.download,blob:blobs.get(node.href)});return node;};
   const globals = { window:win, document: doc, atob, btoa,
-    getComputedStyle:node=>({visibility:node.style.visibility||'visible',display:node.style.display||'block'}),
+    getComputedStyle:titleFixtureStyle,
     localStorage: { getItem() { return null; }, setItem() {} }, setTimeout() {}, confirm: () => true,
     TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
     crypto: (await import('node:crypto')).webcrypto, URL:DownloadURL, location: { origin:'http://studio.test' } };
@@ -592,7 +613,7 @@ async function actualImportHarness(reader) {
   return { probe:globals.window.importProbe, node:getNode, zip:globals.window.NstuZip, downloads, document:doc,
     window:win,resize(){for(const callback of win.listeners.resize||[])callback({type:'resize'});},
     flushFrames(){const callbacks=[...win.frames.values()];win.frames.clear();callbacks.forEach(callback=>callback());},
-    key(key,options={}){const event={key,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,prevented:0,preventDefault(){this.prevented++;},...options};for(const callback of doc.listeners.keydown||[])callback(event);return event;},
+    key(key,options={}){const event={key,shiftKey:false,ctrlKey:false,altKey:false,metaKey:false,prevented:0,defaultPrevented:false,preventDefault(){this.prevented++;this.defaultPrevented=true;},...options};for(const callback of doc.listeners.keydown||[])callback(event);return event;},
     seed(open) { globals.window.importProbe.seed(old,answers,open); getNode('exam-title').value='Raw unsynced title'; getNode('exam-id').value='raw-unsynced-id'; getNode('exam-duration').value='17'; getNode('exam-allowed-origins').value='raw.example'; getNode('toast-container').appendChild(new ImportDomNode('prior-feedback')); return globals.window.importProbe.inspect(); } };
 }
 const importFixture = () => ({ id:'new-draft', title:'New title', durationSeconds:600, questions:[{id:'new-q',type:'short_answer',prompt:'New prompt'}] });
@@ -604,7 +625,8 @@ let resizeCases=0;
   const {h,field}=await resizeHarness();assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueAuthoringFocusReveal').length,1,'one actual authoring resize listener is installed');
   assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueMatchingFocusReveal').length,1,'one matching resize listener is installed');
   assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queueChoiceFocusReveal').length,1,'one choice resize listener is installed');
-  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queuePreviewTextFocusReveal').length,1,'one text Preview resize listener is installed');assert.equal(h.window.listeners.resize.length,4,'no duplicate resize registrations');
+  assert.equal(h.window.listeners.resize?.filter(callback=>callback.name==='queuePreviewTextFocusReveal').length,1,'one text Preview resize listener is installed');assert.equal(h.window.listeners.resize.filter(callback=>callback.name!=='layoutDocumentTitle').length,4,'no duplicate preexisting resize registrations');
+  assert.equal(h.window.listeners.resize.filter(callback=>callback.name==='layoutDocumentTitle').length,1,'exactly one synchronous title resize registration');
   const before=h.probe.inspect(),model=JSON.stringify(before.exam),answers=before.answers,stats=JSON.stringify(h.probe.stats),focusCalls=field.focusCalls;
   h.resize();h.resize();assert.equal(h.window.frames.size,1);assert.deepEqual(h.window.cancelled,[0],'opaque RAF id0 must be cancelled');h.flushFrames();
   assert.equal(field.scrolls.length,1);assert.equal(field.scrolls[0].block,'nearest');assert.equal(field.scrolls[0].inline,'nearest');assert.equal(field.scrolls[0].behavior,'instant');
@@ -653,6 +675,61 @@ let modeSelectionCases=0;
   h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before);
 }
 console.log(`Studio actual mode selection/pane/classes/raw caret/model/Save: ${modeSelectionCases} cases passed`);
+let documentTitleCases=0;
+for(const text of ['Numeric draft','Tựa đề ế e\u0302\u0301 <b>literal</b> & retained','Line 1\nDòng 2 ế e\u0302\u0301']){
+  const model=numericFixture();model.title=text;const h=await numericHarness(model);
+  assert.equal(h.node('studio-document-title-summary').textContent,text,'actual imported title must appear in the identity bar');
+  assert.equal(h.node('studio-document-title-full').textContent,text);assert.equal(h.node('studio-document-title-summary')['aria-label'],'Document title: '+text);
+  assert.equal(JSON.stringify(h.probe.inspect().exam),JSON.stringify(model));documentTitleCases++;
+}
+{
+  const h=await numericHarness(),state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  numericInput(h,'q-points','12.');const points=h.node('q-points');points.selectionStart=1;points.selectionEnd=2;
+  for(const raw of ['  Việt e\u0302\u0301 <script>literal</script>  ','','x'.repeat(5000)]){
+    numericInput(h,'exam-title',raw);assert.equal(h.node('studio-document-title-full').textContent,raw);
+    assert.equal(h.node('studio-document-title-summary').textContent,raw||'Document title');
+    assert.equal(JSON.stringify(state.exam),before,'title display does not synchronize the model');assert.equal(h.probe.inspect().answers,answers);
+    assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);documentTitleCases++;
+  }
+  numericInput(h,'exam-title','  Normalized only at Save e\u0302\u0301  ');h.probe.save();
+  assert.equal(h.node('studio-document-title-full').textContent,'Normalized only at Save e\u0302\u0301');
+  assert.equal(h.node('exam-title').value,'  Normalized only at Save e\u0302\u0301  ');
+  const saved=JSON.parse(await h.downloads[0].blob.text());assert.deepEqual(saved,{...JSON.parse(before),title:'Normalized only at Save e\u0302\u0301'});documentTitleCases++;
+  const displayed=h.node('studio-document-title-full').textContent;await h.probe.load({name:'broken.json',text:async()=>'{broken'});
+  assert.equal(h.node('studio-document-title-full').textContent,displayed);assert.equal(h.node('exam-title').value,'  Normalized only at Save e\u0302\u0301  ');documentTitleCases++;
+  const replacement=numericFixture();replacement.title='Replacement ế e\u0302\u0301';await h.probe.load({name:'replacement.json',text:async()=>JSON.stringify(replacement)});
+  assert.equal(h.node('studio-document-title-full').textContent,replacement.title);h.node('btn-load-sample').click();
+  assert.equal(h.node('studio-document-title-full').textContent,'IELTS Academic Reading & Listening Mock Assessment');documentTitleCases++;
+}
+{
+  const h=await numericHarness(),details=h.node('studio-document-title'),summary=h.node('studio-document-title-summary'),full=h.node('studio-document-title-full');
+  for(const node of [summary,full]){node.remove();details.appendChild(node);}summary.focus();details.open=true;
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),focus=summary.focusCalls,answers=state.answers;
+  h.key('Escape',{defaultPrevented:true});assert.equal(details.open,true);h.key('Escape',{ctrlKey:true});assert.equal(details.open,true);
+  h.key('Escape');assert.equal(details.open,false);assert.equal(h.document.activeElement,summary);assert.equal(summary.focusCalls,focus);documentTitleCases++;
+  details.open=true;for(const cb of h.document.listeners.pointerdown||[])cb({target:full});assert.equal(details.open,true);
+  for(const cb of h.document.listeners.pointerdown||[])cb({target:h.node('btn-mode-editor')});assert.equal(details.open,false);documentTitleCases++;
+  details.open=true;for(const cb of details.listeners.focusout||[])cb({relatedTarget:full});assert.equal(details.open,true);
+  for(const cb of details.listeners.focusout||[])cb({relatedTarget:null});assert.equal(details.open,true,'a null destination does not prove outside focus');documentTitleCases++;
+  for(const cb of details.listeners.focusout||[])cb({relatedTarget:h.node('btn-studio-theme')});assert.equal(details.open,false);documentTitleCases++;
+  details.open=true;full.focus();const summaryCalls=summary.focusCalls;h.key('Escape');assert.equal(details.open,false);assert.equal(h.document.activeElement,summary);assert.equal(summary.focusCalls,summaryCalls+1);documentTitleCases++;
+  const points=h.node('q-points');numericInput(h,'q-points','12.');points.selectionStart=1;points.selectionEnd=2;points.focus();details.open=true;
+  const externalSummaryCalls=summary.focusCalls;h.key('Escape');assert.equal(details.open,false);assert.equal(h.document.activeElement,points);assert.equal(summary.focusCalls,externalSummaryCalls);assert.equal(points.value,'12.');assert.deepEqual([points.selectionStart,points.selectionEnd],[1,2]);documentTitleCases++;
+  details.open=true;h.node('btn-export-pkg').focus();await h.probe.export();assert.equal(h.node('export-modal').classList.contains('open'),true);
+  h.key('Escape');assert.equal(h.node('export-modal').classList.contains('open'),false);assert.equal(details.open,true,'Export Escape has precedence');assert.equal(h.document.activeElement,h.node('btn-export-pkg'));documentTitleCases++;
+  assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);
+}
+{
+  const h=await numericHarness(),layout=h.window.listeners.resize.find(callback=>callback.name==='layoutDocumentTitle');assert.equal(typeof layout,'function');
+  const before=JSON.stringify(h.probe.inspect().exam),frames=h.window.frames.size;
+  for(const [width,leftWidth,rightLeft,rightWidth,expected] of [[1366,362,1208,134,562],[1600,620,1420,156,280],[1600,200,900,676,168],[948,362,798,134,160],[947,362,797,134,null],[500,362,16,134,null],[1366,362,1208,134,562]]){
+    h.node('studio-titlebar').getBoundingClientRect=()=>({left:0,width});h.node('studio-brand-section').getBoundingClientRect=()=>({left:width===1366||width===1600?24:16,width:leftWidth});
+    h.node('btn-studio-theme').getBoundingClientRect=()=>({left:rightLeft,width:rightWidth});layout();
+    assert.equal(h.node('studio-titlebar').classList.contains('title-collision'),expected===null);assert.equal(h.node('studio-document-title').style.maxWidth,expected===null?'100%':expected+'px');
+    assert.equal(h.window.frames.size,frames,'measuring title must not allocate a RAF');assert.equal(JSON.stringify(h.probe.inspect().exam),before);documentTitleCases++;
+  }
+}
+console.log(`Studio actual title display/raw/model/dismissal/lifetime/geometry boundaries: ${documentTitleCases} cases passed`);
 let numericCases=0;
 for(const id of ['exam-duration','q-points','q-essay-limit']){
   const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,'1e');numericNavigate(h);
@@ -950,7 +1027,8 @@ for(const preview of [false,true]){
   assert.equal(h.key('Tab').prevented,0);assert.equal(h.key('Escape').prevented,0);
   const snapshot=h.probe.inspect(),modelContent=JSON.stringify(snapshot.exam),mode=h.node('preview-view').style.display;
   exportButton.click();assert.equal(h.document.activeElement,h.node('btn-cancel-export'),'Export starts on safe Cancel');
-  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.length,1);
+  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.filter(callback=>callback.name!=='handleDocumentTitleKey').length,1);
+  assert.equal(h.document.listeners.keydown.filter(callback=>callback.name==='handleDocumentTitleKey').length,1,'exactly one disclosure Escape registration');
   const postSync=JSON.stringify(h.probe.inspect().exam);
   for(const [key,want] of [['Tab','btn-close-export'],['Tab','btn-cancel-export'],['Tab','btn-close-export']]){assert.equal(h.key(key).prevented,1);assert.equal(h.document.activeElement,h.node(want));}
   h.key('Tab',{shiftKey:true});assert.equal(h.document.activeElement,h.node('btn-cancel-export'));

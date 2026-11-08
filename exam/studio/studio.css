@@ -112,10 +112,63 @@ button { font-family: inherit; }
   box-shadow: inset 0 calc(0px - var(--nstu-controls-border-width)) 0 var(--border-medium);
 }
 
-.studio-titlebar { min-height: var(--nstu-geometry-studio-titlebar); }
+.studio-titlebar { min-height: var(--nstu-geometry-studio-titlebar); position: relative; }
 .studio-commandbar { min-height: var(--nstu-geometry-studio-commandbar); }
 .studio-titlebar > *, .studio-commandbar > * { min-width: 0; max-width: 100%; }
 .studio-header button { flex-shrink: 0; }
+
+.studio-document-title {
+  /* Approved minimum usable centered-title width; otherwise use a full row. */
+  --studio-title-minimum-width: 160px;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--nstu-typography-body);
+  z-index: 1;
+}
+.studio-document-title > summary {
+  list-style-position: inside;
+  min-height: var(--nstu-controls-command-height);
+  padding: var(--nstu-spacing-xs) var(--nstu-spacing-sm);
+  border: var(--nstu-controls-border-width) solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.studio-document-title > summary:hover { background: var(--bg-card-hover); }
+.studio-document-title > summary:focus-visible, .document-title-full:focus-visible {
+  outline: var(--nstu-controls-focus-ring) solid var(--border-focus);
+  outline-offset: var(--nstu-controls-border-width);
+}
+.document-title-full {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  width: 100%;
+  max-height: calc(50vh - var(--nstu-spacing-sm));
+  overflow: auto;
+  padding: var(--nstu-spacing-md);
+  border: var(--nstu-controls-border-width) solid var(--border-input);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-main);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.studio-titlebar.title-collision .studio-document-title {
+  position: relative;
+  left: auto;
+  top: auto;
+  transform: none;
+  flex-basis: 100%;
+  width: 100%;
+  order: 1;
+}
 
 @media (max-width: 1099px) {
   .studio-titlebar, .studio-commandbar { padding-inline: var(--nstu-spacing-lg); }
