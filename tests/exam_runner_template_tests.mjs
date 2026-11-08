@@ -339,7 +339,7 @@ const replacements = vm.runInNewContext(`(() => {
   return { importFile: handleImportFile,
     seedPreview() { previewIndex = 3; previewAnswers = { shared: 'Old answer' }; selectedTokenForPlacement = 2; activeQuestionIndex = 1; },
     inspect() { return { currentExam, previewIndex, previewAnswers, selectedTokenForPlacement, activeQuestionIndex, renderCount, previewRenders }; },
-    sample() { el('btn-load-sample').listeners.click[0](); } };
+    sample() { const node=el('btn-load-sample');for(const callback of node.listeners.click)callback({target:node,currentTarget:node}); } };
 })()`, { getNode: replacementNode, TextDecoder, document: { documentElement: { dataset: {} }, listeners:{}, addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);} },
   window:{listeners:{},addEventListener(type,callback){(this.listeners[type] ||= []).push(callback);}},
   getComputedStyle:titleFixtureStyle,localStorage: { getItem() { return null; }, setItem() {} },
@@ -414,7 +414,7 @@ class ImportDomNode {
   matches(selector) { assert.equal(selector, ':disabled');for(let n=this;n;n=n.parentNode)if(n.disabled)return true;return false; }
   contains(node) { for(let n=node;n;n=n.parentNode)if(n===this)return true;return false; }
   querySelectorAll(selector) { assert.equal(selector,'button');const result=[];const walk=n=>{for(const c of n.children){if(c.tagName==='BUTTON')result.push(c);walk(c);}};walk(this);return result; }
-  focus() { this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1){const previous=this.ownerDocument.activeElement;this.ownerDocument.activeElement=this;if(previous!==this)for(const callback of this.listeners.focus||[])callback({target:this,currentTarget:this});} }
+  focus(options) { this.focusOptions=options;this.focusCalls=(this.focusCalls||0)+1;if(this.isConnected&&!this.closest()&&!this.matches(':disabled')&&this.getClientRects().length&&this.style.visibility!=='hidden'&&this.style.visibility!=='collapse'&&this.tabIndex>=-1){const previous=this.ownerDocument.activeElement;this.ownerDocument.activeElement=this;if(previous!==this)for(const callback of this.listeners.focus||[])callback({target:this,currentTarget:this});} }
   scrollIntoView(options) { (this.scrolls ||= []).push(options); }
 }
 
@@ -730,6 +730,73 @@ for(const text of ['Numeric draft','Tựa đề ế e\u0302\u0301 <b>literal</b>
   }
 }
 console.log(`Studio actual title display/raw/model/dismissal/lifetime/geometry boundaries: ${documentTitleCases} cases passed`);
+// File uses native details/button state. Dispatch every actual init listener in
+// registration order; synthetic DOM fixtures do not qualify browser keyboard.
+async function fileDisclosureHarness(){
+  const h=await numericHarness(),file=h.node('studio-file-menu'),summary=h.node('studio-file-summary');
+  for(const id of ['studio-file-summary','btn-load-sample','btn-open-file']){const node=h.node(id);node.remove();file.appendChild(node);}
+  file.open=false;
+  return {h,file,summary,pointer(target){for(const cb of h.document.listeners.pointerdown||[])cb({target});},
+    focusout(relatedTarget){for(const cb of file.listeners.focusout||[])cb({relatedTarget});}};
+}
+let fileDisclosureCases=0;
+{
+  const {h,file,summary,pointer,focusout}=await fileDisclosureHarness();
+  assert.equal(file.listeners.focusout?.length,1,'one File lifetime listener');
+  assert.deepEqual(h.document.listeners.keydown.map(cb=>cb.name),['handleExportDialogKey','handleDocumentTitleKey','handleFileDisclosureKey']);
+  assert.deepEqual(h.document.listeners.pointerdown.map(cb=>cb.name),['handleDocumentTitlePointer','handleFileDisclosurePointer']);
+  for(const id of ['btn-load-sample','btn-open-file']){
+    assert.equal(h.node(id).listeners.click.length,2,'existing source callback plus exactly one File closer');
+    assert.equal(h.node(id).listeners.click[0].name,'closeFileDisclosureForCommand');
+  }
+  fileDisclosureCases++;
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  const field=h.node('q-points');numericInput(h,'q-points','12.');field.selectionStart=1;field.selectionEnd=2;field.focus();
+  const unchanged=()=>{assert.equal(JSON.stringify(h.probe.inspect().exam),before);assert.equal(h.probe.inspect().answers,answers);assert.equal(field.value,'12.');assert.deepEqual([field.selectionStart,field.selectionEnd],[1,2]);};
+  assert.equal(file.open,false);pointer(field);focusout(field);h.key('Escape');assert.equal(h.document.activeElement,field);unchanged();fileDisclosureCases++;
+  file.open=true;pointer(h.node('btn-open-file'));assert.equal(file.open,true);focusout(h.node('btn-load-sample'));assert.equal(file.open,true);fileDisclosureCases++;
+  focusout(null);assert.equal(file.open,true,'null focus destination must not synchronously hide a clicked command');fileDisclosureCases++;
+  focusout(field);assert.equal(file.open,false);assert.equal(h.document.activeElement,field);unchanged();fileDisclosureCases++;
+  file.open=true;pointer(field);assert.equal(file.open,false);assert.equal(h.document.activeElement,field);unchanged();fileDisclosureCases++;
+  for(const options of [{defaultPrevented:true},{ctrlKey:true},{altKey:true},{metaKey:true},{shiftKey:true}]){
+    file.open=true;h.key('Escape',options);assert.equal(file.open,true);unchanged();fileDisclosureCases++;
+  }
+  for(const id of ['studio-file-summary','btn-load-sample','btn-open-file']){
+    file.open=true;h.node(id).focus();const calls=summary.focusCalls||0;const event=h.key('Escape');
+    assert.equal(file.open,false);assert.equal(h.document.activeElement,summary);assert.equal(summary.focusCalls||0,calls+(id==='studio-file-summary'?0:1));if(id!=='studio-file-summary')assert.equal(summary.focusOptions.preventScroll,true);assert.equal(event.prevented,1);unchanged();fileDisclosureCases++;
+  }
+  field.focus();file.open=true;const calls=summary.focusCalls;h.key('Escape');assert.equal(file.open,false);assert.equal(h.document.activeElement,field);assert.equal(summary.focusCalls,calls);unchanged();fileDisclosureCases++;
+  file.open=true;summary.focus();const title=h.node('studio-document-title');title.open=true;
+  h.node('btn-open-file').focus();h.key('Escape');assert.equal(file.open,false);assert.equal(title.open,true,'File-owned Escape resolves File first');assert.equal(h.document.activeElement,summary);fileDisclosureCases++;
+  file.open=true;const full=h.node('studio-document-title-full');full.remove();title.appendChild(full);full.focus();h.key('Escape');assert.equal(title.open,false);assert.equal(file.open,true,'title-owned Escape retains title priority');fileDisclosureCases++;
+  title.open=true;pointer(summary);assert.equal(title.open,false);assert.equal(file.open,true);fileDisclosureCases++;
+  pointer(full);assert.equal(file.open,false);fileDisclosureCases++;
+  file.open=true;h.node('btn-export-pkg').focus();await h.probe.export();assert.equal(h.node('export-modal').classList.contains('open'),true);
+  pointer(field);focusout(field);assert.equal(file.open,true,'active Export owns modal lifetime');h.key('Escape');assert.equal(file.open,true);assert.equal(h.document.activeElement,h.node('btn-export-pkg'));fileDisclosureCases++;
+}
+{
+  const {h,file,summary}=await fileDisclosureHarness();let activations=0;
+  h.node('file-import-input').click=()=>{activations++;assert.equal(file.open,false,'close runs before the unchanged native picker callback');assert.equal(h.document.activeElement,summary,'picker opener stays visible');};
+  file.open=true;h.node('btn-open-file').focus();h.node('btn-open-file').click();assert.equal(activations,1);assert.equal(h.document.activeElement,summary);fileDisclosureCases++;
+  const calls=summary.focusCalls;h.node('btn-open-file').click();assert.equal(activations,2);assert.equal(summary.focusCalls,calls,'closed programmatic activation adds no focus changes');fileDisclosureCases++;
+  const before=JSON.stringify(h.probe.inspect().exam);await h.probe.load({name:'bad.json',text:async()=>'{bad'});assert.equal(JSON.stringify(h.probe.inspect().exam),before);assert.equal(h.document.activeElement,summary);fileDisclosureCases++;
+  file.open=true;h.node('btn-load-sample').focus();let atSource=false;
+  const source=h.node('btn-load-sample').listeners.click[1];h.node('btn-load-sample').listeners.click[1]=event=>{assert.equal(file.open,false);assert.equal(h.document.activeElement,summary);atSource=true;source(event);};
+  h.node('btn-load-sample').click();assert.equal(atSource,true);assert.equal(h.probe.inspect().exam.id,'ielts-sample-01');assert.equal(Object.keys(h.probe.inspect().answers).length,0);fileDisclosureCases++;
+}
+console.log(`Studio actual File grouping/listener order/dismissal/focus/model/command contracts: ${fileDisclosureCases} cases passed`);
+for(const command of ['btn-open-file','btn-load-sample']){
+  const {h,file}=await fileDisclosureHarness();file.open=true;
+  h.node('btn-export-pkg').focus();await h.probe.export();
+  const modal=h.node('export-modal'),ownedFocus=h.document.activeElement;assert.equal(modal.classList.contains('open'),true);assert(modal.contains(ownedFocus));
+  let invoked=0;const source=h.node(command).listeners.click[1];
+  h.node(command).listeners.click[1]=event=>{invoked++;assert.equal(file.open,true,'active Export retains File lifetime before source callback');assert.equal(h.document.activeElement,ownedFocus,'File closer must defer to Export focus');source(event);};
+  let pickers=0;h.node('file-import-input').click=()=>{pickers++;};
+  h.node(command).click();assert.equal(invoked,1,'original programmatic callback still runs once');assert.equal(pickers,command==='btn-open-file'?1:0);
+  assert.equal(file.open,true);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.activeElement,ownedFocus);
+  if(command==='btn-load-sample')assert.equal(h.probe.inspect().exam.id,'ielts-sample-01');
+}
+console.log('Studio actual File command activation under active Export: 2 cases passed');
 let numericCases=0;
 for(const id of ['exam-duration','q-points','q-essay-limit']){
   const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,'1e');numericNavigate(h);
@@ -1027,7 +1094,8 @@ for(const preview of [false,true]){
   assert.equal(h.key('Tab').prevented,0);assert.equal(h.key('Escape').prevented,0);
   const snapshot=h.probe.inspect(),modelContent=JSON.stringify(snapshot.exam),mode=h.node('preview-view').style.display;
   exportButton.click();assert.equal(h.document.activeElement,h.node('btn-cancel-export'),'Export starts on safe Cancel');
-  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.filter(callback=>callback.name!=='handleDocumentTitleKey').length,1);
+  assert.equal(modal.inert,false);assert.equal(modal.classList.contains('open'),true);assert.equal(h.document.listeners.keydown.filter(callback=>!['handleDocumentTitleKey','handleFileDisclosureKey'].includes(callback.name)).length,1);
+  assert.equal(h.document.listeners.keydown.filter(callback=>callback.name==='handleFileDisclosureKey').length,1,'exactly one additional File Escape registration');
   assert.equal(h.document.listeners.keydown.filter(callback=>callback.name==='handleDocumentTitleKey').length,1,'exactly one disclosure Escape registration');
   const postSync=JSON.stringify(h.probe.inspect().exam);
   for(const [key,want] of [['Tab','btn-close-export'],['Tab','btn-cancel-export'],['Tab','btn-close-export']]){assert.equal(h.key(key).prevented,1);assert.equal(h.document.activeElement,h.node(want));}
