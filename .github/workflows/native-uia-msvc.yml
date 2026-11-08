@@ -42,8 +42,12 @@ jobs:
             expectedSourceHashes = [ordered]@{
               'tools/native-uia-probe/main.cpp' = '04D64CA99477CA1A4CE26C8DC017CD3F085C5D56B7FA8E2139937D0907A7E5E6'
               'tools/native-uia-probe/tests.cpp' = 'F0AF05868F66B1B6ECE6C9DD85823872352DD6BC67C5C2D4373CD07A415B6121'
-              'tools/native-uia-probe/CMakeLists.txt' = 'C723FC39AFE43BE99AD4104B0C7A812EB93378333CEA6A02AC4E534E07857388'
+              'tools/native-uia-probe/CMakeLists.txt' = 'B5AFF6EEA270FEADC0B55FF3C246DD6572D9A00FC353919494A34D085CDD1695'
               'tools/native-uia-probe/README.md' = '309A6EB16479C7B5EBC603C7961AE3848670F67518D7469204986977F6A5E67E'
+            }
+            expectedAssemblyIdentity = [ordered]@{
+              type = 'win32'; name = 'NSTU.Diagnostics.NativeUIAProbe'
+              version = '1.0.0.0'; processorArchitecture = 'amd64'
             }
             expectedTests = @(
               @{ name = 'native_uia_own_window'; mode = '--self-test'; timeout = 90 }
@@ -97,6 +101,7 @@ jobs:
             status = 'RUNNING'; phase = 'toolchain'; configureExit = $null; buildExit = $null
             startedUtc = [DateTime]::UtcNow.ToString('o'); checkoutSha = $inputs.checkoutSha
             workflowSha256 = $inputs.workflowSha256; sourceHashes = $inputs.sourceHashes
+            expectedAssemblyIdentity = $inputs.expectedAssemblyIdentity
             imageOS = $env:ImageOS; imageVersion = $env:ImageVersion
             OS = [Environment]::OSVersion.VersionString
             warningDiagnosticLineCount = $null; warningDiagnostics = @(); D9025LineCount = $null
@@ -292,6 +297,7 @@ jobs:
               status = 'RUNNING'; phase = 'link-policy'; checkoutSha = $inputs.checkoutSha
               workflowSha256 = $inputs.workflowSha256; sourceHashes = $inputs.sourceHashes
               CMakeSha256 = $inputs.sourceHashes.'tools/native-uia-probe/CMakeLists.txt'
+              expectedAssemblyIdentity = $inputs.expectedAssemblyIdentity; generatedAssemblyIdentity = $null; extractedAssemblyIdentity = $null; assemblyIdentityValidation = 'NOT_RUN'
               projectPolicy = $compile.manifestProjectPolicy; binarySha256Before = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
               binarySha256After = $null; resources = @(); extractExit = $null; validateExit = $null
               mtHelpExit = $null; mt = $null; WindowsSDK = $compile.WindowsSDK; error = $null
@@ -419,7 +425,7 @@ jobs:
               $manifestReceipt.resources = @($resources | ForEach-Object { @{ numeric = $_.Numeric; id = $_.Id; language = $_.Language; type = 24 } })
               if ($resources.Count -ne 1 -or -not $resources[0].Numeric -or $resources[0].Id -ne 1 -or $resources[0].Language -ne $resourceLanguage) { throw 'Actual PE does not contain exactly resource24/1 at the compiled language' }
               $manifestReceipt.phase = 'privilege-DPI-XML'
-              function Test-ManifestContract([string]$path) {
+              function Test-ManifestContract([string]$path, [object]$expectedAssemblyIdentity) {
                 $settings = [Xml.XmlReaderSettings]::new(); $settings.DtdProcessing = [Xml.DtdProcessing]::Prohibit; $settings.XmlResolver = $null
                 $reader = [Xml.XmlReader]::Create($path, $settings)
                 $document = [Xml.XmlDocument]::new(); $document.XmlResolver = $null
@@ -433,6 +439,24 @@ jobs:
                 $names.AddNamespace('a1','urn:schemas-microsoft-com:asm.v1'); $names.AddNamespace('a3','urn:schemas-microsoft-com:asm.v3')
                 $names.AddNamespace('w05','http://schemas.microsoft.com/SMI/2005/WindowsSettings'); $names.AddNamespace('w16','http://schemas.microsoft.com/SMI/2016/WindowsSettings')
                 $root = $document.DocumentElement
+                $identities = $document.SelectNodes('/a1:assembly/a1:assemblyIdentity', $names)
+                $elementChildren = @($root.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element })
+                if ($identities.Count -ne 1 -or $document.SelectNodes('//*[local-name()="assemblyIdentity"]').Count -ne 1 -or
+                    $document.SelectNodes('//*[local-name()="noInherit"]').Count -ne 0 -or $elementChildren.Count -eq 0 -or
+                    -not [object]::ReferenceEquals($elementChildren[0], $identities[0])) { throw 'Actual definition identity is missing, duplicated or not the first assembly subelement' }
+                $definition = $identities[0]
+                $attributes = @($definition.Attributes | Where-Object { $_.NamespaceURI -ne 'http://www.w3.org/2000/xmlns/' })
+                if ($attributes.Count -ne 4 -or @($definition.ChildNodes | Where-Object { $_.NodeType -eq [Xml.XmlNodeType]::Element }).Count) { throw 'Actual definition identity has unexpected attributes/subelements' }
+                $actualIdentity = [ordered]@{}
+                foreach ($key in @('type','name','version','processorArchitecture')) {
+                  $attribute = $definition.GetAttributeNode($key)
+                  if ($null -eq $attribute -or $attribute.NamespaceURI -ne '' -or
+                      -not [string]::Equals($attribute.Value, [string]$expectedAssemblyIdentity.$key, [StringComparison]::Ordinal)) { throw "Actual diagnostic definition identity differs: $key" }
+                  $actualIdentity[$key] = $attribute.Value
+                }
+                $versionText = [string]$actualIdentity.version
+                if (-not [regex]::IsMatch($versionText, '\A[0-9]{1,5}(\.[0-9]{1,5}){3}\z') -or
+                    @($versionText.Split('.') | Where-Object { [uint32]::Parse($_, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture) -gt 65535 }).Count) { throw 'Actual definition version is not four valid Win32 components' }
                 $levels = $document.SelectNodes('/a1:assembly/a3:trustInfo/a3:security/a3:requestedPrivileges/a3:requestedExecutionLevel',$names)
                 $dpi = $document.SelectNodes('/a1:assembly/a3:application/a3:windowsSettings/w16:dpiAwareness',$names)
                 $fallback = $document.SelectNodes('/a1:assembly/a3:application/a3:windowsSettings/w05:dpiAware',$names)
@@ -441,9 +465,12 @@ jobs:
                     $levels[0].GetAttribute('level') -ne 'asInvoker' -or $levels[0].GetAttribute('uiAccess') -ne 'false' -or
                     $dpi.Count -ne 1 -or $document.SelectNodes('//*[local-name()="dpiAwareness"]').Count -ne 1 -or $dpi[0].InnerText.Trim() -ne 'PerMonitorV2' -or
                     $fallback.Count -ne 1 -or $document.SelectNodes('//*[local-name()="dpiAware"]').Count -ne 1 -or $fallback[0].InnerText.Trim() -ne 'true/pm') { throw 'Actual XML execution privilege/DPI authority differs' }
+                return $actualIdentity
               }
-              Test-ManifestContract $generatedManifest
-              Test-ManifestContract $extractedPath
+              $manifestReceipt.assemblyIdentityValidation = 'RUNNING'
+              $manifestReceipt.generatedAssemblyIdentity = Test-ManifestContract $generatedManifest $inputs.expectedAssemblyIdentity
+              $manifestReceipt.extractedAssemblyIdentity = Test-ManifestContract $extractedPath $inputs.expectedAssemblyIdentity
+              $manifestReceipt.assemblyIdentityValidation = 'PASS'
               $manifestReceipt.xmlSha256 = (Get-FileHash -LiteralPath $extractedPath -Algorithm SHA256).Hash
               $manifestReceipt.binarySha256After = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash
               if ($manifestReceipt.binarySha256After -ne $manifestReceipt.binarySha256Before) { throw 'Read-only manifest inspection changed executable' }
@@ -451,7 +478,7 @@ jobs:
                 extract = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'mt-extract.log') -Algorithm SHA256).Hash
                 validate = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'mt-validate.log') -Algorithm SHA256).Hash }
               $manifestReceipt.status = 'PASS'; $manifestReceipt.phase = 'complete'
-            } catch { $manifestReceipt.status = 'FAIL'; $manifestReceipt.error = $_.Exception.ToString(); throw }
+            } catch { $manifestReceipt.status = 'FAIL'; if ($manifestReceipt.assemblyIdentityValidation -eq 'RUNNING') { $manifestReceipt.assemblyIdentityValidation = 'FAIL' }; $manifestReceipt.error = $_.Exception.ToString(); throw }
             finally {
               if ($null -eq $manifestReceipt.binarySha256After) {
                 try { $manifestReceipt.binarySha256After = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash }
@@ -460,12 +487,20 @@ jobs:
               $manifestReceipt.completedUtc = [DateTime]::UtcNow.ToString('o')
               $manifestReceipt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $evidenceDir 'embedded-manifest-verification.json') -Encoding utf8
               $compile.embeddedManifestVerification = @{ status = $manifestReceipt.status; binarySha256 = $manifestReceipt.binarySha256Before
+                assemblyIdentityValidation = $manifestReceipt.assemblyIdentityValidation; expectedAssemblyIdentity = $manifestReceipt.expectedAssemblyIdentity; generatedAssemblyIdentity = $manifestReceipt.generatedAssemblyIdentity; extractedAssemblyIdentity = $manifestReceipt.extractedAssemblyIdentity
                 xmlSha256 = $manifestReceipt.xmlSha256; receiptSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest-verification.json') -Algorithm SHA256).Hash }
             }
             $compile.binary = @{ sha256 = (Get-FileHash -LiteralPath $exe.FullName -Algorithm SHA256).Hash; size = $exe.Length }
             if ($compile.embeddedManifestVerification.status -ne 'PASS' -or $compile.binary.sha256 -ne $compile.embeddedManifestVerification.binarySha256 -or
                 (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest-verification.json') -Algorithm SHA256).Hash -ne $compile.embeddedManifestVerification.receiptSha256 -or
                 (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash -ne $compile.embeddedManifestVerification.xmlSha256) { throw 'Manifest verification drift before packaging the executable' }
+            if ($compile.embeddedManifestVerification.assemblyIdentityValidation -cne 'PASS') { throw 'Package identity not qualified' }
+            foreach ($profile in @($compile.embeddedManifestVerification.expectedAssemblyIdentity, $compile.embeddedManifestVerification.generatedAssemblyIdentity, $compile.embeddedManifestVerification.extractedAssemblyIdentity)) {
+              if ($null -eq $profile) { throw 'Package identity map missing' }
+              $keys = if ($profile -is [Collections.IDictionary]) { @($profile.Keys) } else { @($profile.PSObject.Properties.Name) }
+              if ((($keys | Sort-Object) -join ',') -cne 'name,processorArchitecture,type,version') { throw 'Package identity keys differ' }
+              foreach ($key in @('type','name','version','processorArchitecture')) { if (-not [string]::Equals([string]$profile.$key, [string]$inputs.expectedAssemblyIdentity.$key, [StringComparison]::Ordinal)) { throw 'Package identity profile drift' } }
+            }
             $packageDir = Join-Path $evidenceDir 'msvc-probe'
             New-Item -ItemType Directory -Path (Join-Path $packageDir 'source') | Out-Null
             Copy-Item -LiteralPath $exe.FullName -Destination (Join-Path $packageDir 'nstu-native-uia-probe.exe')
@@ -506,6 +541,7 @@ jobs:
                 translationUnits = $compile.translationUnits; activeAssertionsProof = $compile.activeAssertionsProof
                 WindowsSDK = $compile.WindowsSDK; PlatformToolset = $compile.PlatformToolset
                 embeddedManifestVerification = $compile.embeddedManifestVerification; embeddedManifest = 'msvc-probe/embedded-manifest.xml'; embeddedManifestReceipt = 'msvc-probe/embedded-manifest-verification.json'
+                expectedAssemblyIdentity = $inputs.expectedAssemblyIdentity; assemblyIdentity = $compile.embeddedManifestVerification.extractedAssemblyIdentity
                 OS = $compile.OS; UIAutomationCore = $compile.UIAutomationCore; imports = $compile.imports
                 warningDiagnosticLineCount = $compile.warningDiagnosticLineCount; warningDiagnostics = $compile.warningDiagnostics
                 D9025LineCount = $compile.D9025LineCount; compileReceiptSha256 = (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'compile.json') -Algorithm SHA256).Hash
@@ -571,6 +607,13 @@ jobs:
             if ($manifest.status -ne 'PASS' -or $manifest.checkoutSha -ne $inputs.checkoutSha -or $manifest.workflowSha256 -ne $inputs.workflowSha256 -or
                 $manifest.binarySha256Before -ne (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -or $manifest.binarySha256After -ne $manifest.binarySha256Before -or
                 $manifest.xmlSha256 -ne (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash) { throw 'Manifest qualification is not bound to the exact inventory executable' }
+            if ($manifest.assemblyIdentityValidation -cne 'PASS') { throw 'Inventory identity not qualified' }
+            foreach ($profile in @($manifest.expectedAssemblyIdentity, $manifest.generatedAssemblyIdentity, $manifest.extractedAssemblyIdentity)) {
+              if ($null -eq $profile) { throw 'Inventory identity map missing' }
+              $keys = if ($profile -is [Collections.IDictionary]) { @($profile.Keys) } else { @($profile.PSObject.Properties.Name) }
+              if ((($keys | Sort-Object) -join ',') -cne 'name,processorArchitecture,type,version') { throw 'Inventory identity keys differ' }
+              foreach ($key in @('type','name','version','processorArchitecture')) { if (-not [string]::Equals([string]$profile.$key, [string]$inputs.expectedAssemblyIdentity.$key, [StringComparison]::Ordinal)) { throw 'Inventory identity profile drift' } }
+            }
             $receipt.embeddedManifestVerificationSha256 = $manifestHash
             foreach ($expected in $inputs.expectedTests) {
               $matchingTests = @($inventory.tests | Where-Object { $_.name -eq $expected.name })
@@ -608,7 +651,15 @@ jobs:
                 $manifestHash -ne $compile.embeddedManifestVerification.receiptSha256 -or
                 $manifest.xmlSha256 -ne (Get-FileHash -LiteralPath (Join-Path $evidenceDir 'embedded-manifest.xml') -Algorithm SHA256).Hash -or
                 (Get-FileHash -LiteralPath (Join-Path $buildDir 'Release/nstu-native-uia-probe.exe') -Algorithm SHA256).Hash -ne $compile.binary.sha256) { throw 'Manifest verification prerequisite failed before native execution' }
+            if ($manifest.assemblyIdentityValidation -cne 'PASS') { throw 'Pre-CTest identity not qualified' }
+            foreach ($profile in @($manifest.expectedAssemblyIdentity, $manifest.generatedAssemblyIdentity, $manifest.extractedAssemblyIdentity)) {
+              if ($null -eq $profile) { throw 'Pre-CTest identity map missing' }
+              $keys = if ($profile -is [Collections.IDictionary]) { @($profile.Keys) } else { @($profile.PSObject.Properties.Name) }
+              if ((($keys | Sort-Object) -join ',') -cne 'name,processorArchitecture,type,version') { throw 'Pre-CTest identity keys differ' }
+              foreach ($key in @('type','name','version','processorArchitecture')) { if (-not [string]::Equals([string]$profile.$key, [string]$inputs.expectedAssemblyIdentity.$key, [StringComparison]::Ordinal)) { throw 'Pre-CTest identity profile drift' } }
+            }
             $result.embeddedManifestVerificationSha256 = $manifestHash
+            $result.assemblyIdentity = $manifest.extractedAssemblyIdentity
             & ctest --test-dir $buildDir -C Release --parallel 1 --stop-on-failure --no-tests=error --verbose `
               --output-log (Join-Path $evidenceDir 'ctest.log') --output-junit (Join-Path $evidenceDir 'ctest-junit.xml')
             $result.testExit = $LASTEXITCODE
@@ -767,12 +818,15 @@ jobs:
           if (Test-Path -LiteralPath $testPath) { $final.CI_OWN_WINDOW = (Get-Content -LiteralPath $testPath -Raw | ConvertFrom-Json).CI_OWN_WINDOW }
           $manifestPath = Join-Path $evidenceDir 'embedded-manifest-verification.json'
           $final.EMBEDDED_MANIFEST = 'NOT_RUN'
+          $final.ASSEMBLY_IDENTITY = 'NOT_RUN'
           if (Test-Path -LiteralPath $manifestPath) {
             $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
             $final.EMBEDDED_MANIFEST = $manifest.status
             $final.embeddedManifestVerificationSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash
             $final.embeddedManifestXmlSha256 = $manifest.xmlSha256
             $final.embeddedManifestBinarySha256 = $manifest.binarySha256Before
+            $final.ASSEMBLY_IDENTITY = $manifest.assemblyIdentityValidation; $final.expectedAssemblyIdentity = $manifest.expectedAssemblyIdentity
+            $final.generatedAssemblyIdentity = $manifest.generatedAssemblyIdentity; $final.extractedAssemblyIdentity = $manifest.extractedAssemblyIdentity
           }
           foreach ($file in Get-ChildItem -LiteralPath $evidenceDir -Recurse -File) {
             $final.evidence += @{ path = [IO.Path]::GetRelativePath($evidenceDir, $file.FullName); sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash; size = $file.Length }
