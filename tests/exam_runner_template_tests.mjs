@@ -635,6 +635,24 @@ const numericFixture=()=>({id:'numeric-draft',title:'Numeric draft',subject:'',d
 async function numericHarness(model=numericFixture()) { const h=await actualImportHarness();await h.probe.load({name:'numeric.json',text:async()=>JSON.stringify(model)});return h; }
 function numericInput(h,id,raw,valid=true,badInput=false){const node=h.node(id);node.value=raw;node.valueAsNumber=Number(raw);node.validity={valid,badInput};for(const callback of node.listeners.input||[])callback({target:node,currentTarget:node});}
 function numericNavigate(h){h.node('question-nav-list').children[1].click();h.node('question-nav-list').children[0].click();}
+let modeSelectionCases=0;
+{
+  const h=await numericHarness();h.probe.sync();
+  // The whole-controller DOM harness seeds the source HTML's initial tab attributes.
+  h.node('btn-mode-editor').setAttribute('aria-selected','true');h.node('btn-mode-preview').setAttribute('aria-selected','false');
+  numericInput(h,'q-points','12.');const field=h.node('q-points');field.selectionStart=1;field.selectionEnd=2;field.focus();
+  const state=h.probe.inspect(),before=JSON.stringify(state.exam),answers=state.answers;
+  for(const [id,preview] of [['btn-mode-preview',true],['btn-mode-preview',true],['btn-mode-editor',false],['btn-mode-editor',false],['btn-mode-preview',true],['btn-preview-exit',false],['btn-preview-exit',false]]){
+    h.node(id).click();
+    assert.equal(h.node('btn-mode-editor')['aria-selected'],String(!preview));assert.equal(h.node('btn-mode-preview')['aria-selected'],String(preview));
+    assert.equal(h.node('editor-view').style.display,preview?'none':'grid');assert.equal(h.node('preview-view').style.display,preview?'flex':'none');
+    assert.equal(h.node('btn-mode-editor').classList.contains('active'),!preview);assert.equal(h.node('btn-mode-preview').classList.contains('active'),preview);
+    assert.equal(h.probe.inspect().exam,state.exam);assert.equal(JSON.stringify(state.exam),before);assert.equal(h.probe.inspect().answers,answers);
+    assert.equal(field.value,'12.');assert.equal(field.selectionStart,1);assert.equal(field.selectionEnd,2);assert.equal(field['aria-invalid'],'true');modeSelectionCases++;
+  }
+  h.probe.save();assert.equal(JSON.stringify(JSON.parse(await h.downloads[0].blob.text())),before);
+}
+console.log(`Studio actual mode selection/pane/classes/raw caret/model/Save: ${modeSelectionCases} cases passed`);
 let numericCases=0;
 for(const id of ['exam-duration','q-points','q-essay-limit']){
   const h=await numericHarness(),before=JSON.stringify(h.probe.inspect().exam);numericInput(h,id,'1e');numericNavigate(h);
