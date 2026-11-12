@@ -1,6 +1,6 @@
 function(nstu_enable_test_assertions target)
     if(MSVC)
-        target_compile_options(${target} PRIVATE /UNDEBUG)
+        target_compile_options(${target} PRIVATE "/FI${CMAKE_CURRENT_FUNCTION_LIST_DIR}/assertions_enabled.hpp")
     else()
         target_compile_options(${target} PRIVATE -UNDEBUG)
     endif()
