@@ -1,766 +1,91 @@
-<img width="1280" height="640" alt="NSTU Windows computer lab management banner" src="docs/assets/banner.png" />
-
----
-
 # Project NSTU
 
-> **INDEV — Phase 4 integrated:** The complete Phase 4 discrete timing telemetry pipeline and native WebView2 host kiosk are merged into `main` (56/56 C++ tests and 63 browser recovery tests passing). Phase 5 exam security delivery and network hardening are in development. See [INDEV status](docs/INDEV_STATUS.md).
+[English](README.md) | [Tiếng Việt](README.vi.md)
 
+**Bringing the examination lifecycle to computers.**
 
-[English](README.md) | [Tiếng Việt](README.vi.md) | [Development guide](docs/DEVELOPMENT.md) | [Setup guide](docs/SETUP_GUIDE.md) | [Optional diagnostics](docs/TELEMETRY.md) | [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) | [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md) | [VM testing](docs/VM_TESTING.md)
+Project NSTU is an open-source initiative to digitize the complete examination lifecycle: preparing assessments, organizing examinations, supervising candidates, collecting submissions, judging, reviewing decisions and publishing results.
 
-[![C++](https://img.shields.io/badge/C++-20%2B-blue?logo=c++&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
-[![License](https://img.shields.io/badge/license-mit%20license-lightgrey)](#license)
-[![Windows CI](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+Classroom and computer-lab management provide supporting infrastructure for this goal. The current repository contains Windows classroom and assessment foundations; the complete examination workflow is still **In Progress**.
 
-[![CI](https://img.shields.io/github/actions/workflow/status/Khoasoma/nstu/windows.yml?branch=main)](https://github.com/Khoasoma/nstu/actions)
-[![Contributors](https://img.shields.io/github/contributors/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/graphs/contributors)
-[![Commit activity](https://img.shields.io/github/commit-activity/m/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits)
-[![Last commit](https://img.shields.io/github/last-commit/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits)
-[![Issues](https://img.shields.io/github/issues/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/issues)
+## Why Project NSTU
 
-NSTU is a free and open-source classroom and computer-lab management project
-for Windows. It is designed around a centralized teacher server, lightweight
-student clients, authenticated control commands, chat, low-bandwidth client
-screen snapshots, and teacher-screen broadcast over a local network.
+Teachers and examination organizers need a practical digital workflow connecting assessment content, people, rooms, candidate tools, submissions and result review.
 
-## Interface design preview
+## The examination lifecycle
 
-A preview of the new classroom overview in English, using sample computers and simulated actions.
+These product areas describe the project's scope, including future work:
 
-![Project NSTU classroom interface design in light appearance with sample data](docs/assets/classroom-design-light.png)
+| Area | Purpose |
+| --- | --- |
+| Exam authoring | Prepare questions, media and reference material. |
+| Exam management | Organize events, subjects, sessions and candidates. |
+| Exam room operations | Assign rooms and seats, verify devices, support physical and digital supervision. |
+| Candidate workspaces | Provide the tools and examination environment candidates are permitted to use. |
+| Submission and evidence | Collect work, preserve evidence and support verifiable acceptance receipts. |
+| Automated and programming judging | Develop marking workflows and isolated official programming judging. |
+| Adjudication and publication | Review results and exceptions, finalize decisions and control publication. |
+
+## Current repository and development status
+
+The codebase includes a Windows teacher console, background service and interactive client, alongside the Exam Studio authoring interface and browser assessment runner. Automated coverage includes protocol, persistence, snapshot and browser-state components.
+
+**Implemented** describes component-level engineering and verification. Native operation, complete workflows and deployment require separate qualification.
+
+| Maturity | Current scope |
+| --- | --- |
+| **Implemented** | Teacher/client foundations, LAN communication and snapshot/broadcast components, assessment templates and answer-storage components with automated tests. |
+| **In Progress** | Complete pairing and assessment round trips; package compatibility; Focus and candidate hosted operation/recovery; installation, Windows usability including keyboard/screen-reader accessibility, policy and room-capacity qualification. |
+| **Planned** | A lightweight independent desktop Exam Studio for offline authoring on ordinary teacher laptops without requiring classroom/server installation; examination/event management, room/seat assignment and supervised programming workspaces. |
+| **Research / Under Evaluation** | Secure Setter/signing workflows, Room Kit and evidence custody/receipts, an isolated Central Judge, adjudication and event-wide result publication. |
+
+**Authoring direction:** Save is the primary document operation for preserving a working assessment. Export produces an examination package after validation; the complete Save/Open/import/export round trip remains **In Progress**.
+
+## Candidate workspace direction
+
+The **Planned** programming workspace is supervised: approved IDEs, compilers, interpreters, debuggers, local testing tools and accessibility software should remain usable. Examination policies should restrict unapproved Internet access and unauthorized candidate-to-candidate communication while preserving authorized local work and NSTU services.
+
+The current repository also contains restrictive WebView2 exam-host code. Its native behavior and permitted-tool policies remain under qualification.
+
+## Architecture overview
+
+Current implementation centers on:
+
+- A Windows teacher application coordinating classroom devices.
+- A background service and desktop client on each workstation.
+- The Exam Studio authoring interface, browser assessment runner and answer-storage components.
+
+Independent Studio deployment and event/room orchestration are **Planned**. Room collection, evidence custody and central judging service boundaries remain **Research / Under Evaluation**. Official programming judging is intended to run separately from candidate workstations, with hidden tests and checkers held centrally.
+
+## Documentation
+
+Installation and operational acceptance are still **In Progress**. These guides support development and qualification:
+
+- [Setup guide](docs/SETUP_GUIDE.md) and [local qualification](docs/LOCAL_QUALIFICATION.md).
+- [Development guide](docs/DEVELOPMENT.md) and [architecture](docs/ARCHITECTURE.md).
+- [Assessment workflows](docs/EXAM_ASSESSMENT.md) and [Exam Studio](exam/studio/README.md).
+- [Security](docs/SECURITY.md) and [optional diagnostics/privacy](docs/TELEMETRY.md).
+- [VM testing](docs/VM_TESTING.md) and [production validation requirements](docs/PRODUCTION_VALIDATION.md).
+
+## Contributing
+
+Start with the development guide and [project issues](https://github.com/Khoasoma/nstu/issues). Propose scoped changes, include relevant verification evidence, respect component licensing and keep English/Vietnamese documentation aligned.
+
+Existing project credits include Lê Anh Tuấn, Bùi Hồ Hải Đăng and Nguyễn Thị Hồng Quyên. See also the [repository contributors](https://github.com/Khoasoma/nstu/graphs/contributors).
 
 <details>
-<summary>View the dark appearance</summary>
+<summary>Interface design previews</summary>
 
-![Project NSTU classroom interface design in dark appearance with sample data](docs/assets/classroom-design-dark.png)
+Sample data and simulated actions; these images are design previews.
+
+<img width="300" alt="Project NSTU banner" src="docs/assets/banner.png" />
+
+![Classroom interface design in light appearance](docs/assets/classroom-design-light.png)
+
+![Classroom interface design in dark appearance](docs/assets/classroom-design-dark.png)
 
 </details>
 
-*Design preview only. These images show sample data and simulated actions; no real computers are connected.*
-
-[Project website](https://nstu-em7.pages.dev)
-
-> **Development status:** NSTU is currently an engineering MVP, not a
-> production release. Persisted enrollment, multi-client dispatch, authenticated
-> control routing, periodic JPEG snapshots, screen annotation, teacher-screen
-> snapshot broadcast, packetization, and device recovery are implemented and
-> tested. Continuous decoded H.264 delivery and the physical production
-> validation matrix are not complete. Do not deploy the current nightly build
-> as a security control in a real school.
-
-## Recent updates
-
-The **Phase 4 Telemetry & Native Kiosk** milestone is fully merged into `main`:
-
-- **Native WebView2 Host Kiosk** — Pinned Microsoft.Web.WebView2 SDK acquisition
-  in CMake and CI; native `ExamHost` fullscreen kiosk window with low-level
-  keyboard shortcut suppression (Win, Alt+Tab, Ctrl+Esc), foreground re-grab,
-  and local virtual host isolation (`https://nstu.exam/`).
-- **Discrete Timing Telemetry Pipeline** — Non-invasive client-side telemetry
-  collector (`nstu_exam_telemetry_collector`) capturing dwell times, time to
-  first answer, option change counts, blur/focus transitions, and scroll depth.
-- **Zero-Raw-Input Privacy Guarantee** — Absolute exclusion of keystroke
-  logs, clipboard data, raw mouse trajectories, and student response text.
-  Only aggregate timing statistics are collected.
-- **Durable Client Outbox** — Machine-scoped DPAPI retry outbox
-  (`nstu_exam_telemetry_outbox`) with bounded FIFO queue, transactional
-  commits, and transport error backoff.
-- **Server Telemetry Journal & Deduplication** — Dedicated crash-resilient
-  journal (`nstu_exam_telemetry_journal`) with 8×8 MiB preallocated rotating
-  segments, ≤262,144 dedup hashes, 16 generations, un-resurrected replay
-  floor, and 30-day retention bound.
-- **Asynchronous Persistence Worker** — Decoupled worker queue operating
-  outside IOCP network locks, returning immediate `unavailable` ACKs under
-  saturation so answer submission is never stalled.
-- **Cross-Channel Isolation** — Cryptographically isolated answer event
-  ledger and discrete telemetry channels; answer state recovery is prioritized
-  over telemetry under any network condition.
-
-### Verification (2026-11-01)
-
-- Full MinGW/UCRT64 and MSVC build clean with `-Werror`; 56/56 unit and
-  integration tests pass.
-- 63 Node.js browser recovery tests pass (`exam_web_recovery_tests.js`).
-- Local verification gate (`scripts/verify-gate.sh` and `--strict`) passes with 0 warnings.
-- Continuous integration: 4/4 Windows CI jobs pass on feature branches; 5/5 jobs
-  pass on `main`.
-
-## Why NSTU exists
-
-NSTU grew from regret at seeing schools rely on unlicensed classroom software.
-Software obtained from untrusted sources can be modified, exploited, or used to
-turn lab computers into cryptocurrency-mining infrastructure without the
-school's knowledge. At the same time, stronger copyright enforcement in
-Vietnam can make it harder for schools with limited budgets to equip and manage
-computer rooms legally.
-
-We are building NSTU as a practical alternative: free to obtain, open for
-inspection, easy to install, and designed with security and low-resource
-hardware in mind. NSTU uses the MIT License. Schools, teachers, businesses, and
-individuals may use, study, modify, and redistribute it, including for
-commercial purposes, as long as the copyright and license notice is retained.
-
-Open source does not automatically make software secure. NSTU therefore keeps
-its threat model and unfinished production work public in
-[SECURITY.md](docs/SECURITY.md) and [ROADMAP.md](docs/ROADMAP.md).
-
-## Documentation map
-
-- [Setup guide](docs/SETUP_GUIDE.md): the unified role-selecting installer,
-  diagnostics checks, enrollment scripts, and runtime/build flags.
-- [Architecture](docs/ARCHITECTURE.md): process model, client/server data
-  paths, video pipeline, control channel, and known limitations.
-- [Security](docs/SECURITY.md): authentication, enrollment, secrets, and
-  deployment boundaries.
-- [Optional diagnostics](docs/TELEMETRY.md): explicit consent, bounded local
-  collection, privacy filtering, and manual public-report submission.
-- [Computer-based assessment](docs/EXAM_ASSESSMENT.md): the optional native
-  WebView2 host, exam package boundaries, authenticated answer recovery, durable
-  outbox, and state-export formats.
-- [Development guide](docs/DEVELOPMENT.md): build options, tests, packaging,
-  and CI workflow.
-- [Production validation](docs/PRODUCTION_VALIDATION.md): hardware, network,
-  Deep Freeze, and long-duration test checklist.
-- [Auto-update and LTSC maintenance](docs/AUTO_UPDATE_LTSC.md): the planned
-  nine-month update cycle, release trust, staged rollout, and rollback gates.
-- [Reboot-to-restore design](docs/REBOOT_TO_RESTORE.md): the research plan for
-  managing Microsoft's UWF, edition limits, servicing, recovery, and test gates.
-- [VM lifecycle testing](docs/VM_TESTING.md): disposable Sandbox checks,
-  persistent reboot validation, privilege boundaries, and expected evidence.
-
-## Intended capabilities
-
-- Manage 50 or more Windows clients from one teacher workstation.
-- Monitor a room through bounded JPEG snapshots captured every 5-10 seconds,
-  avoiding a continuous per-client video load on the classroom switch.
-- Lock or unlock clients, draw on a selected student's screen through a
-  click-through overlay, and broadcast periodic teacher-screen snapshots.
-- Explicitly start and stop remote control for one selected client. Mouse
-  movement/clicks are sent from the preview using normalized coordinates, and
-  typed ASCII text can be dispatched from the focused remote-keyboard field.
-- Retain the native Windows Filtering Platform (WFP) allowlist foundation for a
-  future administrator-managed website policy. The unified installer and
-  diagnostics helper do not currently expose policy controls.
-- Retain H.264 multicast/unicast foundations for a future optional continuous
-  broadcast mode without making it the default monitoring path.
-- Show a responsive wall of the latest client snapshots, plus focused
-  telemetry, controls, and chat for one client.
-- Optionally retain a bounded, privacy-filtered server diagnostic history in
-  memory and let a technician review it before manually creating a public
-  GitHub Issue. Collection and error prompts are independently controllable;
-  no report is uploaded automatically.
-- Snapshot delivery is bounded to JPEG images up to 480x270 and 60 KiB. The
-  teacher UI decodes each generation once, retains only the newest immutable
-  payload, and reports malformed frames without retrying them every render
-  frame.
-- Run a small Windows service and native Win32 tray/chat agent on each client.
-- Authenticate control and video traffic without JSON, XML, Electron, or a
-  custom kernel driver.
-- Keep secrets, dumps, captures, and runtime state local and outside Git.
-
-## System requirements
-
-The following values are project targets and still require validation on a
-real 50-client lab.
-
-| Role | Baseline target | Network |
-| --- | --- | --- |
-| Server | Windows 10/11 x64, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk; i5-6400-class CPU is a performance reference only | Wired Gigabit Ethernet recommended |
-| Client | Windows 10/11 x64, 6 GiB RAM minimum, 8 GiB recommended, 512 MiB free disk; i5-6400-class CPU is a performance reference only | Wired Ethernet recommended |
-| Router/switch | Standard Ethernet switching/routing for authenticated TCP snapshots; IGMP snooping and an IGMP querier are optional future-video requirements | One controlled LAN/VLAN for the first deployment |
-
-For a server supervising 50 or more devices, 16 GiB RAM and an SSD are prudent
-until the 8 GiB recommended baseline has passed long-duration hardware testing. Intel HD
-Graphics 530 is a baseline hardware-acceleration target, not a guarantee across
-all driver versions.
-
-Diagnostics report the CPU model, architecture, and physical/logical core
-counts for technicians, but processor identity and topology never block the
-installer. Validate CPU suitability with the actual NSTU workload because VM
-topology, firmware, and Windows reporting can differ from the processor name.
-
-## Build And Setup Flags
-
-The Windows presets build either a Debug or Release configuration. Debug keeps
-symbols and enables the default test targets; Release is the pre-release
-configuration used for packaging.
-
-```powershell
-cmake --preset windows-debug
-cmake --build --preset windows-debug
-ctest --preset windows-debug
-
-cmake -S . -B build-release -G "MinGW Makefiles" `
-  -DCMAKE_BUILD_TYPE=Release -DNSTU_ENABLE_WERROR=ON `
-  -DNSTU_BUILD_CLIENT=ON -DNSTU_BUILD_SERVER=ON `
-  -DNSTU_BUILD_SETUP=ON -DNSTU_BUILD_VIDEO=ON -DNSTU_BUILD_TESTS=ON
-cmake --build build-release --parallel 4
-```
-
-The main CMake switches are:
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `CMAKE_BUILD_TYPE=Debug\|Release` | generator-dependent | Select debug symbols or optimized release binaries |
-| `NSTU_BUILD_CLIENT=ON\|OFF` | `ON` | Build `nstu-service`, `nstu-agent`, and provisioning tools |
-| `NSTU_BUILD_SERVER=ON\|OFF` | `ON` | Build the teacher server and its UI |
-| `NSTU_BUILD_SETUP=ON\|OFF` | `ON` on Windows | Build the `nstu-diagnostics` helper used by the installer and boot checks |
-| `NSTU_BUILD_VIDEO=ON\|OFF` | `ON` | Build DXGI, Media Foundation, and video transport components |
-| `NSTU_BUILD_TESTS=ON\|OFF` | `ON` | Build the unit/integration test executables |
-| `NSTU_SERVER_USE_IMGUI=ON\|OFF` | `ON` | Enable or disable the Dear ImGui server executable |
-| `NSTU_ENABLE_WERROR=ON\|OFF` | `OFF` | Treat compiler warnings as errors; recommended for release validation |
-| `NSTU_ENABLE_PACKAGING=ON\|OFF` | `ON` | Enable unified NSIS packaging targets |
-
-For technician setup validation without building the client or server:
-
-```powershell
-cmake -S . -B build-setup -G "MinGW Makefiles" `
-  -DCMAKE_BUILD_TYPE=Release -DNSTU_BUILD_SETUP=ON `
-  -DNSTU_BUILD_CLIENT=OFF -DNSTU_BUILD_SERVER=OFF `
-  -DNSTU_BUILD_VIDEO=OFF -DNSTU_BUILD_TESTS=OFF `
-  -DNSTU_ENABLE_WERROR=ON
-cmake --build build-setup --target nstu-diagnostics
-```
-
-The server runtime accepts `--language=en`, `--language=vi`, `--dark`, and
-`--graphics-debug`. These select the initial language/theme and request the
-Direct3D 11 debug layer, respectively. Language, Appearance, and Screen
-refresh controls are also available from the dashboard `Settings` section.
-Screen refresh is the bounded snapshot interval, from 5 to 10 seconds.
-
-The unified installer opens with an explicit role choice: `Install for Client`
-or `Install for Server`. There is no supported `Both` installation because the
-roles use different lifecycle and port responsibilities. The installer invokes
-`nstu-diagnostics` sequentially. Technicians can also run it directly with
-`--target=client|server`, `--server-ip=...`, `--server-port=...`, `--installer`,
-`--boot-check`, `--auto-close`, and `--log=...`.
-
-The separate `Diagnostics` popup inside `nstu-server.exe` reports DXGI adapters
-and vendors, feature level, Desktop Duplication support, WARP fallback state,
-and bounded recent HRESULT events. If graphics initialization fails before the
-server UI can open, a native Windows message box displays the recorded failure.
-
-Optional diagnostic collection is configured under server `Settings`. It is
-disabled by default, stores at most 64 sanitized events in process memory, and
-clears them when disabled or when the server exits. An optional error prompt
-opens a complete report preview. `Copy and open GitHub` does not submit data: it
-copies the reviewed report and opens the public Issue form for a technician to
-paste and submit manually. See [Optional diagnostics](docs/TELEMETRY.md) for the
-field allowlist and privacy boundary.
-
-#### Server graphics diagnostics
-
-Open `Diagnostics` in the server navigation bar to inspect the graphics
-environment without starting a client stream. The popup reports every DXGI
-adapter (including NVIDIA, AMD, Intel, Microsoft/software adapters), selected
-adapter and feature level, Desktop Duplication availability, and the number of
-hardware H.264 Media Foundation encoders registered by Windows. It also keeps
-a bounded timestamped event log containing device-creation, swap-chain resize,
-and `Present`/device-removal HRESULTs. `Refresh` reruns the probes; it does not
-change system policy or install drivers.
-
-Server D3D11 initialization explicitly tries non-software adapters and then
-falls back to WARP if hardware creation fails. This keeps the diagnostics UI
-usable on machines with a missing or incompatible display driver. When
-`--graphics-debug` is supplied, NSTU requests the D3D11 debug layer and records
-if Windows does not provide it before retrying without the layer. If a driver
-resets or removes the device, the failure HRESULT and
-`ID3D11Device::GetDeviceRemovedReason()` value are recorded and the status bar
-directs the operator to `Diagnostics`.
-
-The Intel Core i5-11400F is an F-series processor and has no integrated GPU.
-The server therefore requires a working discrete adapter (or WARP as a slow
-diagnostic fallback). NVIDIA and AMD acceleration is supported through the
-native DXGI/D3D11 and Windows Media Foundation hardware paths when the vendor
-driver exposes them; CUDA, NVENC SDK, and AMD AMF are not required runtime
-dependencies. Encoder availability depends on the installed driver and Media
-Foundation registration, so capture the diagnostics popup before reporting a
-streaming crash.
-
-## Local resource benchmark
-
-The following measurements are an indicative developer-machine check, not the
-required 50-client production benchmark. They were recorded on September 1,
-2026 from commit `f183e42`, using `build-verify/server/nstu-server.exe` with an
-empty client registry and no snapshot or broadcast traffic.
-
-Test machine: AMD Ryzen 7 5700X (8 cores/16 logical processors), 15.9 GiB RAM,
-SSD storage, NVIDIA GeForce RTX 2060 SUPER, and Windows 11 Pro build 26200.
-
-| Scenario | CPU, total machine capacity | Working set | Private memory | Method |
-| --- | ---: | ---: | ---: | --- |
-| Dashboard visible, idle | 0.725% average, 2.336% p95 | 53.54 MiB average, 54.50 MiB maximum | 117.95 MiB average, 118.83 MiB maximum | 120 one-second samples after a 10-second warm-up |
-| Window closed to tray, idle | 0.023% average, 0.289% maximum | 52.48 MiB average, 53.00 MiB maximum | 120.60 MiB average, 121.06 MiB maximum | 60 one-second samples after a 5-second warm-up |
-
-The empty-room run produced no application snapshot payload, so it is not a
-live bandwidth benchmark. The table below is the worst-case JPEG payload model
-from the implemented 60 KiB frame cap. It assumes every frame reaches that cap
-and excludes authenticated-command, TCP/IP, Ethernet, retransmission, and other
-control-traffic overhead.
-
-| Snapshot traffic | 5 second interval | 7 second interval | 10 second interval |
-| --- | ---: | ---: | ---: |
-| One client, one direction | 0.098 Mbps | 0.070 Mbps | 0.049 Mbps |
-| 50-client room monitoring, inbound | 4.92 Mbps | 3.51 Mbps | 2.46 Mbps |
-| Teacher broadcast to 50 clients, current per-client TCP path | 4.92 Mbps | 3.51 Mbps | 2.46 Mbps |
-| Monitoring and teacher broadcast together | 9.83 Mbps | 7.02 Mbps | 4.92 Mbps |
-
-These values are ceilings for the current periodic snapshot mode, not measured
-switch throughput. Actual JPEGs can be smaller, while wire overhead makes each
-transmission slightly larger. The future continuous H.264 path requires its own
-measured rate-control and multicast/unicast benchmark.
-
-The current release decision is to keep continuous H.264 monitoring deferred.
-Periodic snapshots are the supported classroom path; H.264 must not be enabled
-or advertised until the multi-client switch, decoder, recovery, and security
-matrix has passed.
-
-Ten launches in the same Windows session reached a responsive top-level window
-in 191.8 ms median and 215.4 ms average. The minimum was 187.4 ms, the maximum
-was 435.1 ms, and the first measured launch was 435.1 ms. This is application
-launch latency with the OS already running; it is not a Windows reboot-to-ready
-measurement.
-
-For context, project-owner-supplied figures for other classroom-management
-applications on the same Ryzen 7 5700X configuration are 11-12% average CPU
-with peaks up to 20%, approximately 820 MB-1.1 GB RAM with peaks up to 1.3 GB,
-30-40 Mbps while streaming, and about 32 seconds for boot and manager startup.
-Those figures were not independently reproduced during this run, so differences
-in workload and measurement method still prevent a strict apples-to-apples
-comparison. The supplied systems were also described as removable by students.
-NSTU's removal behavior was not tested in this resource benchmark; it remains
-part of the administrator-policy, reboot, and Windows deployment validation
-matrix.
-
-### Reported i5-6400 follow-up
-
-Reported an approximate NSTU run on the target Intel
-Core i5-6400 system. These values did not include raw samples, duration, client
-count, or workload details, so they are preliminary rather than definitive.
-
-| Metric | NSTU on i5-6400 | Comparison and reduction |
-| --- | ---: | --- |
-| CPU | 4-12% | No same-i5 CPU baseline for the other application was supplied. Against its earlier 11-12% Ryzen average only as context, NSTU's 4% low end is 7-8 percentage points, or 63.6-66.7%, lower; the 12% high end overlaps the reference, so no guaranteed CPU reduction can be claimed. |
-| RAM | Approximately similar to the NSTU Ryzen run | Results were similar across machines, but no definitive i5 memory figure was recorded. |
-| Integrated GPU | 11% | The other application used 34% on the integrated GPU. NSTU was 23 percentage points lower, a 67.6% relative reduction, using about 32.4% of the comparison application's GPU load. |
-
-### Reported client measurements at Vung Tau Junior High School
-
-Teachers at Vung Tau Junior High School conducted and permitted the following
-client-side checks on three devices with the same Intel Core i5-6400
-configuration. These are approximate averages from three tests, not a
-definitive production benchmark; the workload, capture scene, drivers, and
-network can change the result.
-
-| Client state | Approx. RAM | CPU | GPU / capture detail |
-| --- | ---: | ---: | --- |
-| Snapshot capture and running service | 44 MB | no more than 7% | 11% iGPU / 6% CPU in the paired GPU/CPU sample |
-| Watching a server stream with overlay (1080p/60 fps) | 96 MB | 11% | 27% iGPU / 19% CPU |
-| Drawing directly on the student machine | 72 MB | not recorded | Overlay drawing workload |
-| Streaming the student screen to the server (720p/30 fps) | 65 MB | not recorded | 25% iGPU / 16% CPU |
-
-The client results complement the server measurements above. They do not claim
-that every i5-6400 machine or every classroom workload will match these values.
-
-### Deep Freeze removal observation
-
-The NSTU client removal test at Vung Tau indicates that normal Deep Freeze
-administration is required. The machine must be booted Thawed, the Deep Freeze
-console opened normally, protection disabled, and Windows restarted before the
-client can be completely removed; the uninstaller then requires its own restart
-to finish stopping the service and deleting files. Without opening Deep Freeze
-and disabling protection, removal is effectively blocked. This remains an
-observational field report, not a claim that every Deep Freeze edition behaves
-identically.
-
-### Cooperation and test sites
-
-The following schools are cooperating with NSTU as project partners or are being
-evaluated for cooperation. Additional test results are still being collected.
-
-#### Verified partner (current)
-
-<table>
-  <tr>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/le-quy-don-gifted-high-school.png" alt="Le Quy Don High School for the Gifted logo" width="112"><br><sub><b>Le Quy Don High School for the Gifted</b><br>Cooperation confirmed</sub></td>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/ptnk-vnu-hcm.png" alt="VNU-HCM High School for the Gifted logo" width="112"><br><sub><b>VNU-HCM High School for the Gifted (PTNK)</b><br>Cooperation confirmed</sub></td>
-  </tr>
-</table>
-
-#### Pending verified partners
-
-<table>
-  <tr>
-    <td align="center" valign="top" width="180"><img src="docs/assets/partners/dinh-tien-hoang-high-school.png" alt="Dinh Tien Hoang High School logo" width="112"><br><sub><b>Dinh Tien Hoang High School</b><br>Cooperation status awaiting verification</sub></td>
-  </tr>
-</table>
-
-The logo files in `docs/assets/partners/` are background-cleaned copies of the
-marks supplied for this report.
-
-Use `tools/production/collect-benchmarks.ps1` for longer runs. Results with 5,
-7, and 10 second snapshot intervals, real clients, network traffic, raw CSV,
-and a documented workload on the target i5-6400 hardware are still required
-before making production resource claims.
-
-## Recommended network layout
-
-```text
-Teacher PC (NSTU Server)
-          |
-     Gigabit Ethernet
-          |
-Ethernet switch / router (TCP snapshots; IGMP optional for future H.264)
-     |            |             |
- Client 01     Client 02      Client 50+
-```
-
-Before a production deployment:
-
-1. Put the server and clients on the same trusted VLAN or subnet for the first
-   rollout.
-2. Reserve a stable server address outside the DHCP pool where possible. Keep
-   the router/gateway at `.1` and use a separate address such as `.10` for the
-   teacher server.
-3. Use a managed switch or router where practical. IGMP snooping and one IGMP
-   querier are required only for a future continuous H.264/multicast trial;
-   the supported snapshot path uses ordinary authenticated TCP connections.
-4. Do not expose NSTU control or video traffic directly to the internet.
-5. Prefer wired Ethernet. If Wi-Fi is used for testing, disable access-point
-   client isolation and confirm the switch/AP can sustain the expected TCP
-   snapshot traffic.
-6. For snapshot-only deployment, an ordinary switch is sufficient if it meets
-   the measured client count and uplink capacity. Do not enable multicast just
-   to make discovery work. If the optional H.264 trial is enabled later,
-   validate IGMP snooping, querier, flooding, and unicast fallback separately.
-7. Keep Windows Firewall enabled. TCP `47001` is the required authenticated
-   control and snapshot port, and UDP `47001` handles authenticated same-VLAN
-   server address recovery. UDP `47000` is reserved for the optional future
-   continuous-video transport and should remain closed unless that feature is
-   explicitly enabled. Limit rules to the classroom VLAN and required
-   executable; do not create broad internet-facing rules.
-
-After enrollment, a client treats the stored server IPv4 address as a cache. If
-that endpoint fails, it broadcasts a PSK-authenticated discovery request on the
-same VLAN, performs the normal mutual TCP handshake with the candidate, and
-stores the new address only after authentication succeeds. A server MAC address
-may be used by the router for DHCP reservation, but NSTU never treats an IP or
-MAC address as proof of server identity. Broadcast recovery does not cross a
-router, so separate VLANs still require stable addressing or managed routing.
-
-Cross-VLAN multicast is outside the supported snapshot deployment. If a future
-continuous-video trial needs it, configure multicast routing intentionally and
-validate it as a separate network change.
-
-## Install the current test build
-
-Nightly installers are available on the
-[Releases page](https://github.com/Khoasoma/nstu/releases). They are unsigned
-development artifacts and may trigger Microsoft Defender SmartScreen. Verify
-the release origin and SHA-256 digest before running them:
-
-```powershell
-Get-FileHash .\nstu-*-setup.exe -Algorithm SHA256
-```
-
-### Server
-
-1. Download `nstu-<version>-setup.exe` from the latest pre-release.
-2. Run the unified installer, select **Install for Server**, and accept the
-   Windows elevation prompt if requested.
-3. To use the server immediately without signing out, launch it once:
-
-   ```powershell
-   & "$env:ProgramFiles\NSTU\server\nstu-server.exe"
-   ```
-
-The installer registers `NSTU Server` as a machine startup application. It
-launches `nstu-server.exe` automatically in the interactive teacher session
-whenever a user signs in to Windows; it intentionally remains a desktop app,
-not a Session 0 Windows service. Minimizing or closing the window keeps it in
-the notification area. Choosing **Exit** stops it until it is launched manually
-or the next sign-in. The same installer's diagnostics helper can be run later
-to repeat hardware and network checks while the machine is thawed.
-
-To remove the server, use Windows **Installed apps** or the server uninstaller.
-The first invocation stages removal and requires a restart; it does not remove
-the service, process, or package files. After reboot it force-terminates the
-installed `nstu-server.exe`, removes the server and diagnostics files, and
-schedules any remaining locked files for a later boot. Complete the requested
-restart before installing the client role on that machine.
-
-The dashboard does not inject demonstration records. It starts with an empty
-client registry and displays only records supplied by the runtime registry.
-Teachers can switch between `Room screens`, which presents every visible client
-in a responsive screen wall, and `Selected client`, which concentrates
-telemetry, snapshot controls, screen annotation, lock/unlock, and chat for one
-workstation. The snapshot interval is adjustable from 5 to 10 seconds. Each
-JPEG is bounded to 60 KiB, and only the newest pending snapshot is retained to
-avoid stale queue growth. Teacher-screen broadcast uses the same bounded
-snapshot path. The dashboard includes English/Vietnamese and light/dark mode
-switches. Minimizing or closing the window keeps the server available in the
-Windows notification area; use the tray menu to reopen it or exit. Continuous
-H.264/UDP preview remains optional future work.
-
-In `Selected client`, use `Start remote` only when an administrator explicitly
-needs input control. The preview forwards mouse movement and left-click events;
-the adjacent keyboard field sends ASCII text when Enter is pressed. Remote
-control is stopped automatically when the selected client changes, goes offline,
-the view changes, or the server exits.
-
-The repository retains a native WFP allowlist foundation, but the unified
-installer and current diagnostics helper do not expose an allowlist panel.
-WFP operates on destination IPs and ports, so any future policy must resolve and
-maintain domain addresses explicitly. No HTTPS interception or MITM decryption
-is used.
-
-For the complete installer feature list, script locations, diagnostics options,
-and the distinction between the CMake build option `NSTU_BUILD_SETUP` and
-runtime arguments, see the [Setup Guide](docs/SETUP_GUIDE.md). There is no
-`--setup` runtime flag; run `diagnostics\nstu-diagnostics.exe` directly when a
-technician needs a standalone check.
-
-Server and client are mutually exclusive installation roles on one Windows
-machine. The unified installer checks the registered role and installed layout
-before copying files, and aborts with an explanatory message if the opposite
-role is already present. Use separate machines for the teacher server and
-student clients.
-
-Vietnamese and dark mode can also be selected at startup:
-
-```powershell
-& "$env:ProgramFiles\NSTU\server\nstu-server.exe" --language=vi --dark
-```
-
-### Client
-
-1. Download and run `nstu-<version>-setup.exe` as an administrator, select
-   **Install for Client**, and enter the server IP address and control port.
-2. The installer runs the client diagnostics, registers `nstu-service` for
-   automatic startup, and configures
-   service recovery. It deliberately does not start the service inside the
-   installer session.
-3. Restart Windows when setup requests it. Windows stops at its normal sign-in
-   screen; manually select the existing standard classroom account. NSTU, UWF,
-   and Managed mode do not create accounts, select an account, store its
-   password, or configure automatic sign-in. After sign-in the service launches
-   one `nstu-agent.exe` instance in that active user session.
-4. An administrator can later verify the service with:
-
-   ```powershell
-   Get-Service nstu-service
-   ```
-
-The client service is the component that starts automatically. The installer
-registers it with Windows `start= auto`; the required restart activates the
-service, and the service launches the interactive agent in the logged-on user
-session.
-
-`nstu-service.exe` is registered explicitly as `LocalSystem` and runs in
-Session 0. `nstu-agent.exe` must remain in the logged-in user's interactive
-session so Windows permits tray, capture, overlay, and input operations. A
-standard user is not granted service stop/delete access; after an established
-agent pipe disconnects, the service attempts a bounded relaunch. NSTU does not
-claim to be immune to a local administrator or kernel-level software. See the
-[VM lifecycle test guide](docs/VM_TESTING.md) for the exact security assertions.
-
-Use Windows **Installed apps** or the NSTU uninstaller to remove the client.
-The first uninstaller invocation only validates the request and stages a
-one-shot SYSTEM startup task. It changes no service, process, package file, or
-pending-delete state unless the administrator accepts an immediate restart.
-After reboot, the task force-terminates NSTU-owned agent/service processes,
-deletes the service, removes package files, and schedules any still-locked file
-for the following boot. Direct manual service removal is not supported.
-
-## Connecting a computer room
-
-Run the same unified installer on each machine, choosing Server on the teacher
-machine and Client on each student machine. Put them on the same trusted VLAN
-and allow TCP and UDP traffic on port `47001` between clients and the server.
-Enrollment itself is done on screen: no secret file is copied to a student
-machine, and no per-client command is run.
-
-The server still needs its protected data root, which the operator helper
-scripts in the repository's `packaging\` directory create. The unified installer
-ships only the role binaries, their runtimes, the diagnostics helper, and the
-exam runtime assets; it does not install PowerShell scripts or documentation.
-Run these helpers from a source checkout of the matching release and set
-`$deployment` to the checkout's `packaging` directory.
-
-### 1. Prepare the server
-
-Run this on the teacher machine as Administrator to create the protected data
-root, then start `nstu-server.exe`:
-
-```powershell
-$deployment = Join-Path (Get-Location) "packaging"
-if (-not (Test-Path (Join-Path $deployment "configure-data-root.ps1"))) {
-  throw "Run this from a source checkout: the packaging helpers are not part of the installed product."
-}
-& (Join-Path $deployment "configure-data-root.ps1") `
-  -DataRoot "$env:ProgramData\NSTU"
-```
-
-No enrollment secret is created for the on-screen pairing flow — the server mints
-and stores each client's key itself when the operator approves the request.
-
-### 2. Enroll each client by pairing
-
-On the server, open the pairing window ("Add computers"). Each student machine's
-agent sweeps the LAN for a server whose pairing window is open, runs the mutually
-authenticated exchange itself, and shows a six-digit code on its own screen. The
-same code appears in the server's pending list; the operator approves a request
-only when the two codes match. **That six-digit comparison is the trust root** —
-nothing is copied between machines to establish it.
-
-On approval, the client derives its protocol key from the transcript (the key is
-never transmitted), stores the machine-scope DPAPI configuration `nstu-service`
-uses, and connects. A trusted client follows this path:
-
-```text
-Install client
-  -> agent sweeps the LAN and shows a six-digit code
-  -> operator approves the matching code on the server (the trust root)
-  -> server mints the client key; client stores a protected configuration
-  -> authenticate to the server over TCP
-  -> register the device and receive an authenticated snapshot schedule and room policy
-  -> capture bounded JPEG snapshots over the authenticated TCP connection
-```
-
-On a shared VLAN where several servers answer, label each server with a room name
-in the server UI and give each student machine its room via the installer's
-optional **Room name** field or `/ROOM=` in a silent install (it writes
-`HKLM\Software\NSTU\PreferredRoom`). The agent then auto-selects the server
-advertising that room, falling back to the selection menu — or to silent pairing
-when only one server answers — if no room is set or no single server carries it.
-The room name is only a routing hint; the six-digit approval still gates every
-pairing, so a wrong or missing room degrades to the menu, never to a silent
-mis-pairing.
-
-The optional continuous H.264 path is not part of this enrollment flow. It may
-later add authenticated group membership and multicast/unicast transport after
-the dedicated switch, decoder, and loss-recovery validation gates pass.
-
-Connection preambles only reject obviously invalid peers quickly. Device
-identity is accepted only after the cryptographic handshake succeeds.
-
-### Manual enrollment fallback (advanced)
-
-The earlier file-copy enrollment path is deprecated and no longer shipped in the
-installer, but the tools remain in the repository for recovery when on-screen
-pairing is unavailable (for example, a machine with no interactive session). From
-a source checkout, export a one-time bootstrap secret on the server, then run the
-provisioning tool on each machine with a unique 128-bit identity and key ID:
-
-```powershell
-$deployment = Join-Path (Get-Location) "packaging"
-New-Item -ItemType Directory -Path "D:\SecureTransfer" -Force | Out-Null
-& (Join-Path $deployment "new-enrollment-secret.ps1") `
-  -ExportPath "D:\SecureTransfer\nstu-enrollment.bin"
-# Restart nstu-server.exe so it loads the protected enrollment secret, then on
-# each client (nstu-provision.exe is not installed; build it or copy it from a
-# source checkout):
-$clientId = [guid]::NewGuid().ToString("N")
-& ".\nstu-provision.exe" 192.168.10.10 47001 $clientId 1 "D:\SecureTransfer\nstu-enrollment.bin"
-```
-
-The tool authenticates the enrollment transcript, derives the installed PSK
-without sending it, and stores the same machine-scope DPAPI configuration. Keep
-the export in a protected removable/thawed location and delete every copy once
-enrollment is complete. `new-enrollment-secret.ps1` is server-only; it is not
-needed on student machines.
-
-### Staging an exam package
-
-Exam archives are staged on the client only by the administrator-owned helper
-`stage-exam-package.ps1`, run from a source checkout's `packaging\` directory. The
-server remains the persistent owner of the original package and answer journal.
-The helper requires both the release archive SHA-256 and the unpacked content
-SHA-256, rejects unsafe ZIP entries and zip bombs, and publishes a
-content-addressed directory below the persistent client data root:
-
-~~~powershell
-$stager = Join-Path (Get-Location) "packaging\stage-exam-package.ps1"
-& $stager -ArchivePath "D:\SecureTransfer\exam.nstuexam" -PublishRoot "$env:ProgramData\NSTU\exams\packages" -ExpectedArchiveSha256 "<archive-sha256>" -ExpectedContentSha256 "<content-sha256>" -TrustedPublisherThumbprint "<publisher-thumbprint>"
-~~~
-
-Production packages must contain a detached CMS/PKCS#7 `manifest.p7s`
-entry signed by the configured publisher. `-AllowUnsigned` and
-`-AllowNonElevatedTest` are internal-test switches only. The helper
-does not download packages or modify the server, UWF, or Deep Freeze state.
-
-## Deep Freeze deployments
-
-UWF/reboot-to-restore trials and third-party Deep Freeze protection apply only
-to client machines. Never place the teacher server under UWF or Deep Freeze:
-exam packages, `exams/answer-journal.bin`, enrollment state, audit records, and
-diagnostic data must remain on persistent storage. The client's DPAPI-protected
-answer outbox is only a retry buffer; the server journal is authoritative.
-
-- Install binaries in the normal protected Windows location.
-- Reserve a thawed, ACL-restricted location for enrolled identity, protected
-  key material, configuration, audit logs, and update state.
-- Configure that location before enrollment, for example:
-
-  ```powershell
-  & (Join-Path (Get-Location) "packaging\configure-data-root.ps1") `
-    -DataRoot "D:\NSTUData"
-  ```
-- Never store PSKs, certificates, dumps, screen captures, or runtime secrets in
-  the repository.
-- Do not freeze a production image before enrollment persistence, service
-  recovery, upgrade, and rollback behavior have been tested.
-- Boot the workstation Thawed and disable Deep Freeze protection before
-  installing, upgrading, or uninstalling NSTU. The client uninstaller checks
-  recognized `DFServ`/`DeepFrz` services and aborts while their protection is
-  still active; this conservative check must be validated against the exact
-  Deep Freeze edition used by the school.
-
-Named pipes and memory-mapped files reduce temporary disk activity but do not
-replace persistent protected storage. Deep Freeze will discard unthawed state
-after a reboot.
-
-NSTU's proposed built-in replacement is currently **research only**. The safe
-design uses Microsoft's Unified Write Filter rather than an NSTU kernel driver.
-Microsoft supports UWF on Enterprise, Education, and IoT Enterprise editions,
-but not Windows Pro or Home. Current NSTU builds do not enable, configure, or
-control UWF and must not be represented as a Deep Freeze replacement. See the
-[reboot-to-restore design](docs/REBOOT_TO_RESTORE.md) for the privilege model,
-maintenance/recovery sequence, Windows Pro fallback, and release gates.
-
-## Security notes
-
-- Current control sessions use mutual HMAC authentication and replay
-  protection.
-- JPEG snapshots and video datagrams are authenticated, but screen content is
-  not encrypted. Do not test real sensitive screens on an untrusted LAN.
-- Remote control is deliberately disabled until the teacher clicks `Start
-  remote`; use it only on enrolled, trusted clients. The WFP website policy is
-  IPv4-only and covers TCP ports 80 and 443.
-- Authenticode automation is available, but nightly artifacts remain unsigned;
-  a production release requires the real certificate-backed workflow.
-- Independent review, fuzzing, Deep Freeze edition validation, real certificate
-  signing, and the hardware/network evidence matrix remain production blockers.
-- A green CI build proves compilation and automated tests, not security or
-  reliability on real school hardware.
-
-## Contributing and development
-
-Build instructions, repository structure, CMake options, testing, and fork/PR
-steps are in the [development guide](docs/DEVELOPMENT.md). Contributions must
-remain compatible with permissive licensing; GPL dependencies are not accepted.
-
-## Contributors
-
-- **Lê Anh Tuấn (`ssdarealest`)**: Responsible for project management, legal support, conceptualization, progress management, and project development.
-- **Bùi Hồ Hải Đăng (`yanji`)**: Contributor of ideas, participant in building NSTU, provider of testing equipment, and quality assurance reviewer for the final output.
-- **Nguyễn Thị Hồng Quyên**: Informatics teacher at Le Quy Don High School for the Gifted, Ho Chi Minh City.
-
 ## License
 
-Project NSTU is released under the [MIT License](LICENSE). You may use, copy,
-modify, publish, distribute, sublicense, and sell copies subject to the license
-notice requirements. Third-party notices are listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Project NSTU is released under the [MIT License](LICENSE). Component-specific licensing information is retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
