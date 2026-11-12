@@ -30,10 +30,10 @@
     <div class="studio-commandbar" id="studio-commandbar">
       <!-- Mode Switcher -->
       <div class="mode-toggle-group" role="tablist" aria-label="Studio Mode">
-        <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true">
+        <button class="mode-btn active" id="btn-mode-editor" type="button" role="tab" aria-selected="true" aria-controls="editor-view" tabindex="0">
           <span>✍️</span> Authoring
         </button>
-        <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false">
+        <button class="mode-btn" id="btn-mode-preview" type="button" role="tab" aria-selected="false" aria-controls="preview-view" tabindex="-1">
           <span>👁️</span> Preview
         </button>
       </div>
@@ -67,7 +67,7 @@
   <!-- ========================================================================
        VIEW 1: Studio Authoring Mode
        ======================================================================== -->
-  <div class="studio-main" id="editor-view">
+  <div class="studio-main" id="editor-view" role="tabpanel" aria-labelledby="btn-mode-editor">
     <aside class="editor-sidebar" id="studio-question-rail" aria-label="Questions">
       <div class="sidebar-section question-rail-content">
         <div class="section-title">
@@ -235,7 +235,7 @@
   <!-- ========================================================================
        VIEW 2: IELTS Live Preview (Candidate Split Screen)
        ======================================================================== -->
-  <div class="preview-view" id="preview-view" style="display: none;">
+  <div class="preview-view" id="preview-view" style="display: none;" role="tabpanel" aria-labelledby="btn-mode-preview">
     <!-- Preview Topbar -->
     <div class="preview-toolbar">
       <div style="display: flex; align-items: center; gap: 12px;">
