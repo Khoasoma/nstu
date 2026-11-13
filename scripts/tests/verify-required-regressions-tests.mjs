@@ -134,17 +134,33 @@ async function invoke(command, args, env = process.env, options = {}) {
       ...(gitScoped ? { fixtureGitIsolation: { cwd, markerSha256: hash(markerBytes), relocationEnvironmentRemovedOrBound: true, privateGlobalConfig: emptyGitConfig } } : {}) }));
     const failedOwner = entry.label === 'copied current55 owner suite retaining original49' && result.execution.effectiveExitCode !== 0;
     if (failedOwner) {
-      let lastCase = null;
+      let lastCase = null, stderrTail = result.output.stderr.subarray(-768);
       try {
         const row = JSON.parse(result.output.stderr.toString('utf8').split(/\r?\n/).filter(line => line.startsWith('{"label":')).at(-1));
-        const cause = row.execution?.primaryErrors?.[0]?.message;
+        const inner = Array.isArray(row.livenessEvidence?.results) ? row.livenessEvidence.results.at(-1)?.result : null;
+        const innerCause = inner?.execution?.primaryErrors?.[0]?.message;
+        const cause = typeof innerCause === 'string' ? innerCause : row.execution?.primaryErrors?.[0]?.message;
         lastCase = { label: typeof row.label === 'string' ? row.label.slice(0, 160) : null,
           executionKind: typeof row.execution?.kind === 'string' ? row.execution.kind.slice(0, 64) : null,
-          primaryError: typeof cause === 'string' ? cause.slice(0, 256) : null };
+          primaryError: typeof cause === 'string' ? cause.slice(0, 192) : null };
+        if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+          const operations = Array.isArray(inner.cleanup?.operations) ? inner.cleanup.operations : [];
+          const nativeError = inner.execution?.primaryErrors?.[0]?.win32Error;
+          lastCase.innerProbe = { executionKind: typeof inner.execution?.kind === 'string' ? inner.execution.kind.slice(0, 64) : null,
+            primaryWin32Error: Number.isInteger(nativeError) && nativeError >= 0 && nativeError <= 0xFFFFFFFF ? nativeError : null,
+            deniedOpenObserved: operations.some(operation => operation?.operation === 'OpenProcess' && operation.resourceRole === 'descendant-liveness' && operation.ok === false && operation.win32Error === 5),
+            daclSet: operations.some(operation => operation?.operation === 'SetKernelObjectSecurity' && operation.resourceRole === 'test-owned-descendant-dacl' && operation.ok === true),
+            daclRestored: operations.some(operation => operation?.operation === 'SetKernelObjectSecurity' && operation.resourceRole === 'test-owned-descendant-dacl-restore' && operation.ok === true),
+            cleanupConfirmed: inner.cleanup?.confirmed === true };
+        }
+        if (typeof row.livenessOutput?.stderrBase64 === 'string') {
+          const encodedTail = row.livenessOutput.stderrBase64.slice(-1024), decodedTail = Buffer.from(encodedTail, 'base64');
+          if (decodedTail.length && decodedTail.toString('base64') === encodedTail) stderrTail = decodedTail.subarray(-768);
+        }
       } catch { /* Stderr is opaque diagnostic data; malformed rows cannot change acceptance. */ }
       console.error('GATE02_OWNER_FAILURE ' + JSON.stringify({ invocationId: entry.id, executionKind: result.execution.kind,
         rawWorkerExitDWORD: result.execution.rawWorkerExitDWORD, cleanupConfirmed: result.cleanup.confirmed, lastCase,
-        stderrTail: result.output.stderr.subarray(-768).toString('utf8') }));
+        stderrTail: stderrTail.toString('utf8') }));
     }
     if (failedOwner && result.output.stdout.length === 0) {
       await assertOwnedLeaf();
