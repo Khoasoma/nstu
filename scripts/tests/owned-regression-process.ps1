@@ -37,6 +37,10 @@ namespace NstuOwnedRegression {
         [StructLayout(LayoutKind.Sequential)] public struct ExtendedLimits { public BasicLimits basic; public IoCounters io; public UIntPtr processMemory,jobMemory,peakProcessMemory,peakJobMemory; }
         [StructLayout(LayoutKind.Sequential)] public struct Accounting { public long user,kernel,periodUser,periodKernel; public uint faults,total,active,terminated; }
         [StructLayout(LayoutKind.Sequential)] public struct FileTime { public uint low,high; public string Hex() { return (((ulong)high << 32) | low).ToString("X16"); } }
+        [StructLayout(LayoutKind.Sequential)] public struct Luid { public uint low; public int high; public string Hex() { return (((ulong)unchecked((uint)high) << 32) | low).ToString("X16"); } }
+        [StructLayout(LayoutKind.Sequential)] public struct LuidAttributes { public Luid luid; public uint attributes; }
+        [StructLayout(LayoutKind.Sequential)] public struct TokenPrivileges { public uint count; public LuidAttributes privilege; }
+        [StructLayout(LayoutKind.Sequential)] public struct TokenStatistics { public Luid tokenId,authenticationId; public long expiration; public int type,level; public uint charged,available,groups,privileges; public Luid modifiedId; }
         [StructLayout(LayoutKind.Sequential)] public struct Overlapped { public UIntPtr internalValue,internalHigh; public uint offset,offsetHigh; public IntPtr eventHandle; }
         [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateJobObjectW(IntPtr attributes,string name);
         [DllImport("kernel32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool SetInformationJobObject(IntPtr job,uint kind,IntPtr info,uint length);
@@ -65,6 +69,13 @@ namespace NstuOwnedRegression {
         [DllImport("kernel32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool DuplicateHandle(IntPtr sourceProcess,IntPtr source,IntPtr targetProcess,out IntPtr target,uint access,[MarshalAs(UnmanagedType.Bool)] bool inherit,uint options);
         [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetCurrentProcess();
         [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetCurrentThread();
+        [DllImport("advapi32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool OpenThreadToken(IntPtr thread,uint access,[MarshalAs(UnmanagedType.Bool)] bool asSelf,out IntPtr token);
+        [DllImport("advapi32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool OpenProcessToken(IntPtr process,uint access,out IntPtr token);
+        [DllImport("advapi32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool GetTokenInformation(IntPtr token,int kind,IntPtr information,uint length,out uint returned);
+        [DllImport("advapi32.dll",SetLastError=true,CharSet=CharSet.Unicode)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool LookupPrivilegeValueW(string system,string name,out Luid luid);
+        [DllImport("advapi32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool DuplicateTokenEx(IntPtr token,uint access,IntPtr attributes,int level,int type,out IntPtr duplicate);
+        [DllImport("advapi32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool AdjustTokenPrivileges(IntPtr token,[MarshalAs(UnmanagedType.Bool)] bool all,ref TokenPrivileges privileges,uint length,IntPtr previous,IntPtr returned);
+        [DllImport("advapi32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool SetThreadToken(IntPtr thread,IntPtr token);
         [DllImport("kernel32.dll",SetLastError=true)] public static extern IntPtr GetStdHandle(int kind);
         [DllImport("kernel32.dll",SetLastError=true)] [return:MarshalAs(UnmanagedType.Bool)] public static extern bool CancelSynchronousIo(IntPtr thread);
         [DllImport("kernel32.dll",SetLastError=true,CharSet=CharSet.Unicode)] public static extern IntPtr CreateNamedPipeW(string name,uint access,uint mode,uint instances,uint outputSize,uint inputSize,uint timeout,ref SecurityAttributes attributes);
@@ -522,7 +533,9 @@ namespace NstuOwnedRegression {
                 catch(Exception closeFailure) { if(probeFailure!=null) throw new AggregateException(probeFailure,closeFailure); throw; }
             }
         }
-        Handle testHeld;
+        Handle testHeld,testOriginalThreadToken,testOriginalProcessToken,testPrivateToken;
+        Native.Luid testDebugLuid; Dictionary<string,object> testOriginalContext;
+        bool testOriginalThreadPresent,testPrivateContextInstalled;
         IntPtr testOriginalSecurity; bool testSecuritySaved;
         string TestPath(string suffix) { return Path.Combine(String(request,"cwd"),String(testLiveness,"token")+suffix); }
         void ReleaseFixtureChild() { File.WriteAllText(TestPath(".release-child"),String(testLiveness,"token"),new UTF8Encoding(false)); }
@@ -541,7 +554,7 @@ namespace NstuOwnedRegression {
             Native.FileTime creation,exit,kernel,user; Check(Native.GetProcessTimes(testHeld.Value,out creation,out exit,out kernel,out user),"GetProcessTimes","test-liveness-preliminary");
             Op("TestLivenessSnapshotBarrier","source-bound-liveness",true,Map("origin","native-barrier","pid",child,"creationTime",creation.Hex(),"scenario",fault),0);
             if(fault=="liveness-live") { if(!testHeld.Close()) throw new ProtocolException("Live fixture probe close failed"); testHeld=null; return; }
-            if(fault=="liveness-denied") { DenyFixtureProbe(); return; }
+            if(fault=="liveness-denied") { DenyFixtureProbe(); BeginDeniedProbeContext(child,creation.Hex()); return; }
             ReleaseFixtureChild();
             if(fault=="liveness-snapshot-exit") {
                 if(!testHeld.Close()) throw new ProtocolException("Snapshot fixture preliminary close failed"); testHeld=null;
@@ -579,22 +592,122 @@ namespace NstuOwnedRegression {
                 } catch(Exception cleanupFailure) { if(daclFailure!=null) throw new AggregateException(daclFailure,cleanupFailure); throw; }
             }
         }
+        Handle OpenDeniedToken(string role,bool currentThread,uint access,out bool present) {
+            var held=ReserveHandle(role);
+            bool ok=currentThread?Native.OpenThreadToken(Native.GetCurrentThread(),access,true,out held.Value):Native.OpenProcessToken(Native.GetCurrentProcess(),access,out held.Value);
+            int error=ok?0:Marshal.GetLastWin32Error(); present=ok;
+            Op(currentThread?"OpenThreadToken":"OpenProcessToken",role,ok,Map("handleCreated",held.Value!=IntPtr.Zero,"access",access),error);
+            if(!ok) {
+                if(currentThread && error==1008 && held.Value==IntPtr.Zero) return held;
+                throw new Win32Exception(error,"Fixture effective token open failed; native error "+error);
+            }
+            if(held.Value==IntPtr.Zero) throw new ProtocolException("Fixture token open returned no handle");
+            Noninherit(held.Value,role); return held;
+        }
+        byte[] DeniedTokenInformation(Handle token,int kind) {
+            uint needed; bool sized=Native.GetTokenInformation(token.Value,kind,IntPtr.Zero,0,out needed); int error=Marshal.GetLastWin32Error();
+            Op("GetTokenInformation",token.Role+"-size",sized,Map("class",kind,"bytes",needed),error);
+            if(sized || error!=122 || needed<4 || needed>65536 || (kind==10 && needed!=56)) throw new ProtocolException("Fixture token information size invalid");
+            IntPtr memory=Marshal.AllocHGlobal((int)needed);
+            try {
+                uint returned; Check(Native.GetTokenInformation(token.Value,kind,memory,needed,out returned),"GetTokenInformation",token.Role);
+                if(returned!=needed) throw new ProtocolException("Fixture token information returned length changed");
+                var bytes=new byte[returned]; Marshal.Copy(memory,bytes,0,(int)returned); return bytes;
+            } finally { Marshal.FreeHGlobal(memory); Op("FreeMemory",token.Role+"-information",true,null,0); }
+        }
+        Dictionary<string,object> DeniedTokenState(Handle token) {
+            byte[] statistics=DeniedTokenInformation(token,10),privileges=DeniedTokenInformation(token,3);
+            int count=BitConverter.ToInt32(privileges,0);
+            if(count<0 || count>(privileges.Length-4)/12 || privileges.Length!=4+count*12) throw new ProtocolException("Fixture token privilege entries invalid");
+            bool enabled=false;
+            for(int index=0;index<count;++index) {
+                int offset=4+index*12;
+                if(BitConverter.ToUInt32(privileges,offset)==testDebugLuid.low && BitConverter.ToInt32(privileges,offset+4)==testDebugLuid.high)
+                    enabled=(BitConverter.ToUInt32(privileges,offset+8)&2)!=0;
+            }
+            return Map("tokenId",BitConverter.ToUInt64(statistics,0).ToString("X16"),"modifiedId",BitConverter.ToUInt64(statistics,48).ToString("X16"),
+                "debugEnabled",enabled,"type",BitConverter.ToInt32(statistics,24),"level",BitConverter.ToInt32(statistics,28));
+        }
+        void RequireDeniedState(Dictionary<string,object> observed,Dictionary<string,object> expected) {
+            foreach(string field in new[]{"tokenId","modifiedId","debugEnabled","type"})
+                if(!object.Equals(observed[field],expected[field])) throw new ProtocolException("Fixture token context differs: "+field);
+            if(Convert.ToInt32(expected["type"])==2 && !object.Equals(observed["level"],expected["level"])) throw new ProtocolException("Fixture impersonation level differs");
+        }
+        void BeginDeniedProbeContext(uint child,string creationTime) {
+            if(Size(typeof(Native.Luid))!=8 || Size(typeof(Native.LuidAttributes))!=12 || Size(typeof(Native.TokenPrivileges))!=16 || Size(typeof(Native.TokenStatistics))!=56 ||
+                Marshal.OffsetOf(typeof(Native.TokenPrivileges),"privilege").ToInt32()!=4 || Marshal.OffsetOf(typeof(Native.TokenStatistics),"modifiedId").ToInt32()!=48)
+                throw new ProtocolException("Fixture token x64 ABI mismatch");
+            Check(Native.LookupPrivilegeValueW(null,"SeDebugPrivilege",out testDebugLuid),"LookupPrivilegeValueW","test-denied-debug-luid");
+            testOriginalThreadToken=OpenDeniedToken("test-denied-token-original-thread",true,0x0e,out testOriginalThreadPresent);
+            bool present;
+            if(!testOriginalThreadPresent) testOriginalProcessToken=OpenDeniedToken("test-denied-token-original-process",false,0x0a,out present);
+            var source=testOriginalThreadPresent?testOriginalThreadToken:testOriginalProcessToken;
+            testOriginalContext=DeniedTokenState(source);
+            if(Convert.ToInt32(testOriginalContext["type"])!=(testOriginalThreadPresent?2:1)) throw new ProtocolException("Fixture effective token type differs");
+            if((bool)testOriginalContext["debugEnabled"]) {
+                var original=ReserveHandle("test-denied-original-context"); Exception failure=null;
+                try {
+                    original.Value=Native.OpenProcess(0x00101000,false,child); int error=original.Value==IntPtr.Zero?Marshal.GetLastWin32Error():0;
+                    Op("OpenProcess",original.Role,original.Value!=IntPtr.Zero,Map("pid",child,"access",0x00101000,"handleCreated",original.Value!=IntPtr.Zero),error);
+                    if(original.Value==IntPtr.Zero) throw new Win32Exception(error,"Enabled original fixture context could not open denied child");
+                    bool contained; Check(Native.IsProcessInJob(original.Value,job.Value,out contained),"IsProcessInJob",original.Role);
+                    Native.FileTime created,exited,kernel,user; Check(Native.GetProcessTimes(original.Value,out created,out exited,out kernel,out user),"GetProcessTimes",original.Role);
+                    uint wait=Native.WaitForSingleObject(original.Value,0); Op("WaitForSingleObject",original.Role,wait==258,wait,wait==uint.MaxValue?Marshal.GetLastWin32Error():0);
+                    if(!contained || created.Hex()!=creationTime || wait!=258) throw new ProtocolException("Original fixture open did not retain the same live owned child");
+                } catch(Exception error) { failure=error; throw; }
+                finally { if(!original.Close()) { var close=new ProtocolException("Original fixture calibration handle close failed"); if(failure!=null) throw new AggregateException(failure,close); throw close; } }
+            }
+            testPrivateToken=ReserveHandle("test-denied-token-private-probe");
+            bool duplicated=Native.DuplicateTokenEx(source.Value,0x2c,IntPtr.Zero,2,2,out testPrivateToken.Value); int duplicateError=duplicated?0:Marshal.GetLastWin32Error();
+            Op("DuplicateTokenEx",testPrivateToken.Role,duplicated,Map("access",0x2c,"level",2,"type",2),duplicateError);
+            if(!duplicated) throw new Win32Exception(duplicateError,"Fixture private token duplication failed");
+            if(testPrivateToken.Value==IntPtr.Zero) throw new ProtocolException("Fixture duplicate token handle missing");
+            Noninherit(testPrivateToken.Value,testPrivateToken.Role);
+            var privateState=DeniedTokenState(testPrivateToken);
+            if((bool)privateState["debugEnabled"]) {
+                var requested=new Native.TokenPrivileges { count=1,privilege=new Native.LuidAttributes { luid=testDebugLuid,attributes=0 } };
+                bool adjusted=Native.AdjustTokenPrivileges(testPrivateToken.Value,false,ref requested,0,IntPtr.Zero,IntPtr.Zero); int error=Marshal.GetLastWin32Error();
+                Op("AdjustTokenPrivileges",testPrivateToken.Role,adjusted && error==0,Map("apiReturned",adjusted,"nativeError",error),error);
+                if(!adjusted || error!=0) throw new Win32Exception(error,"Fixture private debug privilege disable failed");
+                privateState=DeniedTokenState(testPrivateToken);
+            }
+            if((bool)privateState["debugEnabled"] || Convert.ToInt32(privateState["type"])!=2 || Convert.ToInt32(privateState["level"])!=2 ||
+                object.Equals(privateState["tokenId"],testOriginalContext["tokenId"])) throw new ProtocolException("Fixture private probe token not calibrated");
+            bool assigned=Native.SetThreadToken(IntPtr.Zero,testPrivateToken.Value); int assignmentError=assigned?0:Marshal.GetLastWin32Error();
+            if(assigned) testPrivateContextInstalled=true;
+            Op("SetThreadToken","test-denied-private-context",assigned,assigned,assignmentError);
+            if(!assigned) throw new Win32Exception(assignmentError,"Fixture private thread context assignment failed");
+            var active=OpenDeniedToken("test-denied-token-active-readback",true,8,out present);
+            if(!present) throw new ProtocolException("Fixture private thread token absent after assignment");
+            var activeState=DeniedTokenState(active); RequireDeniedState(activeState,privateState);
+            Op("TestDeniedProbeContext","source-bound-liveness",true,Map("originalThreadPresent",testOriginalThreadPresent,"originalDebugEnabled",testOriginalContext["debugEnabled"],
+                "probeDebugEnabled",activeState["debugEnabled"],"originalTokenId",testOriginalContext["tokenId"],"originalModifiedId",testOriginalContext["modifiedId"],
+                "probeTokenId",activeState["tokenId"],"childPid",child,"childCreationTime",creationTime),0);
+        }
+        void RestoreDeniedProbeContext() {
+            if(!testPrivateContextInstalled) return;
+            Check(Native.SetThreadToken(IntPtr.Zero,testOriginalThreadPresent?testOriginalThreadToken.Value:IntPtr.Zero),"SetThreadToken","test-denied-original-context-restore");
+            bool present; var current=OpenDeniedToken("test-denied-token-restored-effective",true,8,out present);
+            if(present!=testOriginalThreadPresent) throw new ProtocolException("Fixture original thread token presence not restored");
+            if(!present) current=OpenDeniedToken("test-denied-token-restored-effective",false,8,out present);
+            var restored=DeniedTokenState(current); RequireDeniedState(restored,testOriginalContext);
+            testPrivateContextInstalled=false;
+            Op("TestDeniedContextRestored","source-bound-liveness",true,Map("threadPresent",testOriginalThreadPresent,"tokenId",restored["tokenId"],"modifiedId",restored["modifiedId"],
+                "debugEnabled",restored["debugEnabled"],"freshProcessToken",!testOriginalThreadPresent),0);
+        }
         void CloseTestProbe() {
-            Exception restoreFailure=null;
+            var failures=new List<Exception>();
+            try { RestoreDeniedProbeContext(); }
+            catch(Exception error) { failures.Add(error); Error(cleanupErrors,"DeniedTokenRestore",error.Message,error is Win32Exception?(int?)((Win32Exception)error).NativeErrorCode:null,error); }
             if(testOriginalSecurity!=IntPtr.Zero) {
                 try { if(testSecuritySaved) Check(Native.SetKernelObjectSecurity(testHeld.Value,4,testOriginalSecurity),"SetKernelObjectSecurity","test-owned-descendant-dacl-restore"); }
-                catch(Exception error) { restoreFailure=error; }
+                catch(Exception error) { failures.Add(error); Error(cleanupErrors,"DeniedDaclRestore",error.Message,error is Win32Exception?(int?)((Win32Exception)error).NativeErrorCode:null,error); }
                 finally { Marshal.FreeHGlobal(testOriginalSecurity); testOriginalSecurity=IntPtr.Zero; testSecuritySaved=false; }
             }
-            if(testHeld!=null) {
-                bool closed=testHeld.Close(); testHeld=null;
-                if(!closed) {
-                    var closeFailure=new ProtocolException("Fixture preliminary handle close failed");
-                    if(restoreFailure!=null) throw new AggregateException(restoreFailure,closeFailure);
-                    throw closeFailure;
-                }
-            }
-            if(restoreFailure!=null) throw restoreFailure;
+            foreach(var held in new[]{testPrivateToken,testOriginalProcessToken,testOriginalThreadToken,testHeld})
+                if(held!=null && !held.Close()) failures.Add(new ProtocolException("Fixture handle close failed: "+held.Role));
+            testPrivateToken=null; testOriginalProcessToken=null; testOriginalThreadToken=null; testHeld=null;
+            if(failures.Count>0) throw new AggregateException(failures);
         }
         void RunInjectedLivenessTrace() {
             var vectors=new Dictionary<string,string> {
@@ -735,7 +848,7 @@ namespace NstuOwnedRegression {
             foreach(var handle in owned.Reverse()) if(handle!=job) handle.Close();
             if(job!=null) job.Close();
             cleanupFinishedAt=clock.Elapsed.TotalMilliseconds;
-            return terminated && zero && rootDone && (peer==null || peerSignaled) && stdoutEof && stderrEof && allHandlesClosed && cleanupErrors.Count==0 && cleanupFinishedAt<=deadline && !protocolFailed;
+            return terminated && zero && rootDone && (peer==null || peerSignaled) && stdoutEof && stderrEof && allHandlesClosed && cleanupErrors.Count==0 && !testPrivateContextInstalled && cleanupFinishedAt<=deadline && !protocolFailed;
         }
         void FreeAllocations() {
             try { if(attributeInitialized) { Native.DeleteProcThreadAttributeList(attributeList); attributeInitialized=false; Op("DeleteProcThreadAttributeList","attributes",true,null,0); } }

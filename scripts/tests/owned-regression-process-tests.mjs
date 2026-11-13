@@ -148,9 +148,138 @@ async function actor(kind, encoded) {
           assert.equal(inner.execution.kind, 'setup-failure');
           assert.ok(inner.execution.primaryErrors.some(error => error.win32Error === 5));
           assert.ok(operations.some(operation => operation.operation === 'SetKernelObjectSecurity' && operation.resourceRole === 'test-owned-descendant-dacl-restore' && operation.ok));
+          const context = operations.find(operation => operation.operation === 'TestDeniedProbeContext' && operation.ok)?.returnValue;
+          const restored = operations.find(operation => operation.operation === 'TestDeniedContextRestored' && operation.ok)?.returnValue;
+          assert.ok(context && restored, 'Actual private disabled token and exact restored context must be observed');
+          assert.equal(typeof context.originalThreadPresent, 'boolean'); assert.equal(typeof context.originalDebugEnabled, 'boolean');
+          assert.equal(context.probeDebugEnabled, false);
+          for (const identity of [context.originalTokenId, context.originalModifiedId, context.probeTokenId]) assert.match(identity, /^[A-F0-9]{16}$/);
+          assert.notEqual(context.probeTokenId, context.originalTokenId);
+          assert.equal(restored.threadPresent, context.originalThreadPresent);
+          assert.equal(restored.tokenId, context.originalTokenId); assert.equal(restored.modifiedId, context.originalModifiedId);
+          assert.equal(restored.debugEnabled, context.originalDebugEnabled);
+          assert.equal(restored.freshProcessToken, !context.originalThreadPresent);
+          const barrier = operations.find(operation => operation.operation === 'TestLivenessSnapshotBarrier').returnValue;
+          assert.equal(context.childPid, barrier.pid); assert.equal(context.childCreationTime, barrier.creationTime);
+          const originalOpens = operations.filter(operation => operation.operation === 'OpenProcess' && operation.resourceRole === 'test-denied-original-context');
+          assert.equal(originalOpens.length, context.originalDebugEnabled ? 1 : 0);
+          if (context.originalDebugEnabled) {
+            assert.equal(originalOpens[0].ok, true); assert.equal(originalOpens[0].returnValue.pid, barrier.pid);
+            assert.equal(originalOpens[0].returnValue.access, 0x00101000);
+            assert.ok(operations.some(operation => operation.operation === 'CloseHandle' && operation.resourceRole === 'test-denied-original-context' && operation.ok));
+          }
+          const tokenHandles = operations.filter(operation => ['OpenThreadToken', 'OpenProcessToken', 'DuplicateTokenEx'].includes(operation.operation) &&
+            operation.resourceRole.startsWith('test-denied-token-') && operation.ok);
+          assert.ok(tokenHandles.some(operation => operation.resourceRole === 'test-denied-token-private-probe'));
+          assert.ok(tokenHandles.some(operation => operation.resourceRole === 'test-denied-token-active-readback'));
+          assert.ok(tokenHandles.some(operation => operation.resourceRole === 'test-denied-token-restored-effective'));
+          for (const token of tokenHandles) assert.ok(operations.some(operation => operation.operation === 'CloseHandle' && operation.resourceRole === token.resourceRole && operation.ok));
         } else assert.fail('Unknown source-bound liveness scenario');
         assert.equal(inner.cleanup.confirmed, true); assert.equal(inner.cleanup.activeProcessesLast, 0);
         assert.equal(inner.cleanup.handlesClosedConfirmed, true);
+      }
+      if (config.scenario === 'liveness-denied') {
+        const replaceOnce = (source, before, after) => {
+          assert.equal(source.split(before).length, 2, 'One exact current-source fixture seam required');
+          return source.replace(before, after);
+        };
+        const restore = '            Check(Native.SetThreadToken(IntPtr.Zero,testOriginalThreadPresent?testOriginalThreadToken.Value:IntPtr.Zero),"SetThreadToken","test-denied-original-context-restore");';
+        const preexisting = source => {
+          source = replaceOnce(source, '        bool testOriginalThreadPresent,testPrivateContextInstalled;',
+            '        bool testOriginalThreadPresent,testPrivateContextInstalled;\n' +
+            '        Handle profileOriginal,profileSetup; bool profileOriginalPresent,profileInstalled; Dictionary<string,object> profileSnapshot;');
+          const lookup = '            Check(Native.LookupPrivilegeValueW(null,"SeDebugPrivilege",out testDebugLuid),"LookupPrivilegeValueW","test-denied-debug-luid");';
+          source = replaceOnce(source, lookup, lookup + `
+            bool available;
+            profileOriginal=OpenDeniedToken("test-preexisting-token-original-thread",true,0x0e,out profileOriginalPresent);
+            if(!profileOriginalPresent) profileOriginal=OpenDeniedToken("test-preexisting-token-original-process",false,0x0a,out available);
+            profileSnapshot=DeniedTokenState(profileOriginal);
+            profileSetup=ReserveHandle("test-preexisting-token-setup");
+            Check(Native.DuplicateTokenEx(profileOriginal.Value,0x0c,IntPtr.Zero,2,2,out profileSetup.Value),"DuplicateTokenEx",profileSetup.Role);
+            Noninherit(profileSetup.Value,profileSetup.Role);
+            bool installed=Native.SetThreadToken(IntPtr.Zero,profileSetup.Value); int installError=installed?0:Marshal.GetLastWin32Error();
+            if(installed) profileInstalled=true;
+            Op("SetThreadToken","test-preexisting-context-setup",installed,installed,installError);
+            if(!installed) throw new Win32Exception(installError,"Preexisting fixture context setup failed");`);
+          return replaceOnce(source, '            if(failures.Count>0) throw new AggregateException(failures);', `            if(profileInstalled) {
+                try {
+                    Check(Native.SetThreadToken(IntPtr.Zero,profileOriginalPresent?profileOriginal.Value:IntPtr.Zero),"SetThreadToken","test-preexisting-baseline-restore");
+                    bool available; var actual=OpenDeniedToken("test-preexisting-token-restored-effective",true,8,out available);
+                    if(available!=profileOriginalPresent) throw new ProtocolException("Preexisting fixture baseline presence differs");
+                    if(!available) actual=OpenDeniedToken("test-preexisting-token-restored-effective",false,8,out available);
+                    var state=DeniedTokenState(actual); RequireDeniedState(state,profileSnapshot); profileInstalled=false;
+                    Op("TestPreexistingBaselineRestored","source-bound-liveness",true,Map("originalTokenId",profileSnapshot["tokenId"],"restoredTokenId",state["tokenId"],
+                        "originalModifiedId",profileSnapshot["modifiedId"],"restoredModifiedId",state["modifiedId"],"threadPresent",profileOriginalPresent),0);
+                } catch(Exception error) { failures.Add(error); Error(cleanupErrors,"PreexistingBaselineRestore",error.Message,error is Win32Exception?(int?)((Win32Exception)error).NativeErrorCode:null,error); }
+            }
+            if(failures.Count>0) throw new AggregateException(failures);`);
+        };
+        const profiles = [
+          ['preexisting-thread', preexisting],
+          ['partial-duplicate', source => replaceOnce(source, 'Native.DuplicateTokenEx(source.Value,0x2c,', 'Native.DuplicateTokenEx(IntPtr.Zero,0x2c,')],
+          ['partial-readback', source => replaceOnce(source, 'Native.GetTokenInformation(token.Value,kind,IntPtr.Zero,0,out needed)',
+            'Native.GetTokenInformation(token.Role=="test-denied-token-active-readback"?IntPtr.Zero:token.Value,kind,IntPtr.Zero,0,out needed)')],
+          ['restore-retry', source => replaceOnce(source, restore,
+            '            if(CleanupBool(Native.SetThreadToken(IntPtr.Zero,new IntPtr(-1)),"SetThreadToken","test-denied-native-restore-failure")) throw new ProtocolException("Invalid token unexpectedly restored");\n' + restore)],
+          ['restore-unresolved', source => replaceOnce(source, restore,
+            '            Check(Native.SetThreadToken(IntPtr.Zero,new IntPtr(-1)),"SetThreadToken","test-denied-original-context-restore");')],
+          ['dacl-restore', source => replaceOnce(source, 'Native.SetKernelObjectSecurity(testHeld.Value,4,testOriginalSecurity)',
+            'Native.SetKernelObjectSecurity(IntPtr.Zero,4,testOriginalSecurity)')]
+        ];
+        for (const [profile, mutate] of profiles) {
+          const fixture = await mkdtemp(join(tmpdir(), 'nstu-owned-liveness-')); fixtures.push(fixture);
+          const directory = join(fixture, 'copied-owner'); await mkdir(directory);
+          for (const file of ['owned-regression-process.mjs', 'owned-regression-process.ps1', 'owned-regression-process-tests.mjs'])
+            await cp(join(dirname(self), file), join(directory, file));
+          const controllerFile = join(directory, 'owned-regression-process.ps1');
+          const before = await readFile(controllerFile, 'utf8'); await writeFile(controllerFile, mutate(before));
+          const copiedOwner = await import(pathToFileURL(join(directory, 'owned-regression-process.mjs')));
+          const ticket = { token: randomBytes(32).toString('hex'), scenario: 'liveness-denied', exitCode: 0, foreignPID: null };
+          const marker = Buffer.from(JSON.stringify(ticket)); await writeFile(join(fixture, '.liveness-owner.json'), marker);
+          const sourceBinding = await copiedOwner.makeSourceBinding({ '.liveness-owner.json': hash(marker) });
+          const result = await ledger.invoke('source-pinned denied profile ' + profile, () => copiedOwner.runOwned({ application: process.execPath,
+            argv: [join(directory, 'owned-regression-process-tests.mjs'), '--actor', 'liveness-root', JSON.stringify(ticket)], cwd: fixture,
+            controllerRuntime: runtime, sourceBinding, testFault: 'liveness-denied' }));
+          results.push({ scenario: 'liveness-denied', profile, exitCode: 0, result: summarize(result), originalControllerSha256: hash(Buffer.from(before)) });
+          const operations = result.cleanup.operations;
+          assert.equal(result.execution.kind, 'setup-failure', profile + ': actual checked native failure receipt required');
+          assert.equal(result.execution.effectiveExitCode, 1); assert.equal(result.execution.rawWorkerExitDWORD, 0);
+          assert.equal(result.execution.nativeRootWait.signaled, true); assert.equal(result.execution.nativeRootWait.result, 0);
+          assert.equal(result.controller.exitCode, 0); assert.equal(result.controller.signal, null);
+          assert.equal(result.cleanup.activeProcessesLast, 0); assert.equal(result.cleanup.handlesClosedConfirmed, true);
+          assert.equal(result.output.workerStdoutEOF, true); assert.equal(result.output.workerStderrEOF, true);
+          assert.ok(operations.some(operation => operation.operation === 'TerminateJobObject' && operation.ok));
+          const restored = operations.find(operation => operation.operation === 'TestDeniedContextRestored' && operation.ok)?.returnValue;
+          const context = operations.find(operation => operation.operation === 'TestDeniedProbeContext' && operation.ok)?.returnValue;
+          const sticky = ['restore-retry', 'restore-unresolved', 'dacl-restore'].includes(profile);
+          assert.equal(result.cleanup.confirmed, !sticky, profile + ': security restoration failure must stay unconfirmed');
+          if (profile === 'preexisting-thread') {
+            assert.equal(context.originalThreadPresent, true); assert.equal(restored.threadPresent, true);
+            assert.equal(restored.tokenId, context.originalTokenId); assert.equal(restored.modifiedId, context.originalModifiedId);
+            assert.equal(restored.freshProcessToken, false);
+            const baseline = operations.find(operation => operation.operation === 'TestPreexistingBaselineRestored' && operation.ok)?.returnValue;
+            assert.ok(baseline); assert.equal(baseline.restoredTokenId, baseline.originalTokenId);
+            assert.equal(baseline.restoredModifiedId, baseline.originalModifiedId);
+          } else if (profile === 'partial-duplicate') {
+            assert.ok(operations.some(operation => operation.operation === 'DuplicateTokenEx' && !operation.ok && operation.win32Error === 6));
+            assert.equal(context, undefined); assert.equal(restored, undefined);
+          } else if (profile === 'partial-readback') {
+            assert.ok(operations.some(operation => operation.operation === 'GetTokenInformation' && operation.resourceRole === 'test-denied-token-active-readback-size' && !operation.ok && operation.win32Error === 6));
+            assert.ok(restored); assert.equal(context, undefined);
+          } else {
+            const operationName = profile === 'dacl-restore' ? 'SetKernelObjectSecurity' : 'SetThreadToken';
+            const role = profile === 'dacl-restore' ? 'test-owned-descendant-dacl-restore' :
+              profile === 'restore-retry' ? 'test-denied-native-restore-failure' : 'test-denied-original-context-restore';
+            assert.ok(operations.some(operation => operation.operation === operationName && operation.resourceRole === role && !operation.ok && operation.win32Error === 6));
+            assert.ok(result.cleanup.errors.some(error => error.win32Error === 6));
+            if (profile === 'restore-unresolved') assert.equal(restored, undefined); else assert.ok(restored);
+          }
+          if (!profile.startsWith('partial-')) assert.ok(operations.some(operation => operation.operation === 'OpenProcess' && operation.resourceRole === 'descendant-liveness' && operation.win32Error === 5));
+          if (profile !== 'dacl-restore') assert.ok(operations.some(operation => operation.operation === 'SetKernelObjectSecurity' && operation.resourceRole === 'test-owned-descendant-dacl-restore' && operation.ok));
+          const tokens = operations.filter(operation => ['OpenThreadToken', 'OpenProcessToken', 'DuplicateTokenEx'].includes(operation.operation) && operation.ok &&
+            (operation.resourceRole.startsWith('test-denied-token-') || operation.resourceRole.startsWith('test-preexisting-token-')));
+          for (const token of tokens) assert.ok(operations.some(operation => operation.operation === 'CloseHandle' && operation.resourceRole === token.resourceRole && operation.ok));
+        }
       }
     } catch (error) { primary = error; }
     finally {
