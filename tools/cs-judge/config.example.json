@@ -1,0 +1,25 @@
+{
+  "isolate": "/usr/local/bin/isolate",
+  "isolateSha256": "REPLACE_WITH_REVIEWED_64_HEX_BINARY_SHA256",
+  "toolchainRoot": "/opt/nstu-cs/toolchain",
+  "toolchainId": "REPLACE_WITH_PINNED_CPP20_PYTHON3_ROOTFS_ID",
+  "toolchainManifestSha256": "REPLACE_WITH_REVIEWED_64_HEX_MANIFEST_SHA256",
+  "kernelRelease": "REPLACE_WITH_ACTUAL_MAINTAINED_KERNEL_RELEASE",
+  "brokerUid": 21000,
+  "lanes": {
+    "public": {
+      "boxId": 10,
+      "workerUid": 21001,
+      "socketPath": "/run/nstu-cs-public/worker.sock",
+      "stateRoot": "/var/lib/nstu-cs-public",
+      "boxRoot": "/var/local/lib/isolate"
+    },
+    "private": {
+      "boxId": 11,
+      "workerUid": 21002,
+      "socketPath": "/run/nstu-cs-private/worker.sock",
+      "stateRoot": "/var/lib/nstu-cs-private",
+      "boxRoot": "/var/local/lib/isolate"
+    }
+  }
+}

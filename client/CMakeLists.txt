@@ -17,6 +17,7 @@ add_library(nstu_client_platform STATIC
     src/exam_telemetry_disconnect_reporting.cpp
     src/exam_telemetry_shutdown_close_reporting.cpp
     src/named_pipe.cpp
+    src/programming_outbox.cpp
     src/session.cpp
     src/service_install.cpp
     src/service_pairing_confirmation.cpp

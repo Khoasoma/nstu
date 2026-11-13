@@ -976,6 +976,8 @@ void pipe_control_loop(HWND overlay) {
                            message->type ==
                                nstu::client::AgentMessageType::exam_state_response ||
                            message->type ==
+                               nstu::client::AgentMessageType::exam_programming_response ||
+                           message->type ==
                                nstu::client::AgentMessageType::exam_begin) {
                     // The service has already decoded and authenticated these
                     // payloads. The bounded bridge lets an optional exam host

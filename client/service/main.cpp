@@ -14,6 +14,7 @@
 #include "nstu/exam_host.hpp"
 #include "nstu/exam_lockdown_controller.hpp"
 #include "nstu/exam_sync.hpp"
+#include "nstu/programming_outbox.hpp"
 #include "nstu/exam_telemetry_router.hpp"
 #include "nstu/exam_telemetry_service.hpp"
 #include "nstu/exam_telemetry_stop_reporting.hpp"
@@ -77,6 +78,18 @@ std::deque<nstu::client::ClientOutboundCommand> g_outbound_queue;
 nstu::audit::Spool g_audit_spool;
 std::chrono::steady_clock::time_point g_audit_next_upload{};
 nstu::exam::AnswerOutbox g_exam_outbox;
+nstu::client::ProgrammingOutbox g_programming_outbox;
+std::mutex g_programming_retry_mutex;
+std::map<std::string, std::chrono::steady_clock::time_point> g_programming_retry_after;
+std::mutex g_programming_policy_mutex;
+std::condition_variable g_programming_policy_changed;
+std::optional<nstu::exam::StateRequest> g_programming_issued_context;
+std::string g_programming_mode;
+bool g_programming_stopped = true;
+bool g_programming_policy_ready = false;
+std::chrono::steady_clock::time_point g_programming_policy_checked{};
+std::uint32_t g_programming_agent_session = 0xffffffffu;
+std::deque<nstu::exam::programming::Request> g_programming_ready_requests;
 void queue_agent_message(nstu::client::AgentMessage message);
 nstu::client::ExamTelemetryServiceCoordinator g_exam_telemetry_coordinator;
 nstu::client::ExamTelemetryRouter g_exam_telemetry_router(
@@ -372,6 +385,12 @@ void clear_agent_queue() {
 
 void queue_exam_stop() {
     {
+        std::scoped_lock lock(g_programming_policy_mutex);
+        g_programming_stopped = true;
+        g_programming_policy_ready = false;
+        g_programming_policy_changed.notify_all();
+    }
+    {
         std::scoped_lock lock(g_agent_queue_mutex);
         // A stop is a terminal boundary for the current authenticated session.
         // Remove stale start/stop commands so a reconnect cannot resurrect an old
@@ -406,6 +425,12 @@ void set_configured_client_id(const nstu::security::ClientId& client_id) {
         g_configured_client_id_ready = true;
     }
     if (changed) {
+        {
+            std::scoped_lock lock(g_programming_policy_mutex);
+            g_programming_issued_context.reset();
+            g_programming_mode.clear();
+            g_programming_policy_ready = false;
+        }
         // Commands and in-flight exam records are identity-scoped.  Do not
         // carry them across reprovisioning, where a new authenticated session
         // could otherwise transmit an old client's data.
@@ -426,6 +451,12 @@ void clear_configured_client_id() {
         g_configured_client_id_ready = false;
     }
     if (was_ready) {
+        {
+            std::scoped_lock lock(g_programming_policy_mutex);
+            g_programming_issued_context.reset();
+            g_programming_mode.clear();
+            g_programming_policy_ready = false;
+        }
         clear_exam_inflight();
         clear_outbound_queue();
         clear_exam_ingress();
@@ -662,7 +693,11 @@ void queue_outbound_message(nstu::protocol::CommandType type,
         });
     }
     while (g_outbound_queue.size() >= kMaximumQueuedOutboundMessages) {
-        g_outbound_queue.pop_front();
+        const auto replaceable = std::find_if(g_outbound_queue.begin(), g_outbound_queue.end(), [](const auto& message) {
+            return message.type != nstu::protocol::CommandType::exam_programming_request;
+        });
+        if (replaceable == g_outbound_queue.end()) return;
+        g_outbound_queue.erase(replaceable);
     }
     g_outbound_queue.push_back({type, std::move(payload)});
 }
@@ -700,6 +735,18 @@ std::optional<nstu::client::ClientOutboundCommand> pop_outbound_message() {
     const auto client_id = configured_client_id();
     if (!client_id) {
         return std::nullopt;
+    }
+    for (const auto& request : g_programming_outbox.pending_for_client(*client_id)) {
+        const auto key = nstu::exam::programming::context_json(request.context) + request.request_id;
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::scoped_lock lock(g_programming_retry_mutex);
+            const auto retry = g_programming_retry_after.find(key);
+            if (retry != g_programming_retry_after.end() && retry->second > now) continue;
+            g_programming_retry_after.insert_or_assign(key, now + std::chrono::seconds(5));
+        }
+        return nstu::client::ClientOutboundCommand{nstu::protocol::CommandType::exam_programming_request,
+                                                 nstu::exam::programming::encode_request(request)};
     }
     std::vector<nstu::exam::AnswerEvent> pending;
     {
@@ -879,6 +926,88 @@ void wake_pipe_listener() {
 
 void launch_agent();
 
+bool same_programming_context(const nstu::exam::StateRequest& left,
+                              const nstu::exam::StateRequest& right) {
+    return left.package_id == right.package_id && left.package_digest == right.package_digest &&
+        left.client_id == right.client_id && left.session_id == right.session_id && left.candidate_id == right.candidate_id;
+}
+
+void programming_unavailable(const nstu::exam::programming::Request& request, std::string_view reason) {
+    const auto json = nstu::exam::programming::unavailable_response_json(request, reason);
+    if (json.empty()) return;
+    queue_agent_message({nstu::client::AgentMessageType::exam_programming_response,
+        std::vector<std::byte>(reinterpret_cast<const std::byte*>(json.data()),
+                              reinterpret_cast<const std::byte*>(json.data()) + json.size())});
+}
+
+bool queue_programming_request(const nstu::exam::programming::Request& request) {
+    auto payload = nstu::exam::programming::encode_request(request);
+    if (payload.empty()) return false;
+    std::scoped_lock lock(g_outbound_queue_mutex);
+    if (g_outbound_queue.size() >= kMaximumQueuedOutboundMessages) return false;
+    g_outbound_queue.push_back({nstu::protocol::CommandType::exam_programming_request, std::move(payload)});
+    return true;
+}
+
+void programming_policy_loop(std::stop_token stop) {
+    auto next_probe = std::chrono::steady_clock::time_point{};
+    while (!stop.stop_requested() && !g_stop_requested.load()) {
+        std::optional<nstu::exam::StateRequest> context;
+        std::string mode;
+        std::uint32_t session = 0xffffffffu;
+        std::deque<nstu::exam::programming::Request> requests;
+        {
+            std::unique_lock lock(g_programming_policy_mutex);
+            g_programming_policy_changed.wait_for(lock, std::chrono::seconds(1), [&] {
+                return stop.stop_requested() || g_stop_requested.load() || !g_programming_ready_requests.empty();
+            });
+            if (!g_programming_stopped && !g_programming_mode.empty() && g_agent_connected.load()) {
+                context = g_programming_issued_context;
+                mode = g_programming_mode;
+                session = g_programming_agent_session;
+            }
+            requests.swap(g_programming_ready_requests);
+        }
+        if (!context) {
+            for (const auto& request : requests) programming_unavailable(request, "context_unavailable");
+            continue;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (requests.empty() && now < next_probe) continue;
+        const bool verified = mode != "practice" && g_exam_lockdown_controller.is_actually_blocked() &&
+            nstu::client::probe_programming_workstation_policy(session) && g_exam_lockdown_controller.is_actually_blocked();
+        next_probe = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        {
+            std::scoped_lock lock(g_programming_policy_mutex);
+            if (!g_programming_issued_context || !same_programming_context(*context, *g_programming_issued_context) ||
+                g_programming_stopped || session != g_programming_agent_session || !g_agent_connected.load()) {
+                context.reset();
+            } else {
+                g_programming_policy_ready = verified;
+                g_programming_policy_checked = std::chrono::steady_clock::now();
+            }
+        }
+        if (!context) {
+            for (const auto& request : requests) programming_unavailable(request, "context_unavailable");
+            continue;
+        }
+        nstu::exam::programming::Request attestation;
+        attestation.context = *context;
+        attestation.operation = nstu::exam::programming::Operation::ready;
+        attestation.request_id = "service-policy-ready";
+        attestation.workstation_policy_ready = verified;
+        (void)queue_programming_request(attestation);
+        for (auto& request : requests) {
+            if (!same_programming_context(request.context, *context)) {
+                programming_unavailable(request, "context_unavailable");
+                continue;
+            }
+            request.workstation_policy_ready = verified;
+            if (!queue_programming_request(request)) programming_unavailable(request, "local_queue_unavailable");
+        }
+    }
+}
+
 void agent_pipe_loop() {
     while (!g_stop_requested.load()) {
         nstu::client::NamedPipe pipe;
@@ -912,6 +1041,12 @@ void agent_pipe_loop() {
             nstu::client::discard_pairing_confirmation_messages(g_agent_queue);
         }
         g_agent_connected = true;
+        {
+            std::scoped_lock lock(g_programming_policy_mutex);
+            g_programming_agent_session = validated_session;
+            g_programming_policy_ready = false;
+            g_programming_policy_changed.notify_all();
+        }
         const auto meta_connect = nstu::control::encode_fleet_metadata(
             nstu::control::FleetMetadataMessage{
                 .client_version = NSTU_PROJECT_VERSION,
@@ -1026,6 +1161,52 @@ void agent_pipe_loop() {
                 } else if (message->type ==
                            nstu::client::AgentMessageType::pairing_select) {
                     record_pairing_selection(message->payload);
+                } else if (message->type ==
+                           nstu::client::AgentMessageType::exam_programming_request) {
+                    const auto request = nstu::exam::programming::decode_request(message->payload);
+                    if (!request || request->workstation_policy_ready || !configured_client_id_matches(request->context.client_id)) continue;
+                    bool authorized = false, stopped = true, policy_ready = false, protected_mode = true;
+                    {
+                        std::scoped_lock lock(g_programming_policy_mutex);
+                        authorized = g_programming_issued_context && !g_programming_mode.empty() &&
+                            nstu::exam::programming::validate_service_request(*request, *g_programming_issued_context);
+                        stopped = g_programming_stopped;
+                        protected_mode = g_programming_mode != "practice";
+                        policy_ready = g_programming_mode == "practice" || (g_programming_policy_ready &&
+                            std::chrono::steady_clock::now() - g_programming_policy_checked < std::chrono::seconds(30));
+                    }
+                    if (!authorized) { programming_unavailable(*request, "context_unavailable"); continue; }
+                    if (request->operation == nstu::exam::programming::Operation::ready) {
+                        bool accepted = false;
+                        {
+                            std::scoped_lock lock(g_programming_policy_mutex);
+                            if (!stopped && g_programming_ready_requests.size() < 8 &&
+                                std::none_of(g_programming_ready_requests.begin(), g_programming_ready_requests.end(),
+                                    [&](const auto& pending) { return pending.request_id == request->request_id; })) {
+                                g_programming_ready_requests.push_back(*request);
+                                accepted = true;
+                                g_programming_policy_changed.notify_one();
+                            }
+                        }
+                        if (!accepted) programming_unavailable(*request, "local_queue_unavailable");
+                        continue;
+                    }
+                    if (request->operation == nstu::exam::programming::Operation::run &&
+                        (stopped || !policy_ready || (protected_mode && !g_exam_lockdown_controller.is_actually_blocked()))) {
+                        programming_unavailable(*request, "workstation_policy_unavailable");
+                        continue;
+                    }
+                    const bool durable = request->operation == nstu::exam::programming::Operation::draft ||
+                        request->operation == nstu::exam::programming::Operation::submit ||
+                        request->operation == nstu::exam::programming::Operation::finalize;
+                    if (durable) {
+                        std::string error;
+                        if (!g_programming_outbox.enqueue(*request, &error)) {
+                            programming_unavailable(*request, "local_outbox_unavailable");
+                        }
+                    } else {
+                        if (!queue_programming_request(*request)) programming_unavailable(*request, "local_queue_unavailable");
+                    }
                 } else if (message->type ==
                            nstu::client::AgentMessageType::exam_state_request) {
                     const auto request =
@@ -1783,7 +1964,19 @@ void run_exam_arm_worker(
             return;
         }
 
-        if (policy.allowed_origins.empty()) {
+        if (!policy.programming_mode.empty()) {
+            const nstu::exam::StateRequest context{request.package_id, request.package_digest, request.client_id,
+                                                  request.session_id, request.candidate_id};
+            std::scoped_lock lock(g_programming_policy_mutex);
+            if (g_programming_issued_context && same_programming_context(*g_programming_issued_context, context) &&
+                g_exam_lockdown_controller.current_epoch() == token && !g_programming_stopped) {
+                g_programming_mode = policy.programming_mode;
+                g_programming_policy_changed.notify_all();
+            }
+        }
+
+        const bool protected_programming = !policy.programming_mode.empty() && policy.programming_mode != "practice";
+        if (policy.allowed_origins.empty() && !protected_programming) {
             emit_audit(nstu::audit::Category::security,
                        nstu::audit::Severity::info, "exam_lockdown",
                        "arm", "skipped", "manifest has no allowedOrigins");
@@ -1792,7 +1985,7 @@ void run_exam_arm_worker(
 
         auto resolved_ips =
             nstu::client::resolve_allowed_origins(policy.allowed_origins);
-        if (resolved_ips.empty()) {
+        if (resolved_ips.empty() && !protected_programming) {
             emit_audit(nstu::audit::Category::security,
                        nstu::audit::Severity::warning, "exam_lockdown",
                        "arm", "skipped",
@@ -2013,6 +2206,15 @@ void handle_server_command(
         const auto request =
             nstu::exam::decode_exam_start_request(command.payload);
         if (request && configured_client_id_matches(request->client_id)) {
+            {
+                std::scoped_lock lock(g_programming_policy_mutex);
+                g_programming_issued_context = nstu::exam::StateRequest{request->package_id, request->package_digest,
+                    request->client_id, request->session_id, request->candidate_id};
+                g_programming_mode.clear();
+                g_programming_stopped = false;
+                g_programming_policy_ready = false;
+                g_programming_policy_changed.notify_all();
+            }
             queue_agent_message({nstu::client::AgentMessageType::exam_start,
                                  command.payload});
             const auto token = g_exam_lockdown_controller.begin_attempt();
@@ -2272,6 +2474,19 @@ void handle_server_command(
                  command.payload});
         }
         break;
+    case nstu::protocol::CommandType::exam_programming_response: {
+        const std::string json(reinterpret_cast<const char*>(command.payload.data()), command.payload.size());
+        const auto response = nstu::exam::programming::parse_response_json(json);
+        if (response && configured_client_id_matches(response->context.client_id)) {
+            std::string error;
+            if (g_programming_outbox.acknowledge(*response, &error)) {
+                std::scoped_lock lock(g_programming_retry_mutex);
+                g_programming_retry_after.erase(nstu::exam::programming::context_json(response->context) + response->request_id);
+            }
+            queue_agent_message({nstu::client::AgentMessageType::exam_programming_response, command.payload});
+        }
+        break;
+    }
     case nstu::protocol::CommandType::file_dist_start: {
         const auto u8_span = std::span<const std::uint8_t>(
             reinterpret_cast<const std::uint8_t*>(command.payload.data()),
@@ -2785,6 +3000,10 @@ void remote_control_loop(std::stop_token stop_token) {
             // session successfully delivers an acknowledgement. A disconnect
             // must make every unsatisfied event eligible on the next session.
             clear_exam_inflight();
+            {
+                std::scoped_lock lock(g_programming_retry_mutex);
+                g_programming_retry_after.clear();
+            }
             queue_exam_stop();
             const auto disconnect_snapshot =
                 g_exam_telemetry_router.handle_disconnect_with_outcome();
@@ -3056,6 +3275,10 @@ void WINAPI service_main(DWORD, wchar_t**) {
             report_status(SERVICE_STOPPED, ERROR_OPEN_FAILED);
             return;
         }
+        std::string programming_error;
+        if (!g_programming_outbox.open(outbox_path.parent_path() / "programming-outbox", &programming_error)) {
+            OutputDebugStringA("NSTU CS durable outbox unavailable; programming requests will be refused.\n");
+        }
     }
     {
         const auto telemetry_path = exam_telemetry_outbox_path();
@@ -3079,6 +3302,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     std::thread pipe_thread(agent_pipe_loop);
     std::jthread control_thread(remote_control_loop);
     std::jthread agent_supervisor_thread(agent_supervisor_loop);
+    std::jthread programming_policy_thread(programming_policy_loop);
     launch_agent();
     report_status(SERVICE_RUNNING);
     // The service thread remains available for bounded periodic maintenance
@@ -3104,6 +3328,8 @@ void WINAPI service_main(DWORD, wchar_t**) {
     g_stream_host_supervisor.handle_disconnect();
     control_thread.request_stop();
     agent_supervisor_thread.request_stop();
+    programming_policy_thread.request_stop();
+    g_programming_policy_changed.notify_all();
     wake_pipe_listener();
     if (pipe_thread.joinable()) {
         pipe_thread.join();
@@ -3114,6 +3340,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     if (agent_supervisor_thread.joinable()) {
         agent_supervisor_thread.join();
     }
+    if (programming_policy_thread.joinable()) programming_policy_thread.join();
     {
         std::scoped_lock worker_lock(g_uwf_worker_mutex);
         if (g_uwf_worker.joinable()) {
@@ -3137,6 +3364,7 @@ void WINAPI service_main(DWORD, wchar_t**) {
     {
         std::scoped_lock lock(g_exam_outbox_state_mutex);
         g_exam_outbox.close();
+        g_programming_outbox.close();
         g_exam_outbox_ready = false;
         g_exam_outbox_path.clear();
     }

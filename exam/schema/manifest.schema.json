@@ -10,6 +10,10 @@
     "subject": { "type": "string", "maxLength": 120 },
     "candidate": { "type": "string", "maxLength": 160 },
     "durationSeconds": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "contentMode": { "const": "computer_science" },
+    "programmingVersion": { "const": 1 },
+    "sessionMode": { "enum": ["exam", "contest", "practice"] },
+    "languages": { "const": ["cpp20", "python3"] },
     "allowedOrigins": {
       "type": "array",
       "maxItems": 32,
@@ -30,7 +34,8 @@
         "type": "object", "required": ["id", "type", "prompt"],
         "properties": {
           "id": { "type": "string", "pattern": "^[a-zA-Z0-9._-]{1,96}$" },
-          "type": { "enum": ["multiple_choice", "short_answer", "essay", "listening", "reading"] },
+          "type": { "enum": ["multiple_choice", "short_answer", "essay", "listening", "reading", "programming"] },
+          "revision": { "type": "integer", "minimum": 1, "maximum": 4294967295, "default": 1 },
           "prompt": { "type": "string", "minLength": 1, "maxLength": 8000 },
           "instruction": { "type": "string", "maxLength": 4000 },
           "points": { "type": "integer", "minimum": 0, "maximum": 1000 },
@@ -39,11 +44,31 @@
           "pdf": { "type": "string", "description": "Local package-relative PDF URL" },
           "passage": { "type": "string", "maxLength": 30000 },
           "wordLimit": { "type": "integer", "minimum": 1, "maximum": 5000 },
-          "answerPlaceholder": { "type": "string", "maxLength": 240 }
+          "answerPlaceholder": { "type": "string", "maxLength": 240 },
+          "inputDescription": { "type": "string", "maxLength": 4000 },
+          "outputDescription": { "type": "string", "maxLength": 4000 },
+          "constraints": { "type": "string", "maxLength": 4000 },
+          "explanation": { "type": "string", "maxLength": 4000 },
+          "timeLimitMs": { "type": "integer", "minimum": 100, "maximum": 10000 },
+          "memoryLimitMiB": { "type": "integer", "minimum": 16, "maximum": 512 },
+          "samples": { "type": "array", "minItems": 1, "maxItems": 8, "items": {
+            "type": "object", "required": ["id", "input", "output"],
+            "properties": { "id": { "type": "string", "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,95}$" },
+              "input": { "type": "string", "maxLength": 4096 }, "output": { "type": "string", "maxLength": 4096 } },
+            "additionalProperties": false
+          } }
         },
+        "allOf": [{ "if": { "properties": { "type": { "const": "programming" } }, "required": ["type"] },
+          "then": { "required": ["samples", "timeLimitMs", "memoryLimitMiB"],
+            "propertyNames": { "enum": ["id", "type", "revision", "prompt", "instruction", "points", "inputDescription", "outputDescription", "constraints", "explanation", "samples", "timeLimitMs", "memoryLimitMiB"] } } }],
         "additionalProperties": false
       }
     }
   },
+  "allOf": [{ "if": { "properties": { "contentMode": { "const": "computer_science" } }, "required": ["contentMode"] },
+    "then": { "required": ["programmingVersion", "sessionMode", "languages"],
+      "properties": { "id": { "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,95}$" },
+        "questions": { "maxItems": 64, "items": { "properties": { "id": { "pattern": "^[a-zA-Z0-9_][a-zA-Z0-9._-]{0,95}$" }, "type": { "const": "programming" } } } },
+        "allowedOrigins": { "maxItems": 0 }, "documents": { "maxItems": 0 } } } }],
   "additionalProperties": false
 }

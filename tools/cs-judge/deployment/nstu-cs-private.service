@@ -1,0 +1,26 @@
+[Unit]
+Description=NSTU isolated private grading worker
+After=isolate.service
+Requires=isolate.service
+
+[Service]
+Type=simple
+User=nstu-cs-private
+Group=nstu-cs-broker
+ExecStart=/usr/bin/python3 /opt/nstu-cs/worker.py --config /etc/nstu-cs/config.json --lane private
+WorkingDirectory=/opt/nstu-cs
+RuntimeDirectory=nstu-cs-private
+RuntimeDirectoryMode=0750
+StateDirectory=nstu-cs-private
+StateDirectoryMode=0700
+UMask=0007
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+KillMode=mixed
+TimeoutStopSec=120
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

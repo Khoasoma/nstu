@@ -4,3 +4,6 @@
 *.ps1 text eol=crlf
 # Preserve the approved byte source hashed by native/web token generation.
 /config/ui-desktop-tokens.json -text
+# Preserve the reviewed policy bytes pinned by the native SYSTEM probe.
+/packaging/cs-policy-functions.ps1 -text
+/packaging/verify-cs-policy.ps1 -text

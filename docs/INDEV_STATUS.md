@@ -1,5 +1,13 @@
 # Phase 4 & 5 INDEV Status
 
+## November 13 classroom and computer science integration
+
+The combined classroom UI, Studio and computer science mode source is **INDEV — used only for physical lab testing**. It includes public programming authoring and Codeforces review intake, C++20/Python3 editor drafts, immutable storage receipts, public sample runs, private broker judging, durable source recovery, and asynchronous teacher Load/Begin/Stop controls. Candidate interfaces never release private results. A dedicated Linux judgehost is required; its deployment and Windows application policy are prepared in [CS_MODE_DEPLOYMENT.md](CS_MODE_DEPLOYMENT.md) and [CS_WORKSTATION_POLICY.md](CS_WORKSTATION_POLICY.md).
+
+No physical judgehost is currently available. Protected Begin and execution remain unavailable without the required verified runtime and workstation policy. Source tests and Windows CI do not establish application containment, UWF/crash recovery, Vietnamese IME/accessibility, cohort timing, or exam safety. The physical lab checklist and these qualification records remain acceptance requirements.
+
+## Previously integrated baseline
+
 **Status: INDEV (in development).** The complete Phase 4 Discrete Timing Telemetry Pipeline and Native WebView2 Kiosk are merged into `main` at commit `79d1fdfb9f17f631d2e5fd5caa031fbe66e07d7c`. All 16 Phase 4 tasks (Tasks 0–16) and Checkpoints A, B, C, and D are verified.
 
 The master plan for **Phase 5: Exam Security Delivery & Network Hardening** (`tasks/task-plans/phase5-exam-security-delivery-plan.md`) is approved and underway. This document records the merged baseline and the remaining security acceptance criteria before production deployment.

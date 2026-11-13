@@ -6,6 +6,11 @@ import { createHash } from 'node:crypto';
 const root = new URL('../', import.meta.url);
 const context = vm.createContext({ window: {} });
 vm.runInContext(await readFile(new URL('exam/studio/template.js', root), 'utf8'), context);
+assert.equal(typeof context.window.NSTU_RUNNER_TEMPLATE.programmingJs, 'string',
+  'Canonical shared programming runtime must be bundled');
+assert.deepEqual(Buffer.from(context.window.NSTU_RUNNER_TEMPLATE.programmingJs, 'utf8'),
+  await readFile(new URL('exam/shared/programming.js', root)),
+  'Shared programming runtime must survive template/export with every source byte intact');
 const assets = {indexHtml: 'index.html', stylesCss: 'styles.css', appJs: 'app.js'};
 for (const [key, filename] of Object.entries(assets)) {
   const canonical = await readFile(new URL(`exam/web/${filename}`, root));
@@ -138,7 +143,7 @@ const fields = vm.runInNewContext(`(() => {
   const el = getNode;
   const setMode = () => {}, renderEditor = () => {}, initSplitter = () => {},
     renderPreview = () => {}, showToast = () => {}, handleImportFile = () => {},
-    saveDraft = () => {}, exportPackage = () => {}, addQuestion = () => {};
+    saveDraft = () => {}, exportPackage = () => {}, addQuestion = () => {}, addReviewedCodeforces = () => {};
   ${studioSource.slice(compileStart, compileEnd)}
   ${titleSource}
   ${dialogSource}
@@ -442,7 +447,7 @@ function exportLifecycleHarness() {
     ${studioSource.slice(exportStart, exportEnd)}
     return { exportPackage };
   })()`, { model, getNode: node, Uint8Array, TextEncoder, window: { NSTU_RUNNER_TEMPLATE: {
-    indexHtml: 'HTML', stylesCss: 'CSS', appJs: 'JS', brandPngBase64: 'A'.repeat(228760) } },
+    indexHtml: 'HTML', stylesCss: 'CSS', appJs: 'JS', programmingJs: 'PROGRAMMING', brandPngBase64: 'A'.repeat(228760) } },
     atob: () => 'PNG', btoa: () => 'A'.repeat(228760), NstuZip: { Writer: class {
       constructor() { this.entries = new Map(); }
       add(name, bytes) { this.entries.set(name, bytes); }
@@ -614,6 +619,7 @@ async function actualImportHarness(reader) {
     TextEncoder, TextDecoder, Uint8Array, DataView, ArrayBuffer, Blob, Response, DecompressionStream,
     crypto: (await import('node:crypto')).webcrypto, URL:DownloadURL, location: { origin:'http://studio.test' } };
   const context = vm.createContext(globals);
+  vm.runInContext(await readFile(new URL('exam/shared/programming.js', root), 'utf8'), context);
   vm.runInContext(zipSource, context); context.NstuZip = globals.window.NstuZip;
   if (reader) context.NstuZip = { ...context.NstuZip, Reader: reader };
   const marker = studioSource.indexOf('  // Start application on DOM ready');
@@ -1370,3 +1376,61 @@ for(const matching of [false,true])for(const points of [0,101,1.25]) {
 const studioMarkup=await readFile(new URL('exam/studio/index.html',root),'utf8');
 assert.match(studioMarkup,/<button class="btn btn-primary" id="btn-save-draft" type="button" title="Save authoring draft JSON">/);
 console.log(`Studio actual authoring Save payload and roundtrip: ${authoringSaveCases} cases passed`);
+
+{
+  const h = await actualImportHarness();
+  h.node('btn-new-cs').click();
+  assert.equal(h.downloads.length, 1, 'New CS preserves the prior draft with the existing Save download');
+  assert.equal(h.probe.inspect().exam.contentMode, 'computer_science');
+  assert.equal(h.node('select-add-type').hidden, true);
+  h.node('btn-add-question').click();
+  assert.equal(h.probe.inspect().exam.questions.length, 2);
+  const model = { id: 'cs-roundtrip', title: 'Programming', subject: 'Computer science', durationSeconds: 600,
+    contentMode: 'computer_science', programmingVersion: 1, sessionMode: 'contest', languages: ['cpp20', 'python3'],
+    questions: [{ id: 'a', type: 'programming', revision: 1, prompt: 'Sum', instruction: '', points: 1,
+      timeLimitMs: 1000, memoryLimitMiB: 64, samples: [{ id: 's1', input: ' 2 3\r\n\n', output: '5 \n' }] }] };
+  await h.probe.load(jsonImport(model));
+  h.probe.save();
+  const saved = JSON.parse(await h.downloads.at(-1).blob.text());
+  assert.equal(saved.questions[0].samples[0].input, ' 2 3\r\n\n', 'opening and saving the sample textarea cannot normalize reviewed bytes');
+  assert.equal(saved.questions[0].samples[0].output, '5 \n');
+  const before = h.probe.inspect().exam;
+  await h.probe.load(jsonImport({ ...model, privateTests: ['CANARY'] }));
+  assert.equal(h.probe.inspect().exam, before, 'private CS import fails atomically');
+  const review = { manifest: model, provenance: { provider: 'Codeforces', contestId: 1, index: 'A',
+    originalUrl: 'https://codeforces.com/problemset/problem/1/A', importedUtc: '2026-11-13T00:00:00Z' },
+    requiresReview: true, blockers: ['private_grading_not_attached', 'teacher_sample_review_required'] };
+  const dialog = h.node('cs-import-review'); dialog.showModal = () => { dialog.open = true; }; dialog.close = () => { dialog.open = false; };
+  await h.probe.load(jsonImport(review));
+  assert.equal(dialog.open, true, 'trusted Codeforces preparation opens a public sample review');
+  assert.equal(h.probe.inspect().exam, before, 'review cannot replace the current draft before approval');
+  assert.equal(h.node('btn-add-codeforces').disabled, true);
+  h.node('cs-review-confirm').checked = true;
+  h.node('cs-review-confirm').listeners.change.forEach(listener => listener({ target: h.node('cs-review-confirm') }));
+  h.node('btn-add-codeforces').click();
+  assert.equal(dialog.open, false);
+  assert.equal(h.probe.inspect().exam.questions.length, 2);
+  assert.notEqual(h.probe.inspect().exam.questions[0].id, h.probe.inspect().exam.questions[1].id, 'import collisions get a new local problem ID');
+  assert.equal(h.probe.inspect().exam.questions[1].samples[0].input, ' 2 3\r\n\n');
+  const afterReview = h.probe.inspect().exam;
+  await h.probe.load(jsonImport({ ...review, privateTests: ['CANARY'] }));
+  assert.equal(h.probe.inspect().exam, afterReview, 'malformed wrapper admission is atomic');
+  afterReview.privateGrading = { referenceSource: 'CANARY' };
+  h.probe.save();
+  assert.equal((await h.downloads.at(-1).blob.text()).includes('CANARY'), false, 'public CS Save excludes private grading');
+  h.probe.mode('preview');
+  const preview = h.node('cs-preview-frame').srcdoc;
+  assert.equal(preview.includes('CANARY'), false);
+  assert.ok(preview.includes('NSTU_EXAM_PREVIEW=true'));
+  assert.ok(preview.includes('window.NstuProgramming'), 'CS Preview consumes the canonical shared renderer');
+  delete afterReview.privateGrading;
+  await h.probe.export();
+  h.node('btn-download-nstuexam').onclick();
+  const entries = await new h.zip.Reader(await h.downloads.at(-1).blob.arrayBuffer()).readEntries();
+  assert.deepEqual(Buffer.from(entries.find(entry => entry.path === 'exam/shared/programming.js').bytes),
+    await readFile(new URL('exam/shared/programming.js', root)), 'actual CS ZIP contains the canonical shared runtime');
+  const publicManifest = JSON.parse(new TextDecoder().decode(entries.find(entry => entry.path === 'manifest.json').bytes));
+  assert.equal(publicManifest.questions[0].samples[0].input, ' 2 3\r\n\n');
+  assert.equal(JSON.stringify(publicManifest).includes('CANARY'), false);
+}
+console.log('Studio CS creation, exact sample Save, atomic admission, public Preview and real ZIP parity: PASS');

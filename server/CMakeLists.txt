@@ -3,6 +3,7 @@ add_library(nstu_server_state STATIC
     src/classroom_roster.cpp
     src/client_registry.cpp
     src/control_plane.cpp
+    src/programming_broker.cpp
     src/remote_session_process.cpp
     src/exam_telemetry_journal.cpp
     src/exam_grader.cpp
@@ -10,7 +11,7 @@ add_library(nstu_server_state STATIC
 )
 target_include_directories(nstu_server_state PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(nstu_server_state PUBLIC cxx_std_20)
-target_link_libraries(nstu_server_state PUBLIC nstu_common version)
+target_link_libraries(nstu_server_state PUBLIC nstu_common version winhttp)
 nstu_enable_warnings(nstu_server_state)
 
 option(NSTU_SERVER_USE_IMGUI "Build the Dear ImGui server UI" ON)
@@ -49,6 +50,10 @@ if(NSTU_SERVER_USE_IMGUI)
         NSTU_BUILD_CHANNEL="${NSTU_INSTALLER_CHANNEL}")
     target_link_libraries(nstu-server PRIVATE nstu_server_state nstu_imgui
         d3d11 dxgi mfplat mfuuid shell32)
+    if(TARGET nstu_client_platform)
+        target_link_libraries(nstu-server PRIVATE nstu_client_platform)
+        target_compile_definitions(nstu-server PRIVATE NSTU_SERVER_HAS_EXAM_INSPECTOR=1)
+    endif()
     if(MSVC)
         target_compile_options(nstu-server PRIVATE /utf-8)
     endif()

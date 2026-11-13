@@ -56,7 +56,7 @@ void verify_confirmation_frame_types() {
         wire.back() = std::byte{0};
         if (kind != 44) assert(!nstu::client::decode_agent_message(wire));
     }
-    const auto unknown = bytes({0x4e, 0x49, 0x50, 0x43, 1, 0, 45, 0, 0, 0, 0, 0});
+    const auto unknown = bytes({0x4e, 0x49, 0x50, 0x43, 1, 0, 47, 0, 0, 0, 0, 0});
     assert(!nstu::client::decode_agent_message(unknown));
 }
 

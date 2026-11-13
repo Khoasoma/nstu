@@ -51,6 +51,7 @@ bool ExamBridge::publish(AgentMessage message) noexcept {
     }
     if ((message.type != AgentMessageType::exam_answer_ack &&
          message.type != AgentMessageType::exam_state_response &&
+         message.type != AgentMessageType::exam_programming_response &&
          message.type != AgentMessageType::exam_begin) ||
         message.payload.size() > kMaximumAgentPayloadBytes) {
         return false;

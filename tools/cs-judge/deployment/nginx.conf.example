@@ -1,0 +1,32 @@
+# Place zones in nginx's http context; replace the teacher proxy IP and certificate paths.
+limit_req_zone $binary_remote_addr zone=nstu_cs_requests:1m rate=10r/s;
+limit_conn_zone $binary_remote_addr zone=nstu_cs_connections:1m;
+
+server {
+    listen 443 ssl;
+    server_name judge.lab.invalid;
+    ssl_certificate /etc/nstu-cs/tls/server-fullchain.pem;
+    ssl_certificate_key /etc/nstu-cs/tls/server-key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    access_log off;
+    error_log /var/log/nginx/nstu-cs-error.log warn;
+    client_max_body_size 4m;
+    client_body_timeout 10s;
+    client_header_timeout 10s;
+    client_body_buffer_size 4m;
+    limit_conn nstu_cs_connections 4;
+    limit_req zone=nstu_cs_requests burst=10 nodelay;
+    allow REPLACE_WITH_TEACHER_PROXY_IP;
+    deny all;
+    location /v1/ {
+        limit_except POST { deny all; }
+        proxy_pass http://127.0.0.1:47831;
+        proxy_set_header Authorization $http_authorization;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 10s;
+        proxy_buffering off;
+        add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+    location / { return 404; }
+}

@@ -1,0 +1,28 @@
+[Unit]
+Description=NSTU programming submission broker
+After=network.target nstu-cs-public.service nstu-cs-private.service
+
+[Service]
+Type=simple
+User=nstu-cs-broker
+Group=nstu-cs-broker
+EnvironmentFile=/etc/nstu-cs/broker-secret.env
+ExecStart=/usr/bin/python3 /opt/nstu-cs/broker.py --database /var/lib/nstu-cs-broker/judge.sqlite3 --config /etc/nstu-cs/config.json
+WorkingDirectory=/opt/nstu-cs
+StateDirectory=nstu-cs-broker
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+ReadWritePaths=/var/lib/nstu-cs-broker
+Restart=on-failure
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

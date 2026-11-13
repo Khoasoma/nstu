@@ -143,6 +143,8 @@
   }
 
   const manifest = normalizeManifest(window.NSTU_EXAM_MANIFEST);
+  const programming = manifest.contentMode === "computer_science" && window.NstuProgramming;
+  const programmingPreview = window.NSTU_EXAM_PREVIEW === true;
   // Native package validation normally guarantees these shapes. Keep the
   // static-preview and failure paths defensive as well: a malformed manifest
   // must produce an unavailable-question message, not a blank kiosk page.
@@ -905,8 +907,56 @@
   const el = (id) => document.getElementById(id);
   const text = (key) => (I18N[state.language][key] || I18N.en[key] || key);
   const question = () => manifest.questions[state.index];
+  let programmingSession = null, programmingHost = null, programmingClock = null, programmingRetryAt = 0;
+  const programmingViews = new Map();
+  function initializeProgrammingSession() {
+    if (!programming) return;
+    programmingViews.clear();
+    programmingClock = null;
+    programmingRetryAt = window.performance.now();
+    if (programmingHost) programmingHost.textContent = "";
+    let storage = null;
+    try { storage = window.localStorage; } catch (_) { /* Visible source remains available. */ }
+    programmingSession = programming.createSession(manifest, {
+      context: { packageId: examContext.packageId, packageDigestHex: examContext.packageDigestHex,
+        clientIdHex: examContext.clientIdHex, sessionIdHex: examContext.sessionIdHex, candidateId: examContext.candidateId },
+      key: contextKey(examContext) ? `${storageKey}:programming-v1` : programmingPreview ? `nstu-programming-preview:${manifest.id}` : "",
+      storage, hash: source => hexString(sha256(utf8Encode(source))),
+      send: message => !programmingPreview && bridgeReady() && postHostMessage(message),
+      onChange: () => { programmingViews.forEach(view => view.refresh()); }
+    });
+  }
+  function renderProgrammingQuestion() {
+    if (!programmingSession) initializeProgrammingSession();
+    if (!programmingHost) {
+      programmingHost = document.createElement("section"); programmingHost.className = "cs-host";
+      document.querySelector(".workspace").appendChild(programmingHost);
+      document.querySelector(".workspace").classList.add("computer-science-workspace");
+      document.querySelector(".question-column").hidden = true;
+      document.querySelector(".reference-column").hidden = true;
+      document.querySelector('[data-action="download"]').hidden = true;
+      document.querySelector(".timer").setAttribute("aria-live", "off");
+    }
+    document.querySelector('[data-action="submit"]').textContent = state.language === "vi" ? "Kết thúc bài làm" : "Finish attempt";
+    document.querySelector('[data-action="submit"]').hidden = programmingPreview;
+    document.querySelector('[data-i18n="questions"]').textContent = state.language === "vi" ? "Bài toán" : "Problems";
+    document.querySelector('[data-i18n="computerBasedAssessment"]').textContent = state.language === "vi" ? "Tin học" : "Computer science";
+    const problem = question();
+    let view = programmingViews.get(problem.id);
+    if (!view) {
+      view = programming.mountWorkspace(programmingHost, programmingSession, problem,
+        { language: () => state.language, started: () => programmingPreview || state.started, preview: programmingPreview });
+      programmingViews.set(problem.id, view);
+    }
+    programmingViews.forEach((item, id) => { item.root.hidden = id !== problem.id; item.refresh(); });
+    el("connection-status").textContent = programming.copy(state.language, programmingSession.runnerReady() ? "hidden" : "unavailable");
+  }
 
   function updateSubmissionLock() {
+    if (programming) {
+      if (programmingSession) programmingViews.forEach(view => view.refresh());
+      return;
+    }
     const finalized = state.serverFinalized === true ||
       state.finalizeRequested === true || hasLocalFinalization(state.durable);
     const locked = state.started !== true || finalized;
@@ -1600,6 +1650,7 @@
   }
 
   function resetForTrustedContext(previousStorageKey) {
+    if (programming) initializeProgrammingSession();
     // Load the exact target namespace before retiring the old active one. A
     // reconnect can legitimately return to a session that already has locally
     // buffered answers; contexts are never merged.
@@ -2182,6 +2233,18 @@
       try { message = JSON.parse(message); } catch (_) { return; }
     }
     if (!message || typeof message.type !== "string") return;
+    if (programming && message.type === "exam_programming_response") {
+      if (programmingSession && programmingSession.receive(message)) {
+        if (state.started && ["ready", "recover"].includes(message.operation) && Number.isSafeInteger(message.serverTime) && message.serverTime > 0) {
+          const remaining = Math.max(0, state.activeDurationSeconds - Math.floor((message.serverTime - state.serverStartUnixMilliseconds) / 1000));
+          const monotonic = window.performance.now();
+          const previous = programmingClock ? Math.max(0, programmingClock.remaining - Math.floor((monotonic - programmingClock.monotonic) / 1000)) : remaining;
+          programmingClock = { remaining: Math.min(previous, remaining), monotonic };
+        }
+        renderQuestionList(); renderProgrammingQuestion();
+      }
+      return;
+    }
     if (message.type === "exam_context") {
       const nextContext = normalizeExamContext(message.context || message);
       // Context changes are allowed for reconnects within this loaded package
@@ -2240,6 +2303,12 @@
         state.activeDurationSeconds - Math.max(0,
           Math.floor((Date.now() - start) / 1000)));
       state.started = true;
+      if (programming) {
+        const monotonic = window.performance.now();
+        const previous = programmingClock ? Math.max(0, programmingClock.remaining - Math.floor((monotonic - programmingClock.monotonic) / 1000)) : state.remainingSeconds;
+        programmingClock = { remaining: Math.min(previous, state.remainingSeconds), monotonic };
+        state.remainingSeconds = programmingClock.remaining;
+      }
       el("loading-screen").hidden = true;
       el("loading-screen").setAttribute("aria-busy", "false");
       el("exam-shell").hidden = false;
@@ -2252,6 +2321,7 @@
     } else if (message.type === "exam_state_response") {
       applyStateResponse(message);
     } else if (message.type === "exam_host_ready") {
+      if (programming) { programmingSession.recover(); programmingSession.retry(); return; }
       beginStateReconcile();
       flushAnswerBridge();
     } else if (message.type === "exam_telemetry_enable") {
@@ -2607,6 +2677,11 @@
 
   function activateQuestion(index, reason = "navigation_button") {
     if (!Number.isSafeInteger(index) || index < 0 || index >= manifest.questions.length) return;
+    if (programming && programmingSession) {
+      const active = programmingViews.get(question()?.id);
+      if (active && active.composing()) return;
+      if (active && !programmingSession.frozen()) active.capture();
+    }
     if (index === state.index && telemetry.currentQuestionIndex === index) {
       return;
     }
@@ -2791,9 +2866,11 @@
     manifest.questions.forEach((item, index) => {
       const button = document.createElement("button");
       button.type = "button";
-      button.className = `question-button${index === state.index ? " active" : ""}${hasAnswer(item) ? " answered" : ""}`;
-      button.textContent = String(index + 1);
-      button.setAttribute("aria-label", `${text("question")} ${index + 1}`);
+      button.className = `question-button${index === state.index ? " active" : ""}${!programming && hasAnswer(item) ? " answered" : ""}`;
+      const delivery = programming && programmingSession ? programmingSession.delivery(item.id, programmingSession.selectedLanguage(item.id)) : "empty";
+      button.textContent = programming ? `${index + 1}. ${item.prompt.split("\n")[0]} · ${programming.copy(state.language, delivery)}` : String(index + 1);
+      button.setAttribute("aria-label", programming ? button.textContent : `${text("question")} ${index + 1}`);
+      button.setAttribute("aria-current", index === state.index ? "true" : "false");
       button.addEventListener("click", () => { activateQuestion(index, "navigation_button"); });
       list.appendChild(button);
     });
@@ -2805,6 +2882,7 @@
   }
 
   function renderQuestion() {
+    if (programming) { renderProgrammingQuestion(); return; }
     const item = question();
     if (!item) return;
     el("question-position").textContent = `${text("question")} ${state.index + 1}`;
@@ -3054,6 +3132,18 @@
   }
 
   function tick() {
+    if (programming) {
+      if (programmingPreview) return;
+      const now = window.performance.now();
+      if (!programmingSession.finished() && now - programmingRetryAt >= 5000) {
+        programmingRetryAt = now; programmingSession.retry();
+      }
+      if (!state.started || programmingSession.frozen()) return;
+      const remaining = programmingClock ? Math.max(0, programmingClock.remaining - Math.floor((now - programmingClock.monotonic) / 1000)) : 0;
+      state.remainingSeconds = remaining; updateTimer();
+      if (remaining === 0) submitResponse();
+      return;
+    }
     if (!state.started || state.submitted) return;
     const elapsedSeconds = state.serverStartUnixMilliseconds > 0
       ? Math.max(0, Math.floor((Date.now() - state.serverStartUnixMilliseconds) / 1000))
@@ -3071,12 +3161,23 @@
   }
 
   function openSubmitDialog() {
+    if (programming) {
+      el("submit-summary").textContent = state.language === "vi" ? "Gửi mã nguồn mới nhất của ngôn ngữ đang chọn cho từng bài, rồi kết thúc. Bản nháp trống không rút lời giải đã được nhận. Kết quả vẫn được ẩn." : "Send each problem's latest selected-language source, then finish. An empty draft does not withdraw an earlier received solution. Results remain hidden.";
+      el("submit-dialog").querySelector("h2").textContent = state.language === "vi" ? "Kết thúc bài làm?" : "Finish attempt?";
+      el("submit-dialog").showModal(); return;
+    }
     const answered = manifest.questions.filter(hasAnswer).length;
     el("submit-summary").textContent = I18N[state.language].submitSummary(answered, manifest.questions.length);
     el("submit-dialog").showModal();
   }
 
   function submitResponse() {
+    if (programming) {
+      if (programmingPreview || !programmingSession) return false;
+      programmingViews.forEach(view => view.capture());
+      const result = programmingSession.finish();
+      renderQuestionList(); renderProgrammingQuestion(); return result;
+    }
     if (state.submitted) return false;
     if (!bridgeReady()) {
       state.syncError = "Exam identity is unavailable.";
@@ -3252,6 +3353,7 @@
         },
         pendingAnswerEvents: state.durable.pending.length + Object.keys(state.durable.drafts).length
       });
+      if (programming) { programmingSession.recover(); return; }
       beginStateReconcile();
       flushAnswerBridge();
     }
@@ -3260,10 +3362,11 @@
   el("exam-title").textContent = manifest.title || DEFAULT_MANIFEST.title;
   el("exam-subject").textContent = manifest.subject || DEFAULT_MANIFEST.subject;
   el("candidate-label").textContent = `${text("candidate")}: ${examContext.candidateId || "—"}`;
+  if (programming) initializeProgrammingSession();
   const synchronizedStart = Boolean(hostWebView() && examContext.synchronizedStart);
-  state.started = !synchronizedStart;
-  el("loading-screen").hidden = !synchronizedStart;
-  el("exam-shell").hidden = synchronizedStart;
+  state.started = programming ? programmingPreview : !synchronizedStart;
+  el("loading-screen").hidden = programming ? programmingPreview : !synchronizedStart;
+  el("exam-shell").hidden = programming ? !programmingPreview : synchronizedStart;
   bindEvents();
   applyLanguage();
   activateQuestion(0, "navigation_initial");

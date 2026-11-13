@@ -3,6 +3,7 @@
 #include "nstu/agent_protocol.hpp"
 #include "nstu/exam_bridge.hpp"
 #include "nstu/exam_telemetry.hpp"
+#include "nstu/programming.hpp"
 
 #include <windows.h>
 
@@ -11,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <map>
 #include <optional>
 #include <set>
 #include <span>
@@ -68,11 +70,25 @@ struct ExamPackageReport {
 struct ExamLockdownPolicy {
     std::vector<std::string> allowed_origins;   // validated, de-duplicated
     std::uint32_t duration_seconds = 0;         // 60..86400, from manifest
+    std::string programming_mode;             // only from a fully validated CS manifest
 };
 
 [[nodiscard]] bool extract_exam_lockdown_policy(
     std::string_view manifest_json, ExamLockdownPolicy& out,
     std::string* error = nullptr);
+
+[[nodiscard]] bool validate_programming_manifest(
+    std::string_view manifest_json, std::string* error = nullptr);
+[[nodiscard]] bool validate_programming_policy_probe_json(
+    std::string_view json, std::uint32_t exit_code);
+// SYSTEM only, with fixed pinned installed scripts and the authenticated agent session.
+[[nodiscard]] bool probe_programming_workstation_policy(std::uint32_t student_session_id);
+[[nodiscard]] std::optional<exam::programming::Request> parse_browser_programming_request(
+    std::string_view json, std::string_view manifest_json,
+    const exam::StateRequest& trusted_context, std::string* error = nullptr);
+[[nodiscard]] bool track_browser_programming_request(
+    std::map<std::string, exam::programming::Request>& pending,
+    const exam::programming::Request& request);
 
 
 // Validates the bounded, unpacked package boundary without starting a browser.

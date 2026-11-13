@@ -43,6 +43,26 @@
 
 * { box-sizing: border-box; }
 
+.workspace.computer-science-workspace { grid-template-columns: 190px minmax(0, 1fr); }
+.cs-host { min-width: 0; min-height: 0; grid-column: 2 / -1; overflow-y: auto; }
+.cs-problem { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(300px, 3fr); min-width: 0; min-height: 100%; }
+.cs-problem[hidden], .cs-source[hidden] { display: none; }
+.cs-statement { padding: 24px; min-width: 0; overflow: auto; border-right: 1px solid var(--border); background: var(--surface); }
+.cs-statement-text { white-space: pre-wrap; }
+.cs-source-workspace { padding: 16px; min-width: 0; background: var(--surface); }
+.cs-toolbar, .cs-search { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.cs-toolbar select, .cs-search input { padding: 6px 8px; max-width: 100%; border: 1px solid var(--input-border); border-radius: 4px; color: var(--ink); background: var(--surface); }
+.cs-filename { color: var(--muted); margin-right: auto; font-family: Consolas, "Courier New", monospace; }
+.cs-source { display: block; width: 100%; min-width: 0; height: 42vh; min-height: 240px; padding: 12px; border: 1px solid var(--input-border); border-radius: 4px; font: inherit; font-family: Consolas, "Courier New", monospace; line-height: 1.5; tab-size: 4; resize: vertical; color: var(--ink); background: var(--surface); overflow-wrap: normal; }
+.cs-editor-help, .cs-status { color: var(--muted); margin: 8px 0 12px; }
+.cs-console { border-top: 1px solid var(--border); padding-top: 12px; }
+.cs-console-section h3 { margin: 8px 0; font-size: 1rem; }
+.cs-console-section pre { margin: 0; padding: 8px; overflow: auto; max-height: 160px; min-height: 32px; background: var(--surface-muted); white-space: pre; overflow-wrap: normal; }
+.computer-science-workspace .question-button { width: 100%; text-align: left; padding: 8px; }
+.computer-science-workspace .question-list { display: flex; flex-direction: column; }
+@media (max-width: 1099px) { .cs-problem { grid-template-columns: 1fr; } .cs-statement { border-right: 0; border-bottom: 1px solid var(--border); } }
+@media (max-width: 849px) { .workspace.computer-science-workspace { grid-template-columns: 1fr; } .cs-host { grid-column: 1; overflow-y: visible; } .computer-science-workspace .question-rail { max-height: 180px; overflow-y: auto; } .cs-source-workspace, .cs-statement { padding: 12px; } }
+
 body {
   margin: 0;
   min-width: 0;

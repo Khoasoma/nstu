@@ -9,10 +9,12 @@
 #include "nstu/key_store.hpp"
 #include "nstu/operator_role.hpp"
 #include "nstu/protocol_headers.h"
+#include "nstu/programming_broker.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -43,6 +45,8 @@ struct ServerControlPlaneConfig {
     std::vector<std::byte> instructor_key;
     bool require_instructor_ticket = false;
     std::string server_name;
+    ProgrammingBrokerConfig programming_broker;
+    std::string programming_grading_digest;
 };
 
 // One client waiting for the teacher to approve it. The six-digit code is the
@@ -92,6 +96,8 @@ struct ExamLaunchRequest {
     std::string candidate_id;
     security::Sha256Digest package_digest{};
     std::optional<exam::auth::InstructorAuthorizationTicket> authorization_ticket;
+    std::string programming_mode;
+    std::uint32_t programming_duration_seconds = 3600;
 };
 
 struct ExamClientState {
@@ -100,6 +106,7 @@ struct ExamClientState {
     std::string candidate_id;
     bool ready = false;
     bool begun = false;
+    std::string programming_mode;
 };
 
 // One line of the per-client chat transcript kept for the teacher UI. A

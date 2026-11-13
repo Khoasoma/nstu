@@ -23,7 +23,14 @@ const required = [
   'packaging/test-exam-origin-contract.ps1', 'packaging/test-exam-package-staging.ps1',
   'scripts/tests/verify-required-regressions-tests.mjs',
   'scripts/tests/owned-regression-process.mjs', 'scripts/tests/owned-regression-process.ps1',
-  'scripts/tests/owned-regression-process-tests.mjs'
+  'scripts/tests/owned-regression-process-tests.mjs',
+  'exam/shared/programming.js', 'tests/programming_web_tests.mjs',
+  'packaging/test-programming-package.ps1', 'packaging/cs-policy-functions.ps1',
+  'packaging/prepare-cs-policy.ps1', 'packaging/verify-cs-policy.ps1', 'packaging/test-cs-policy.ps1',
+  'tools/cs-judge/broker.py', 'tools/cs-judge/worker.py', 'tools/cs-judge/isolate_runner.py',
+  'tools/cs-judge/codeforces_import.py', 'tools/cs-judge/operator_client.py',
+  'tools/cs-judge/test_broker.py', 'tools/cs-judge/test_isolate_runner.py',
+  'tools/cs-judge/test_codeforces_import.py', 'tools/cs-judge/test_operator.py'
 ];
 function failure(message) { throw new Error(message); }
 function run(command, args, env = process.env) {
@@ -59,13 +66,17 @@ async function main() {
   for (const suite of [
     'tests/exam_web_recovery_tests.js',
     'tests/exam_runner_template_tests.mjs',
-    'tests/ui_desktop_token_tests.mjs'
+    'tests/ui_desktop_token_tests.mjs',
+    'tests/programming_web_tests.mjs'
   ]) run(process.execPath, [suite]);
   for (const runtime of ['pwsh.exe', 'powershell.exe']) {
     for (const suite of [
-      'packaging/test-exam-package-staging.ps1', 'packaging/test-exam-origin-contract.ps1'
+      'packaging/test-exam-package-staging.ps1', 'packaging/test-exam-origin-contract.ps1',
+      'packaging/test-programming-package.ps1', 'packaging/test-cs-policy.ps1'
     ]) run(runtime, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', suite], powerShellEnv);
   }
+  run('python', ['-m', 'unittest', 'discover', '-s', 'tools/cs-judge', '-p', 'test_*.py'],
+    { ...process.env, PYTHONDONTWRITEBYTECODE: '1' });
   console.log('\nREQUIRED REGRESSIONS: PASS');
 }
 main().catch(error => {

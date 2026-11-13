@@ -71,6 +71,13 @@ class FakeNode {
 
   append(...nodes) { nodes.forEach((node) => this.appendChild(node)); }
   appendChild(node) { this.children.push(node); return node; }
+  querySelector(selector) {
+    const visit = node => node.tagName.toLowerCase() === selector ? node : node.children.map(visit).find(Boolean);
+    return this.children.map(visit).find(Boolean) || null;
+  }
+  setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+  setRangeText(value, start, end) { this.value = this.value.slice(0, start) + value + this.value.slice(end); this.selectionStart = this.selectionEnd = start + value.length; }
+  focus() { this.ownerDocument.activeElement = this; }
   addEventListener(type, listener) {
     (this.listeners[type] ||= []).push(listener);
   }
@@ -138,6 +145,7 @@ class FakeDocument {
 
   addNode(tagName, id = "") {
     const node = new FakeNode(tagName, id);
+    node.ownerDocument = this;
     this.nodes.push(node);
     if (id) this.byId.set(id, node);
     return node;
@@ -159,6 +167,9 @@ class FakeDocument {
     const action = /^\[data-action="([^"]+)"\]$/.exec(selector);
     if (action) return this.nodes.find((node) => node.dataset.action === action[1]) || null;
     if (selector === ".timer") return this.getElementById("timer");
+    if (selector.startsWith(".")) return this.nodes.find(node => node.className.split(" ").includes(selector.slice(1))) || null;
+    const i18n = /^\[data-i18n="([^"]+)"\]$/.exec(selector);
+    if (i18n) return this.nodes.find(node => node.dataset.i18n === i18n[1]) || null;
     return null;
   }
   querySelectorAll(selector) {
@@ -265,6 +276,11 @@ function seedAnswers(storage, context, answer, notes = "") {
 
 function createHarness(initialContext, prepare, localStorage = new FakeStorage(), options = {}) {
   const document = new FakeDocument();
+  if (options.programming) {
+    for (const className of ["workspace", "question-column", "reference-column"]) document.addNode("section").className = className;
+    for (const key of ["questions", "computerBasedAssessment"]) document.addNode("span").dataset.i18n = key;
+    document.getElementById("submit-dialog").appendChild(document.addNode("h2"));
+  }
   if (prepare) prepare(localStorage);
   const webview = new FakeWebView();
   let timerId = 0;
@@ -301,6 +317,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
       return intervalCallbacks.length;
     }
   };
+  if (options.programming) { window.localStorage = localStorage; window.NSTU_EXAM_PREVIEW = options.preview === true; }
   if (Object.prototype.hasOwnProperty.call(options, "assetBase")) {
     window.NSTU_EXAM_ASSET_BASE = options.assetBase;
   }
@@ -309,6 +326,10 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
     document,
     localStorage,
     TextEncoder,
+    TextDecoder,
+    atob, btoa,
+    setTimeout: window.setTimeout,
+    clearTimeout: window.clearTimeout,
     Uint8Array,
     Blob: class Blob {},
     URL: options.urlConstructor ? BrowserURL :
@@ -320,6 +341,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
     console
   });
   // Expose owning-layer state only inside this VM, never in the shipped page.
+  if (options.programming) vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "exam", "shared", "programming.js"), "utf8"), context);
   const source = options.captureInspection ? APP_SOURCE.replace(/\}\(\)\);\s*$/, `
     window.captureInspection = { telemetry, emitTelemetrySample, flushTelemetry,
       resetTelemetryState, saveAnswer, activateQuestion };
@@ -2266,3 +2288,144 @@ function testMatchingFinalAckPreservesSubmissionFeedback() {
 testLocalSubmissionCancelsSavedStatusTimer();
 testMatchingFinalAckPreservesSubmissionFeedback();
 console.log("exam save/finalization precedence regressions: 2 passed");
+
+function testProgrammingCandidateUsesTypedBridgeAndMonotonicFinish() {
+  const context = contextFor("programming-candidate");
+  const manifest = { id: MANIFEST.id, title: "Computer science", durationSeconds: 600,
+    contentMode: "computer_science", programmingVersion: 1, sessionMode: "exam", languages: ["cpp20", "python3"],
+    questions: [{ id: "q1", type: "programming", revision: 1, prompt: "Sum", points: 1,
+      timeLimitMs: 1000, memoryLimitMiB: 64, samples: [{ id: "s1", input: " 2 3\r\n", output: "5\n" }] }] };
+  const h = createHarness(context, null, new FakeStorage(), { programming: true, manifest });
+  const source = h.document.nodes.filter(node => node.className === "cs-source");
+  assert.equal(source.length, 2);
+  assert.ok(source.every(node => node.disabled), "protected CS waits for authenticated Begin");
+  assert.equal(h.document.getElementById("exam-shell").hidden, true);
+  assert.ok(h.webview.messages.some(message => message.type === "exam_ready"), "CS preserves the native exam-ready handshake");
+  assert.ok(h.webview.messages.some(message => message.operation === "ready"));
+  assert.equal(h.webview.messages.some(message => message.type === "exam_answer_event"), false);
+  h.webview.emit({ type: "exam_begin", begin: { ...context, serverStartUnixMilliseconds: h.now(), durationSeconds: 600 } });
+  assert.equal(source[0].disabled, false);
+  assert.equal(h.document.nodes.find(node => node.textContent === "Run sample").disabled, true,
+    "ordinary Begin does not invent remote runner readiness");
+  source[0].value = "int main() {}"; source[0].dispatchEvent({ type: "input" });
+  const language = h.document.nodes.find(node => node.className === "cs-language");
+  language.value = "python3"; language.dispatchEvent({ type: "change" });
+  source[1].value = "print(5)"; source[1].dispatchEvent({ type: "input" });
+  h.document.getElementById("language-setting").value = "vi";
+  h.document.getElementById("language-setting").dispatchEvent({ type: "change" });
+  assert.equal(h.document.nodes.filter(node => node.className === "cs-source")[0], source[0],
+    "UI-language rerender retains the source node and its editing history");
+  assert.equal(source[0].value, "int main() {}");
+  const timerBefore = h.document.getElementById("timer").textContent;
+  h.setNow(h.now() - 86400000);
+  h.intervalCallbacks.filter(timer => timer.delay === 1000).forEach(timer => timer.callback());
+  assert.equal(h.document.getElementById("timer").textContent, timerBefore,
+    "moving the wall clock cannot extend the anchored countdown");
+  h.setPerfNow(31000);
+  h.intervalCallbacks.filter(timer => timer.delay === 1000).forEach(timer => timer.callback());
+  const beforeDuplicateBegin = h.document.getElementById("timer").textContent;
+  h.webview.emit({ type: "exam_begin", begin: { ...context, serverStartUnixMilliseconds: h.now() + 86400000, durationSeconds: 600 } });
+  assert.equal(h.document.getElementById("timer").textContent, beforeDuplicateBegin,
+    "duplicate authenticated Begin does not restart elapsed time");
+  h.setPerfNow(601000);
+  h.intervalCallbacks.filter(timer => timer.delay === 1000).forEach(timer => timer.callback());
+  const submitted = h.webview.messages.find(message => message.operation === "submit");
+  assert.ok(submitted);
+  assert.equal(submitted.language, "python3"); assert.equal(submitted.source, "print(5)");
+  assert.ok(source.every(node => node.disabled), "timeout captures then freezes both language editors");
+  assert.equal(h.webview.messages.some(message => message.operation === "finalize"), false,
+    "Finish waits for the final source receipt");
+  const response = { type: "exam_programming_response", requestId: submitted.requestId, operation: "submit",
+    problemId: "q1", problemRevision: 1, language: "python3", draftRevision: submitted.draftRevision,
+    sourceDigest: require("node:crypto").createHash("sha256").update(submitted.source).digest("hex"),
+    status: "received", receiptId: "python-final", serverTime: 1700000000000, fullContext: submitted.context };
+  h.webview.emit({ ...response, fullContext: { ...submitted.context, candidateId: "foreign" } });
+  assert.equal(h.webview.messages.some(message => message.operation === "finalize"), false);
+  h.webview.emit(response);
+  const final = h.webview.messages.find(message => message.operation === "finalize");
+  assert.ok(final); assert.deepEqual(Array.from(final.receiptIds), ["python-final"]);
+  assert.equal(h.window.NSTU_EXAM_RESPONSE, undefined, "legacy response-package preparation does not claim CS completion");
+}
+const PROGRAMMING_RETRY_MANIFEST = { id: MANIFEST.id, title: "Programming retry", durationSeconds: 600,
+  contentMode: "computer_science", programmingVersion: 1, sessionMode: "exam", languages: ["cpp20", "python3"],
+  questions: [{ id: "q1", type: "programming", revision: 1, prompt: "Sum", points: 1,
+    timeLimitMs: 1000, memoryLimitMiB: 64, samples: [{ id: "s1", input: "", output: "" }] }] };
+function testProgrammingTickRetriesFrozenPersistence() {
+  for (const failurePoint of ["lock", "source"]) {
+    const identity = contextFor(`programming-tick-${failurePoint}`), storage = new FakeStorage();
+    const store = storage.setItem.bind(storage); let fail = false;
+    storage.setItem = (key, value) => {
+      if (fail && key.endsWith(":programming-v1") && (failurePoint === "lock" || JSON.parse(value).pending.some(intent => intent.operation === "submit"))) throw new Error("temporary quota");
+      store(key, value);
+    };
+    const h = createHarness(identity, null, storage, { programming: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+    h.webview.emit({ type: "exam_begin", begin: { ...identity, serverStartUnixMilliseconds: h.now(), durationSeconds: 600 } });
+    const editor = h.document.nodes.find(node => node.className === "cs-source");
+    editor.value = "int main() { return 0; }"; editor.dispatchEvent({ type: "input" });
+    fail = true; submitFromForm(h);
+    assert.equal(editor.disabled, true, "failed Finish persistence still freezes the final source");
+    assert.equal(h.webview.messages.some(message => message.operation === "submit"), false);
+    fail = false;
+    const tick = h.intervalCallbacks.find(timer => timer.delay === 1000).callback;
+    h.setPerfNow(5999); tick();
+    assert.equal(h.webview.messages.some(message => message.operation === "submit"), false, "CS retry cadence stays bounded to five seconds");
+    h.setPerfNow(6000); tick();
+    const submitted = h.webview.messages.find(message => message.operation === "submit");
+    assert.ok(submitted, `${failurePoint} Finish persistence resumes from the ordinary frozen tick`);
+    assert.equal(submitted.source, "int main() { return 0; }");
+    h.setPerfNow(10000); tick();
+    assert.equal(h.webview.messages.filter(message => message.operation === "submit").length, 1);
+    h.setPerfNow(11000); tick();
+    assert.equal(new Set(h.webview.messages.filter(message => message.operation === "submit").map(message => message.requestId)).size, 1,
+      "frozen retry preserves one immutable final source intent");
+    h.webview.emit({ type: "exam_programming_response", operation: "submit", requestId: submitted.requestId,
+      problemId: "q1", problemRevision: 1, language: submitted.language, draftRevision: submitted.draftRevision,
+      sourceDigest: require("node:crypto").createHash("sha256").update(submitted.source).digest("hex"), status: "received", receiptId: `tick-${failurePoint}`, serverTime: h.now() });
+    assert.ok(h.webview.messages.some(message => message.operation === "finalize"), "tick-recovered Finish still waits for the real receipt");
+    assert.equal(editor.disabled, true);
+  }
+}
+function testProgrammingTickRecoversRunnerReadiness() {
+  const identity = contextFor("programming-runner-retry");
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const ready = h.webview.messages.find(message => message.operation === "ready");
+  const recover = h.webview.messages.find(message => message.operation === "recover" && message.language === "cpp20");
+  h.webview.emit({ type: "exam_programming_response", operation: "ready", requestId: ready.requestId, status: "unavailable" });
+  h.webview.emit({ type: "exam_programming_response", operation: "recover", requestId: recover.requestId,
+    problemId: "q1", problemRevision: 1, language: "cpp20", status: "unavailable" });
+  const tick = h.intervalCallbacks.find(timer => timer.delay === 1000).callback;
+  h.setPerfNow(6000); tick();
+  assert.equal(h.webview.messages.filter(message => message.requestId === ready.requestId).length, 2, "Ready retries before Begin without a new host-ready event");
+  assert.equal(h.webview.messages.filter(message => message.requestId === recover.requestId).length, 2, "Recover retries before Begin without a new host-ready event");
+  const source = "int main() {}", digest = require("node:crypto").createHash("sha256").update(source).digest("hex");
+  h.webview.emit({ type: "exam_programming_response", operation: "recover", requestId: recover.requestId,
+    problemId: "q1", problemRevision: 1, language: "cpp20", status: "recovered", draftRevision: 2,
+    sourceDigest: digest, sourceBase64: Buffer.from(source).toString("base64"), serverTime: h.now() });
+  const editor = h.document.nodes.find(node => node.className === "cs-source");
+  assert.equal(editor.value, source, "retried broker recovery restores the durable source");
+  h.webview.emit({ type: "exam_programming_response", operation: "ready", requestId: ready.requestId, status: "ready", runnerReady: true });
+  h.webview.emit({ type: "exam_begin", begin: { ...identity, serverStartUnixMilliseconds: h.now(), durationSeconds: 600 } });
+  const runButton = h.document.nodes.find(node => node.textContent === "Run sample");
+  assert.equal(runButton.disabled, false); runButton.dispatchEvent({ type: "click" });
+  const run = h.webview.messages.find(message => message.operation === "run");
+  assert.ok(run);
+  h.webview.emit({ type: "exam_programming_response", operation: "run", requestId: run.requestId,
+    problemId: "q1", problemRevision: 1, language: "cpp20", draftRevision: run.draftRevision, sourceDigest: digest, status: "unavailable" });
+  assert.equal(runButton.disabled, true);
+  h.setPerfNow(11000); tick();
+  const refreshedReady = h.webview.messages.filter(message => message.operation === "ready").at(-1);
+  assert.notEqual(refreshedReady.requestId, ready.requestId, "run-unavailable refreshes Ready when its preceding Ready was consumed");
+  h.webview.emit({ type: "exam_programming_response", operation: "ready", requestId: refreshedReady.requestId, status: "ready", runnerReady: true });
+  assert.equal(runButton.disabled, false, "broker recovery restores the Run action without host-ready");
+  assert.equal(h.webview.messages.filter(message => message.operation === "run").length, 1, "tick never retries Run");
+  assert.equal(h.webview.messages.some(message => message.operation === "cancel"), false);
+  assert.equal(editor.value, source);
+  const preview = createHarness(identity, null, new FakeStorage(), { programming: true, preview: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  preview.setPerfNow(6000); preview.intervalCallbacks.find(timer => timer.delay === 1000).callback();
+  assert.equal(preview.webview.messages.some(message => message.type === "exam_programming_request"), false, "preview never transmits typed execution or retry requests");
+}
+testProgrammingTickRetriesFrozenPersistence();
+testProgrammingTickRecoversRunnerReadiness();
+console.log("programming frozen tick persistence and broker-readiness recovery: 2 passed");
+testProgrammingCandidateUsesTypedBridgeAndMonotonicFinish();
+console.log("programming candidate typed bridge, editor preservation and monotonic timeout: PASS");

@@ -1,4 +1,6 @@
 # Build trees and generated CMake files
+__pycache__/
+*.py[cod]
 /build/
 /build-*/
 /out/

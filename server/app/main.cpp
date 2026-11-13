@@ -19,6 +19,9 @@
 #include "nstu/support_bundle.hpp"
 #include "nstu/checked_file_output.hpp"
 #include "nstu/url_validation.hpp"
+#ifdef NSTU_SERVER_HAS_EXAM_INSPECTOR
+#include "nstu/exam_host.hpp"
+#endif
 
 #include <d3d11.h>
 #include <d3dcompiler.h>
@@ -40,6 +43,7 @@
 #include "pairing_request_view.hpp"
 #include "exam_fleet_presentation.hpp"
 #include "exam_digest.hpp"
+#include "exam_operator_action.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -519,6 +523,8 @@ struct DashboardState {
     std::array<char, nstu::exam::kMaximumExamControlCandidateBytes + 1>
         exam_candidate_id{};
     std::array<char, nstu::security::kSha256Bytes * 2 + 1> exam_digest_hex{};
+    bool exam_programming_package = false;
+    nstu::ui::ExamOperatorAction exam_action;
     // Chat notification state. `chat_counts` is the current per-client inbound
     // (student) message count refreshed each frame; `chat_seen_counts` is the
     // count when the teacher last had that client's chat on screen (badge
@@ -4377,6 +4383,31 @@ void generate_sealed_cohort_export(
     }
 }
 
+bool configure_programming_launch(nstu::server::ExamLaunchRequest& launch, std::string_view digest_hex, std::string* error) {
+#ifdef NSTU_SERVER_HAS_EXAM_INSPECTOR
+    nstu::client::ExamPackageReport report;
+    nstu::client::ExamLockdownPolicy policy;
+    if (!nstu::client::inspect_exam_package(std::filesystem::path(std::u8string(launch.package_root.begin(), launch.package_root.end())),
+            std::filesystem::path(std::u8string(launch.web_root.begin(), launch.web_root.end())), digest_hex, true, report, error) ||
+        !nstu::client::extract_exam_lockdown_policy(report.manifest_json, policy, error)) return false;
+    if (policy.programming_mode.empty()) { if (error) *error = "Select a validated computer science package."; return false; }
+    launch.programming_mode = policy.programming_mode;
+    launch.programming_duration_seconds = policy.duration_seconds;
+    return true;
+#else
+    (void)launch;
+    (void)digest_hex;
+    if (error) *error = "Computer science package inspection is unavailable in this build.";
+    return false;
+#endif
+}
+
+void queue_exam_action(DashboardState& state, std::function<std::string()> action) {
+    state.control_status = state.exam_action.start(std::move(action))
+        ? tr(state, "Exam request is being prepared.", "Đang chuẩn bị yêu cầu thi.")
+        : tr(state, "Exam operation is unavailable or still pending.", "Thao tác thi chưa khả dụng hoặc vẫn đang chờ.");
+}
+
 void draw_exam_panel(
     const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
@@ -4433,6 +4464,10 @@ void draw_exam_panel(
     ImGui::TextWrapped("%s", tr(state,
         "Selected load uses the entered candidate ID. All-online load uses each computer's hostname. Scanning/selecting a package does not calculate its digest or stage files on clients.",
         "Mở trên máy chọn dùng mã thí sinh đã nhập. Mở trên tất cả máy online dùng tên từng máy. Quét/chọn gói không tính digest hoặc triển khai file lên máy client."));
+    ImGui::Checkbox(tr(state, "Computer science package", "Gói thi khoa học máy tính"), &state.exam_programming_package);
+    if (state.exam_programming_package) ImGui::TextWrapped("%s", tr(state,
+        "Load verifies a local staged copy at the same path and digest. The package determines Practice, Exam or Contest and its duration. Judging remains unavailable until the dedicated judgehost is prepared.",
+        "Mở đề xác minh bản triển khai cục bộ có cùng đường dẫn và digest. Gói đề xác định Luyện tập, Thi hoặc Cuộc thi và thời lượng. Chấm bài chưa khả dụng cho đến khi máy chấm chuyên dụng được chuẩn bị."));
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -4458,7 +4493,7 @@ void draw_exam_panel(
                                  selected_client->status != nstu::server::ClientStatus::offline;
 
     // Load on Selected
-    ImGui::BeginDisabled(!selected_online || selected_has_active);
+    ImGui::BeginDisabled(!selected_online || selected_has_active || state.exam_action.busy());
     if (ImGui::Button(tr(state, "Load on Selected Machine", "Mở trên máy chọn"), {scaled(200.0f), 0})) {
         nstu::security::Sha256Digest digest{};
         if (!nstu::ui::parse_sha256_hex(state.exam_digest_hex.data(), digest)) {
@@ -4475,9 +4510,15 @@ void draw_exam_panel(
                 launch.package_root.pop_back();
             }
             launch.web_root = launch.package_root + "/exam/web";
-            std::string error;
-            const bool sent = control_plane.launch_exam(selected_client->id, launch, &error);
-            state.control_status = sent ? tr(state, "Exam loading request sent.", "Đã gửi yêu cầu tải bài thi.") : error;
+            const auto client_id = selected_client->id;
+            const bool programming = state.exam_programming_package;
+            const std::string digest_text = state.exam_digest_hex.data();
+            const std::string success = tr(state, "Exam loading request sent.", "Đã gửi yêu cầu tải bài thi.");
+            queue_exam_action(state, [&control_plane, client_id, programming, digest_text, launch = std::move(launch), success]() mutable {
+                std::string error;
+                if (programming && !configure_programming_launch(launch, digest_text, &error)) return error;
+                return control_plane.launch_exam(client_id, launch, &error) ? success : error;
+            });
         }
     }
     ImGui::EndDisabled();
@@ -4492,7 +4533,7 @@ void draw_exam_panel(
             break;
         }
     }
-    ImGui::BeginDisabled(!any_online_unlaunched);
+    ImGui::BeginDisabled(!any_online_unlaunched || state.exam_action.busy());
     if (ImGui::Button(tr(state, "Load on ALL Online Computers", "Mở trên TẤT CẢ máy online"), {scaled(220.0f), 0})) {
         nstu::security::Sha256Digest digest{};
         if (!nstu::ui::parse_sha256_hex(state.exam_digest_hex.data(), digest)) {
@@ -4500,8 +4541,7 @@ void draw_exam_panel(
                 "Content SHA-256 must contain exactly 64 hex characters and must not be all zeros.",
                 "Content SHA-256 phải có đúng 64 ký tự hex và không được toàn số 0.");
         } else {
-            std::size_t launched_count = 0;
-            std::string last_err;
+            std::vector<std::pair<std::uint64_t, nstu::server::ExamLaunchRequest>> requests;
             for (const auto& cl : clients) {
                 if (cl.status == nstu::server::ClientStatus::online && !control_plane.exam_active(cl.id)) {
                     nstu::server::ExamLaunchRequest launch;
@@ -4513,46 +4553,58 @@ void draw_exam_panel(
                         launch.package_root.pop_back();
                     }
                     launch.web_root = launch.package_root + "/exam/web";
-                    if (control_plane.launch_exam(cl.id, launch, &last_err)) {
-                        ++launched_count;
-                    }
+                    requests.emplace_back(cl.id, std::move(launch));
                 }
             }
-            state.control_status = tr(state, "Dispatched exam to ", "Đã phát đề thi tới ") +
-                                  std::to_string(launched_count) + tr(state, " computers.", " máy tính.");
+            const bool programming = state.exam_programming_package;
+            const std::string digest_text = state.exam_digest_hex.data();
+            const std::string prefix = tr(state, "Dispatched exam to ", "Đã phát đề thi tới ");
+            const std::string suffix = tr(state, " computers.", " máy tính.");
+            queue_exam_action(state, [&control_plane, requests = std::move(requests), programming, digest_text, prefix, suffix]() mutable {
+                std::size_t launched = 0;
+                std::string error;
+                if (programming && !requests.empty()) {
+                    if (!configure_programming_launch(requests.front().second, digest_text, &error)) return error;
+                    for (auto& [id, launch] : requests) {
+                        (void)id;
+                        launch.programming_mode = requests.front().second.programming_mode;
+                        launch.programming_duration_seconds = requests.front().second.programming_duration_seconds;
+                    }
+                }
+                for (const auto& [id, launch] : requests) if (control_plane.launch_exam(id, launch, &error)) ++launched;
+                return prefix + std::to_string(launched) + suffix + (error.empty() ? "" : " " + error);
+            });
         }
     }
     ImGui::EndDisabled();
 
     ImGui::SameLine();
     // Begin All Ready
-    ImGui::BeginDisabled(ready_clients.empty());
+    ImGui::BeginDisabled(ready_clients.empty() || state.exam_action.busy());
     if (ImGui::Button(tr(state, "Begin All Ready Candidates", "Bắt đầu tất cả máy sẵn sàng"), {scaled(220.0f), 0})) {
-        std::size_t begun_count = 0;
-        for (std::uint64_t cid : ready_clients) {
-            std::string err;
-            if (control_plane.begin_exam(cid, 0, &err)) {
-                ++begun_count;
-            }
-        }
-        state.control_status = tr(state, "Begin requests queued for ", "Đã xếp hàng yêu cầu bắt đầu cho ") +
-                              std::to_string(begun_count) + tr(state, " candidates.", " thí sinh.");
+        const std::string prefix = tr(state, "Begin requests queued for ", "Đã xếp hàng yêu cầu bắt đầu cho ");
+        const std::string suffix = tr(state, " candidates.", " thí sinh.");
+        queue_exam_action(state, [&control_plane, ready_clients, prefix, suffix] {
+            std::size_t begun = 0;
+            std::string error;
+            for (const auto id : ready_clients) if (control_plane.begin_exam(id, 0, &error)) ++begun;
+            return prefix + std::to_string(begun) + suffix + (error.empty() ? "" : " " + error);
+        });
     }
     ImGui::EndDisabled();
 
     ImGui::SameLine();
     // Stop All
-    ImGui::BeginDisabled(active_states.empty());
+    ImGui::BeginDisabled(active_states.empty() || state.exam_action.busy());
     if (ImGui::Button(tr(state, "Stop ALL Exams", "Dừng TOÀN BỘ bài thi"), {scaled(160.0f), 0})) {
-        std::size_t stopped_count = 0;
-        for (const auto& ex : active_states) {
-            std::string err;
-            if (control_plane.stop_exam(ex.client_id, &err)) {
-                ++stopped_count;
-            }
-        }
-        state.control_status = tr(state, "Stop requests queued for ", "Đã xếp hàng yêu cầu dừng cho ") +
-                              std::to_string(stopped_count) + tr(state, " computers.", " máy tính.");
+        const std::string prefix = tr(state, "Stop requests queued for ", "Đã xếp hàng yêu cầu dừng cho ");
+        const std::string suffix = tr(state, " computers.", " máy tính.");
+        queue_exam_action(state, [&control_plane, active_states, prefix, suffix] {
+            std::size_t stopped = 0;
+            std::string error;
+            for (const auto& exam : active_states) if (control_plane.stop_exam(exam.client_id, &error)) ++stopped;
+            return prefix + std::to_string(stopped) + suffix + (error.empty() ? "" : " " + error);
+        });
     }
     ImGui::EndDisabled();
 
@@ -4632,21 +4684,23 @@ void draw_exam_panel(
             }
             if (is_exam_active && it_exam->ready && !it_exam->begun) {
                 ImGui::SameLine();
+                ImGui::BeginDisabled(state.exam_action.busy());
                 if (ImGui::SmallButton(tr(state, "Begin", "Bắt đầu"))) {
-                    std::string err;
-                    state.control_status = control_plane.begin_exam(client.id, 0, &err)
-                        ? tr(state, "Begin request queued.", "Đã xếp hàng yêu cầu bắt đầu.")
-                        : err;
+                    const auto id = client.id;
+                    const std::string success = tr(state, "Begin request queued.", "Đã xếp hàng yêu cầu bắt đầu.");
+                    queue_exam_action(state, [&control_plane, id, success] { std::string error; return control_plane.begin_exam(id, 0, &error) ? success : error; });
                 }
+                ImGui::EndDisabled();
             }
             if (is_exam_active) {
                 ImGui::SameLine();
+                ImGui::BeginDisabled(state.exam_action.busy());
                 if (ImGui::SmallButton(tr(state, "Stop", "Dừng"))) {
-                    std::string err;
-                    state.control_status = control_plane.stop_exam(client.id, &err)
-                        ? tr(state, "Stop request queued.", "Đã xếp hàng yêu cầu dừng.")
-                        : err;
+                    const auto id = client.id;
+                    const std::string success = tr(state, "Stop request queued.", "Đã xếp hàng yêu cầu dừng.");
+                    queue_exam_action(state, [&control_plane, id, success] { std::string error; return control_plane.stop_exam(id, &error) ? success : error; });
                 }
+                ImGui::EndDisabled();
             }
 
             pop_client_id();
@@ -6030,6 +6084,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     if (!data_directory.empty() &&
         nstu::deployment::ensure_data_root(data_directory, &deployment_error)) {
         nstu::server::ServerControlPlaneConfig control_config;
+        control_config.programming_broker = nstu::server::programming_broker_environment();
+        std::array<char, 65> grading_digest{};
+        if (GetEnvironmentVariableA("NSTU_CS_GRADING_DIGEST", grading_digest.data(), static_cast<DWORD>(grading_digest.size())) == 64)
+            control_config.programming_grading_digest = grading_digest.data();
         control_config.keyring_path =
             (data_directory / L"server-keyring.bin").wstring();
         control_config.exam_journal_path =
@@ -6095,6 +6153,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         ImGui::PopStyleVar();
 
         const auto clients = registry.snapshot();
+        if (auto result = dashboard.exam_action.poll()) dashboard.control_status = std::move(*result);
         // Chat notifications: refresh per-client inbound (student) counts, flash
         // the taskbar once when a new student line arrives while the manager is
         // not in the foreground, and expose unread state for the badges. The
@@ -6408,6 +6467,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         (void)control_plane.set_streaming(dashboard.stream_requests.client_id(), false,
                                           0, nullptr);
     }
+    dashboard.exam_action.wait();
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);
     g_snapshot_textures.clear();

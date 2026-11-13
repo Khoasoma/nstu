@@ -23,6 +23,7 @@ add_library(nstu_common STATIC
     src/packet_loss.cpp
     src/pairing.cpp
     src/protocol.cpp
+    src/programming.cpp
     src/rate_limiter.cpp
     src/room_profile.cpp
     src/screen_snapshot.cpp

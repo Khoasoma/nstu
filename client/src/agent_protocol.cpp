@@ -70,7 +70,7 @@ bool read_le(std::span<const std::byte> input, std::size_t& offset, T& value) {
 
 bool valid_type(AgentMessageType type) noexcept {
     return type >= AgentMessageType::lock &&
-           type <= AgentMessageType::pairing_confirmation_end;
+           type <= AgentMessageType::exam_programming_response;
 }
 
 // Pairing text reaches the agent from the network and lands directly on a

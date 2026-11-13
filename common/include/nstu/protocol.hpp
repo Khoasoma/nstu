@@ -145,6 +145,8 @@ enum class CommandType : std::uint16_t {
     // Low-frequency fleet metadata (client build version and agent service connectivity).
     // client -> server: carries client version string and student agent connection state.
     fleet_metadata = 69,
+    exam_programming_request = 70,
+    exam_programming_response = 71,
 };
 
 enum class ConnectionRole : std::uint8_t {

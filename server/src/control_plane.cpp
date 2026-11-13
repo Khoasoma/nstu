@@ -431,8 +431,36 @@ public:
         bool ready = false;
         bool begun = false;
         std::uint64_t server_start_unix_milliseconds = 0;
+        std::string programming_mode;
+        std::uint32_t programming_duration_seconds = 0;
+        bool programming_stopped = false;
+        bool programming_policy_ready = false;
+        net::ConnectionId programming_policy_connection = 0;
+        std::chrono::steady_clock::time_point programming_policy_checked{};
         TelemetryAuthorization telemetry;
     };
+
+    static exam::StateRequest programming_context(const ActiveExamContext& context) {
+        return {context.package_id, context.package_digest, context.client_id, context.session_id, context.candidate_id};
+    }
+
+    static bool programming_policy_current(const ActiveExamContext& context, net::ConnectionId connection) {
+        return context.programming_mode == "practice" || (context.programming_policy_ready &&
+            context.programming_policy_connection == connection &&
+            std::chrono::steady_clock::now() - context.programming_policy_checked < std::chrono::seconds(30));
+    }
+
+    static std::string programming_lifecycle_id(std::string_view operation, const exam::SessionId& session) {
+        constexpr char digits[] = "0123456789abcdef";
+        std::string result(operation);
+        result += '-';
+        for (const auto value : session) {
+            const auto byte = std::to_integer<unsigned>(value);
+            result.push_back(digits[byte >> 4u]);
+            result.push_back(digits[byte & 15u]);
+        }
+        return result;
+    }
 
     void send_telemetry_enable_locked(ConnectionState& state, ActiveExamContext& context) {
         if (config_.exam_journal_path.empty()) return;
@@ -516,6 +544,7 @@ public:
             return false;
         }
         config_ = std::move(config);
+        programming_broker_ = std::make_unique<ProgrammingBroker>(config_.programming_broker);
         if (!config_.exam_journal_path.empty() &&
             !exam_journal_.open(config_.exam_journal_path, error)) {
             config_ = {};
@@ -661,6 +690,7 @@ public:
     void stop() noexcept {
         discovery_responder_.stop();
         dispatcher_.stop();
+        if (programming_broker_) programming_broker_->stop();
         {
             std::scoped_lock lock(pairing_mutex_);
             pending_pairings_.clear();
@@ -675,6 +705,7 @@ public:
         {
             std::scoped_lock lock(exam_contexts_mutex_);
             active_exam_contexts_.clear();
+            retained_programming_contexts_.clear();
         }
         {
             std::scoped_lock lock(broadcast_mode_mutex_);
@@ -777,7 +808,7 @@ public:
             set_error(error, "could not generate exam session identity");
             return false;
         }
-        return start_exam(client_id, request, ticket, error);
+        return start_exam(client_id, request, ticket, error, launch.programming_mode, launch.programming_duration_seconds);
     }
 
     bool start_exam(std::uint64_t client_id,
@@ -789,7 +820,8 @@ public:
     bool start_exam(std::uint64_t client_id,
                     const exam::ExamStartRequest& request,
                     const std::optional<exam::auth::InstructorAuthorizationTicket>& ticket,
-                    std::string* error) {
+                    std::string* error, std::string_view programming_mode = {},
+                    std::uint32_t programming_duration_seconds = 0) {
         if (!exam::validate_exam_start_request(request)) {
             set_error(error, "invalid exam start request");
             return false;
@@ -869,6 +901,17 @@ public:
         context.candidate_id = request.candidate_id;
         context.instructor_id = std::move(authorized_instructor);
         context.instructor_authorized = instructor_authorized;
+        if (!programming_mode.empty()) {
+            if ((programming_mode != "exam" && programming_mode != "contest" && programming_mode != "practice") ||
+                programming_duration_seconds < 60 || programming_duration_seconds > 86400 ||
+                !programming_broker_ || !programming_broker_->configured() ||
+                !programming_broker_->prepare_session(programming_context(context), programming_mode, config_.programming_grading_digest)) {
+                set_error(error, "CS session preparation unavailable: configure the registered public package, private grading and broker");
+                return false;
+            }
+            context.programming_mode = programming_mode;
+            context.programming_duration_seconds = programming_duration_seconds;
+        }
 
         // Existing state/context serialization prevents inbound answer traffic
         // from observing a half-started session. Take both locks before the
@@ -978,39 +1021,95 @@ public:
     }
 
     bool stop_exam(std::uint64_t client_id, std::string* error) {
+        const auto issued_context = active_exam_for(client_id);
+        if (issued_context && !issued_context->programming_mode.empty() &&
+            (!programming_broker_ || !programming_broker_->stop_session(programming_context(*issued_context),
+                programming_lifecycle_id("stop", issued_context->session_id)))) {
+            set_error(error, "CS stop was not durably acknowledged by the broker; pending work is retained");
+            return false;
+        }
         auto state = state_for_client(client_id);
         if (!state) {
             set_error(error, "client is not authenticated");
             return false;
         }
-        std::scoped_lock state_lock(state->mutex);
+        std::unique_lock state_lock(state->mutex);
         if (state->stage != Stage::authenticated ||
             state->registry_id.load() == 0) {
             set_error(error, "authenticated command sequence is unavailable");
             return false;
         }
-        if (!send_authenticated_locked(
-                *state, protocol::CommandType::exam_stop,
-                next_request_id_.fetch_add(1), {}, error)) {
+        std::unique_lock context_lock(exam_contexts_mutex_);
+        const auto found_ctx = active_exam_contexts_.find(state->registry_id.load());
+        if (issued_context && (found_ctx == active_exam_contexts_.end() ||
+            !matches_exam_context(found_ctx->second, programming_context(*issued_context)))) {
+            set_error(error, "exam context changed while stop was pending");
             return false;
+        }
+        if (found_ctx != active_exam_contexts_.end() && !found_ctx->second.programming_mode.empty() &&
+            retained_programming_contexts_.size() >= 4096) {
+            set_error(error, "retained CS context quota exhausted; completed work remains authorized");
+            return false;
+        }
+        {
+            std::scoped_lock ownership_lock(states_mutex_);
+            if (!is_current_state_locked(*state)) {
+                set_error(error, "exam stop connection was superseded");
+                return false;
+            }
+            if (!send_authenticated_locked(
+                    *state, protocol::CommandType::exam_stop,
+                    next_request_id_.fetch_add(1), {}, error)) {
+                return false;
+            }
         }
         // Remove only after the stop command was queued successfully.  If a
         // connection is unavailable, retaining the context allows a later
         // reconnect to recover answers and receive an explicit stop.
-        std::scoped_lock context_lock(exam_contexts_mutex_);
-        const auto found_ctx = active_exam_contexts_.find(state->registry_id.load());
+        std::optional<exam::SessionId> stopped_session;
         if (found_ctx != active_exam_contexts_.end()) {
-            if (telemetry_journal_.is_open()) {
-                (void)telemetry_journal_.stop_authorization(found_ctx->second.session_id);
-                (void)telemetry_journal_.remove_context(found_ctx->second.session_id);
+            if (!found_ctx->second.programming_mode.empty()) {
+                found_ctx->second.programming_stopped = true;
+                retained_programming_contexts_.insert_or_assign(programming_lifecycle_id("session", found_ctx->second.session_id), found_ctx->second);
             }
+            stopped_session = found_ctx->second.session_id;
             active_exam_contexts_.erase(found_ctx);
+        }
+        context_lock.unlock();
+        state_lock.unlock();
+        if (stopped_session && telemetry_journal_.is_open()) {
+            (void)telemetry_journal_.stop_authorization(*stopped_session);
+            (void)telemetry_journal_.remove_context(*stopped_session);
         }
         return true;
     }
 
     bool begin_exam(std::uint64_t client_id, std::uint32_t duration_seconds,
                     std::string* error) {
+        const auto issued_context = active_exam_for(client_id);
+        std::optional<exam::programming::LifecycleReply> programming_begin;
+        if (issued_context && !issued_context->programming_mode.empty()) {
+            if (!issued_context->ready) {
+                set_error(error, "CS host has not reported readiness");
+                return false;
+            }
+            const auto policy_state = state_for_client(client_id);
+            if (!policy_state || !programming_policy_current(*issued_context, policy_state->connection_id)) {
+                set_error(error, "Protected CS begin blocked: verified OS application launch policy evidence is missing");
+                return false;
+            }
+            const auto context = programming_context(*issued_context);
+            if (!programming_broker_ || !programming_broker_->ready(context)) {
+                set_error(error, "CS begin blocked: the broker has not confirmed the actual public runner and both languages");
+                return false;
+            }
+            const auto duration = duration_seconds == 0 ? issued_context->programming_duration_seconds : duration_seconds;
+            programming_begin = programming_broker_->begin_session(context, programming_lifecycle_id("begin", issued_context->session_id), duration);
+            if (!programming_begin) {
+                set_error(error, "CS begin was not durably acknowledged by the broker");
+                return false;
+            }
+        }
         auto state = state_for_client(client_id);
         if (!state) {
             set_error(error, "client is not authenticated");
@@ -1030,12 +1129,25 @@ public:
             return false;
         }
         auto& context = found->second;
+        if (programming_begin && (!issued_context || !matches_exam_context(context, programming_context(*issued_context)))) {
+            set_error(error, "CS context changed while begin was pending");
+            return false;
+        }
+        if (programming_begin && !programming_policy_current(context, state->connection_id)) {
+            set_error(error, "Protected CS begin blocked: workstation policy evidence expired while begin was pending");
+            return false;
+        }
         if (!context.ready) {
             set_error(error, "client is not ready to begin the exam");
             return false;
         }
-        if (context.begun) {
+        if (context.begun && context.programming_mode.empty()) {
             set_error(error, "client exam has already begun");
+            return false;
+        }
+        std::scoped_lock ownership_lock(states_mutex_);
+        if (!is_current_state_locked(*state)) {
+            set_error(error, "exam begin connection was superseded");
             return false;
         }
         exam::ExamBeginCommand begin;
@@ -1044,8 +1156,8 @@ public:
         begin.package_digest = context.package_digest;
         begin.client_id = context.client_id;
         begin.session_id = context.session_id;
-        begin.server_start_unix_milliseconds = unix_milliseconds_now();
-        begin.duration_seconds = duration_seconds;
+        begin.server_start_unix_milliseconds = programming_begin ? programming_begin->server_start : unix_milliseconds_now();
+        begin.duration_seconds = programming_begin ? static_cast<std::uint32_t>((programming_begin->deadline - programming_begin->server_start) / 1000) : duration_seconds;
         const auto payload = exam::encode_exam_begin_command(begin);
         if (payload.empty()) {
             set_error(error, "could not encode exam begin command");
@@ -1080,7 +1192,7 @@ public:
         for (const auto& [registry_id, context] : active_exam_contexts_) {
             clients.push_back({registry_id, context.package_id,
                                context.candidate_id, context.ready,
-                               context.begun});
+                               context.begun, context.programming_mode});
         }
         return clients;
     }
@@ -2192,6 +2304,9 @@ private:
         if (command->envelope.type == protocol::CommandType::exam_answer_event) {
             return process_exam_answer_event(state, *command);
         }
+        if (command->envelope.type == protocol::CommandType::exam_programming_request) {
+            return process_programming_request(state, *command);
+        }
         if (command->envelope.type == protocol::CommandType::exam_state_request) {
             return process_exam_state_request(state, *command);
         }
@@ -2393,6 +2508,78 @@ private:
         return true;
     }
 
+    bool process_programming_request(ConnectionState& state, const control::AuthenticatedCommand& command) {
+        using exam::programming::Operation;
+        const auto request = exam::programming::decode_request(command.payload);
+        if (!request || request->context.client_id != state.hello.client_id) {
+            dispatcher_.disconnect(state.connection_id);
+            return false;
+        }
+        {
+            std::scoped_lock ownership_lock(states_mutex_);
+            if (!is_current_state_locked(state)) return false;
+        }
+        const auto registry_id = state.registry_id.load();
+        auto current = active_exam_for(registry_id);
+        const bool active = current && !current->programming_mode.empty() &&
+            !current->programming_stopped && matches_exam_context(*current, request->context);
+        const bool recoverable = request->operation == Operation::draft || request->operation == Operation::submit ||
+            request->operation == Operation::finalize || request->operation == Operation::recover;
+        if (active && request->operation == Operation::ready) {
+            std::scoped_lock context_lock(exam_contexts_mutex_);
+            std::scoped_lock ownership_lock(states_mutex_);
+            const auto found = active_exam_contexts_.find(registry_id);
+            if (!is_current_state_locked(state) || found == active_exam_contexts_.end() ||
+                !matches_exam_context(found->second, request->context)) return false;
+            found->second.programming_policy_ready = request->workstation_policy_ready;
+            found->second.programming_policy_connection = state.connection_id;
+            found->second.programming_policy_checked = std::chrono::steady_clock::now();
+            current = found->second;
+        }
+        const bool policy_current = active && programming_policy_current(*current, state.connection_id);
+        const bool recovery_only = !active || (!policy_current && recoverable);
+        if (active && !policy_current && (request->operation == Operation::ready || request->operation == Operation::run)) {
+            const auto json = exam::programming::unavailable_response_json(*request, "workstation_policy_unavailable");
+            return send_authenticated_locked(state, protocol::CommandType::exam_programming_response, command.envelope.request_id,
+                std::span<const std::byte>{reinterpret_cast<const std::byte*>(json.data()), json.size()}, nullptr);
+        }
+        if (recovery_only && !recoverable) {
+            const auto json = exam::programming::unavailable_response_json(*request, "context_unavailable");
+            return send_authenticated_locked(state, protocol::CommandType::exam_programming_response, command.envelope.request_id,
+                std::span<const std::byte>{reinterpret_cast<const std::byte*>(json.data()), json.size()}, nullptr);
+        }
+        const auto response_id = command.envelope.request_id;
+        const bool queued = programming_broker_ && programming_broker_->submit(*request,
+            [this, registry_id, request = *request, response_id, recovery_only](std::string json) {
+                const auto response = exam::programming::parse_response_json(json, &request);
+                if (!response) return;
+                const auto target = state_for_client(registry_id);
+                if (!target) return;
+                std::scoped_lock state_lock(target->mutex);
+                if (target->stage != Stage::authenticated || target->hello.client_id != request.context.client_id) return;
+                const auto current_context = active_exam_for(registry_id);
+                const bool same = current_context && !current_context->programming_mode.empty() &&
+                    matches_exam_context(*current_context, request.context);
+                const bool recovery = request.operation == Operation::draft || request.operation == Operation::submit ||
+                    request.operation == Operation::finalize || request.operation == Operation::recover;
+                bool retained = false;
+                if (!same && recovery) {
+                    std::scoped_lock context_lock(exam_contexts_mutex_);
+                    const auto found = retained_programming_contexts_.find(programming_lifecycle_id("session", request.context.session_id));
+                    retained = found != retained_programming_contexts_.end() && matches_exam_context(found->second, request.context);
+                }
+                if (!same && !(recovery && (recovery_only || retained))) return;
+                std::scoped_lock ownership_lock(states_mutex_);
+                if (!is_current_state_locked(*target)) return;
+                (void)send_authenticated_locked(*target, protocol::CommandType::exam_programming_response, response_id,
+                    std::span<const std::byte>{reinterpret_cast<const std::byte*>(response->json.data()), response->json.size()}, nullptr);
+            }, recovery_only);
+        if (queued) return true;
+        const auto json = exam::programming::unavailable_response_json(*request, "broker_queue_unavailable");
+        return send_authenticated_locked(state, protocol::CommandType::exam_programming_response, response_id,
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(json.data()), json.size()}, nullptr);
+    }
+
     bool process_exam_answer_event(
         ConnectionState& state, const control::AuthenticatedCommand& command) {
         std::string decode_error;
@@ -2402,7 +2589,7 @@ private:
         // exam tuple is server-issued.  Never accept an event merely because
         // its embedded client id matches the socket identity.
         const auto context = active_exam_for(state.registry_id.load());
-        if (!event || !context || event->client_id != state.hello.client_id ||
+        if (!event || !context || !context->programming_mode.empty() || event->client_id != state.hello.client_id ||
             !matches_exam_context(*context, *event)) {
             dispatcher_.disconnect(state.connection_id);
             return false;
@@ -2433,7 +2620,7 @@ private:
         ConnectionState& state, const control::AuthenticatedCommand& command) {
         const auto request = exam::decode_state_request(command.payload);
         const auto context = active_exam_for(state.registry_id.load());
-        if (!request || !context || request->client_id != state.hello.client_id ||
+        if (!request || !context || !context->programming_mode.empty() || request->client_id != state.hello.client_id ||
             !matches_exam_context(*context, *request) ||
             !exam_journal_.is_open()) {
             dispatcher_.disconnect(state.connection_id);
@@ -2610,6 +2797,8 @@ public:
     ClientRegistry& registry_;
     security::KeyStore& key_store_;
     ServerControlPlaneConfig config_;
+    std::unique_ptr<ProgrammingBroker> programming_broker_;
+    std::unordered_map<std::string, ActiveExamContext> retained_programming_contexts_;
     // This journal is server-owned and intentionally never placed under a
     // client freeze/UWF overlay. It remains authoritative across reconnects.
     exam::AnswerJournal exam_journal_;

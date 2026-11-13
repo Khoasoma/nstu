@@ -95,6 +95,8 @@ enum class AgentMessageType : std::uint16_t {
     pairing_confirmation_request = 42,
     pairing_confirmation_reply = 43,
     pairing_confirmation_end = 44,
+    exam_programming_request = 45,
+    exam_programming_response = 46,
 };
 
 struct AgentMessage {

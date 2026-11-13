@@ -4,7 +4,7 @@ const args = process.argv.slice(2);
 if (args.length > 1 || (args.length === 1 && args[0] !== '--check')) {
   throw new Error('Usage: node scripts/sync-exam-runner-template.mjs [--check]');
 }
-const assets = {indexHtml: 'index.html', stylesCss: 'styles.css', appJs: 'app.js'};
+const assets = {indexHtml: 'index.html', stylesCss: 'styles.css', appJs: 'app.js', programmingJs: '../shared/programming.js'};
 const runner = {};
 for (const [key, filename] of Object.entries(assets)) {
   const bytes = await readFile(new URL(`../exam/web/${filename}`, import.meta.url));

@@ -43,6 +43,8 @@
         <details class="studio-file-menu" id="studio-file-menu">
           <summary class="btn btn-secondary" id="studio-file-summary">File</summary>
           <div class="studio-file-commands">
+        <button class="btn btn-secondary" id="btn-new-cs" type="button">New computer science draft</button>
+        <button class="btn btn-secondary" id="btn-import-codeforces" type="button">Import Codeforces preparation</button>
         <button class="btn btn-secondary" id="btn-load-sample" type="button" title="Load sample IELTS test">
           <span>📋</span> Sample
         </button>
@@ -170,6 +172,15 @@
                 <!-- Option rows -->
               </div>
             </div>
+            <section id="cs-authoring" class="cs-authoring" hidden aria-label="Programming problem">
+              <p class="helper-text">C++20 · main.cpp / Python 3 · main.py. One source file. Public samples only. Private grading is prepared separately on the trusted broker.</p>
+              <div id="cs-problem-fields"></div>
+              <h2>Public samples</h2>
+              <p class="helper-text">Review exact spaces and line breaks. The first sample loads automatically for candidates.</p>
+              <div id="cs-sample-fields"></div>
+              <button class="btn btn-secondary" id="btn-add-cs-sample" type="button">Add public sample</button>
+              <p id="cs-authoring-status" role="status"></p>
+            </section>
           </section>
         </div>
       </main>
@@ -217,6 +228,15 @@
               <label class="form-label" for="exam-subject">Subject</label>
               <input class="form-input" id="exam-subject" type="text" value="English Language">
             </div>
+            <div class="form-group" id="cs-session-settings" hidden>
+              <label class="form-label" for="cs-session-mode">Session policy</label>
+              <select class="form-select" id="cs-session-mode">
+                <option value="exam">Exam · hidden results</option>
+                <option value="contest">Contest · hidden results</option>
+                <option value="practice">Practice · delivery receipts only</option>
+              </select>
+              <p class="helper-text">Finish and timeout send each problem's latest selected-language source. An empty final draft does not withdraw an earlier received solution. A dedicated judgehost is required for execution and protected Begin.</p>
+            </div>
             <div class="form-group">
               <label class="form-label" for="exam-duration">Time (Minutes)</label>
               <input class="form-input" id="exam-duration" type="text" inputmode="decimal" value="60" required aria-describedby="exam-duration-error">
@@ -236,6 +256,7 @@
        VIEW 2: IELTS Live Preview (Candidate Split Screen)
        ======================================================================== -->
   <div class="preview-view" id="preview-view" style="display: none;" role="tabpanel" aria-labelledby="btn-mode-preview">
+    <iframe id="cs-preview-frame" class="cs-preview-frame" title="Computer science teacher preview" sandbox="allow-scripts" hidden></iframe>
     <!-- Preview Topbar -->
     <div class="preview-toolbar">
       <div style="display: flex; align-items: center; gap: 12px;">
@@ -376,11 +397,24 @@
   </div>
 
   <!-- Toast Notification Container -->
+  <dialog id="cs-import-review" class="cs-review-dialog" aria-labelledby="cs-review-title">
+    <h2 id="cs-review-title">Review Codeforces problem</h2>
+    <p id="cs-review-provenance"></p>
+    <p class="helper-text">Imported through the trusted teacher preparation tool. Review every public sample. Private grading is not attached by this import.</p>
+    <div id="cs-review-content"></div>
+    <label><input id="cs-review-confirm" type="checkbox"> I reviewed the statement and exact public sample pairs.</label>
+    <p id="cs-review-error" role="status"></p>
+    <div class="cs-review-actions">
+      <button class="btn btn-secondary" id="btn-cancel-codeforces" type="button" autofocus>Cancel</button>
+      <button class="btn btn-primary" id="btn-add-codeforces" type="button" disabled>Add as problem</button>
+    </div>
+  </dialog>
   <div class="toast-container" id="toast-container"></div>
 
   <!-- Application Scripts -->
   <script src="template.js"></script>
   <script src="zip.js"></script>
+  <script src="../shared/programming.js"></script>
   <script src="studio.js"></script>
 </body>
 </html>

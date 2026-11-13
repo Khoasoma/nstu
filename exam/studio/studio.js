@@ -236,6 +236,12 @@
     el("exam-title").value = currentExam.title || "";
     renderDocumentTitle(currentExam.title);
     el("exam-subject").value = currentExam.subject || "";
+    const isProgramming = currentExam.contentMode === "computer_science";
+    if (el("cs-session-settings")) el("cs-session-settings").hidden = !isProgramming;
+    if (el("cs-session-mode")) el("cs-session-mode").value = currentExam.sessionMode || "exam";
+    el("select-add-type").hidden = isProgramming;
+    el("btn-add-question").textContent = isProgramming ? "Add problem" : "Add";
+    el("exam-allowed-origins").disabled = isProgramming;
     renderNumericField("exam-duration");
     el("exam-allowed-origins").value = Array.isArray(currentExam.allowedOrigins)
       ? currentExam.allowedOrigins.join("\n")
@@ -265,6 +271,8 @@
         badgeLabel = "Audio";
       } else if (q.type === "reading") {
         badgeLabel = "Reading";
+      } else if (q.type === "programming") {
+        badgeLabel = "Code";
       }
 
       item.innerHTML = `
@@ -304,7 +312,7 @@
   function questionButtonName(q, index) {
     const type = q.isMatching ? "Matching" : {
       multiple_choice: "Multiple choice", short_answer: "Short answer",
-      essay: "Essay", listening: "Listening", reading: "Reading"
+      essay: "Essay", listening: "Listening", reading: "Reading", programming: "Programming"
     }[q.type];
     return `Question ${index + 1}: ${type}. ${q.prompt || "Untitled Question"}`;
   }
@@ -346,6 +354,8 @@
     el("mc-editor").style.display = (!q.isMatching && (q.type === "multiple_choice" || q.type === "listening" || q.type === "reading")) ? "block" : "none";
     el("sa-editor").style.display = (q.type === "short_answer") ? "block" : "none";
     el("essay-editor").style.display = (q.type === "essay") ? "block" : "none";
+    if (el("cs-authoring")) el("cs-authoring").hidden = q.type !== "programming";
+    if (q.type === "programming") renderProgrammingAuthoring(q);
 
     // Populate matching tokens & targets
     if (q.isMatching) {
@@ -435,7 +445,10 @@
     const nextNum = currentExam.questions.length + 1;
     let newQ;
 
-    if (type === "matching") {
+    if (currentExam.contentMode === "computer_science") {
+      if (currentExam.questions.length >= 64) { showToast("Programming packages support at most 64 problems.", "error"); return; }
+      newQ = programmingProblem(`q${nextNum}-programming`);
+    } else if (type === "matching") {
       newQ = {
         id: `q${nextNum}-matching`,
         type: "reading",
@@ -535,8 +548,111 @@
      ======================================================================== */
 
   let previewIndex = 0;
+  let programmingPreviewRevision = "";
+  let codeforcesReview = null;
+  function reviewCodeforcesImport(wrapper) {
+    const allowed = ["manifest", "provenance", "requiresReview", "blockers"];
+    const provenance = wrapper.provenance;
+    if (Object.keys(wrapper).some(key => !allowed.includes(key)) || wrapper.requiresReview !== true ||
+        !provenance || typeof provenance !== "object" || Array.isArray(provenance) ||
+        Object.keys(provenance).some(key => !["provider", "contestId", "index", "originalUrl", "importedUtc"].includes(key)) ||
+        provenance.provider !== "Codeforces" || !Number.isSafeInteger(provenance.contestId) || provenance.contestId <= 0 ||
+        typeof provenance.index !== "string" || !/^[A-Za-z][A-Za-z0-9]{0,7}$/.test(provenance.index) ||
+        typeof provenance.originalUrl !== "string" || provenance.originalUrl.length > 512 ||
+        !/^https:\/\/codeforces\.com\/(problemset\/problem\/\d+\/[A-Za-z0-9]+|contest\/\d+\/problem\/[A-Za-z0-9]+)$/.test(provenance.originalUrl) ||
+        typeof provenance.importedUtc !== "string" || provenance.importedUtc.length > 64 || !Number.isFinite(Date.parse(provenance.importedUtc)) ||
+        !Array.isArray(wrapper.blockers) || wrapper.blockers.length > 8 || wrapper.blockers.some(value => !["private_grading_not_attached", "teacher_sample_review_required"].includes(value))) throw new Error("Codeforces preparation metadata is invalid.");
+    const errors = window.NstuProgramming.validatePublicManifest(wrapper.manifest);
+    if (errors.length) throw new Error(errors.join(" "));
+    codeforcesReview = window.NstuProgramming.projectPublicManifest(wrapper.manifest);
+    const content = el("cs-review-content"); content.textContent = "";
+    for (const problem of codeforcesReview.questions) {
+      const heading = document.createElement("h3"); heading.textContent = problem.prompt; content.appendChild(heading);
+      for (const field of ["instruction", "inputDescription", "outputDescription", "constraints", "explanation"]) if (problem[field]) { const text = document.createElement("p"); text.textContent = problem[field]; content.appendChild(text); }
+      problem.samples.forEach((sample, index) => {
+        const title = document.createElement("h4"); title.textContent = `Sample ${index + 1}`; content.appendChild(title);
+        for (const [key, label] of [["input", "Public input"], ["output", "Expected output"]]) { const heading = document.createElement("p"), text = document.createElement("pre"); heading.textContent = label; text.textContent = sample[key]; content.append(heading, text); }
+      });
+    }
+    el("cs-review-provenance").textContent = `${provenance.provider} ${provenance.contestId}${provenance.index} · ${provenance.originalUrl}`;
+    el("cs-review-confirm").checked = false; el("btn-add-codeforces").disabled = true; el("cs-review-error").textContent = "";
+    el("cs-import-review").showModal();
+  }
+  function addReviewedCodeforces() {
+    if (!codeforcesReview || !el("cs-review-confirm").checked) return;
+    let next = codeforcesReview;
+    if (currentExam.contentMode === "computer_science") {
+      next = window.NstuProgramming.projectPublicManifest(currentExam);
+      for (const problem of codeforcesReview.questions) {
+        const item = { ...problem }; let suffix = 2;
+        while (next.questions.some(existing => existing.id === item.id) || Object.hasOwn(previewAnswers, item.id)) item.id = `${problem.id.slice(0, 88)}-${suffix++}`;
+        next.questions.push(item);
+      }
+    }
+    const errors = window.NstuProgramming.validatePublicManifest(next);
+    if (errors.length) { el("cs-review-error").textContent = errors.join(" "); return; }
+    if (currentExam.contentMode !== "computer_science") saveDraft();
+    currentExam = next; activeQuestionIndex = next.questions.length - 1; codeforcesReview = null;
+    el("cs-import-review").close(); resetPreviewState(); renderEditor();
+    showToast("Reviewed Codeforces problem added. Private grading is prepared separately.", "success");
+  }
+  function programmingProblem(id) {
+    return { id, type: "programming", revision: 1, prompt: "Untitled programming problem", instruction: "Read standard input and write standard output.", points: 1,
+      inputDescription: "", outputDescription: "", constraints: "", explanation: "", timeLimitMs: 1000, memoryLimitMiB: 64,
+      samples: [{ id: "sample-1", input: "", output: "" }] };
+  }
+  function renderProgrammingAuthoring(q) {
+    const fields = el("cs-problem-fields"); fields.textContent = "";
+    for (const [key, title] of [["inputDescription", "Input"], ["outputDescription", "Output"], ["constraints", "Constraints"], ["explanation", "Explanation"], ["timeLimitMs", "Time limit (ms)"], ["memoryLimitMiB", "Memory limit (MiB)"]]) {
+      const group = document.createElement("div"); group.className = "form-group";
+      const label = document.createElement("label"); label.className = "form-label"; label.textContent = title; label.htmlFor = `cs-author-${key}`;
+      const number = key === "timeLimitMs" || key === "memoryLimitMiB";
+      const field = document.createElement(number ? "input" : "textarea"); field.className = number ? "form-input" : "form-textarea"; field.id = label.htmlFor; field.value = q[key] ?? "";
+      if (number) { field.type = "number"; field.min = key === "timeLimitMs" ? "100" : "16"; field.max = key === "timeLimitMs" ? "10000" : "512"; field.step = "1"; }
+      else field.rows = 3;
+      field.addEventListener("input", () => { q[key] = number ? Number(field.value) : field.value; updateProgrammingAuthoringStatus(); });
+      group.append(label, field); fields.appendChild(group);
+    }
+    const samples = el("cs-sample-fields"); samples.textContent = "";
+    q.samples.forEach((sample, index) => {
+      const group = document.createElement("section"); group.className = "cs-sample-pair";
+      const title = document.createElement("h3"); title.textContent = `Sample ${index + 1} · ${sample.id}`; group.appendChild(title);
+      for (const [key, name] of [["input", "Public input"], ["output", "Expected output"]]) {
+        const label = document.createElement("label"), field = document.createElement("textarea"); label.textContent = name; label.htmlFor = `cs-sample-${sample.id}-${key}`;
+        field.id = label.htmlFor; field.className = "form-textarea cs-sample-text"; field.rows = 4; field.spellcheck = false; field.value = sample[key];
+        // Preserve reviewed CRLF/space bytes until the teacher actually edits this field.
+        field.addEventListener("input", () => { sample[key] = field.value; updateProgrammingAuthoringStatus(); }); group.append(label, field);
+      }
+      const remove = document.createElement("button"); remove.type = "button"; remove.className = "btn btn-secondary"; remove.textContent = "Remove sample"; remove.disabled = q.samples.length <= 1;
+      remove.addEventListener("click", () => { q.samples.splice(index, 1); renderProgrammingAuthoring(q); }); group.appendChild(remove); samples.appendChild(group);
+    });
+    el("btn-add-cs-sample").disabled = q.samples.length >= 8;
+    updateProgrammingAuthoringStatus();
+  }
+  function updateProgrammingAuthoringStatus() {
+    const errors = window.NstuProgramming.validatePublicManifest(window.NstuProgramming.projectPublicManifest(currentExam));
+    el("cs-authoring-status").textContent = errors.length ? errors.join(" ") : "Public statement and samples are valid. Private grading and dedicated judgehost readiness are checked separately.";
+  }
+  function renderProgrammingPreview() {
+    const frame = el("cs-preview-frame"), model = window.NstuProgramming.projectPublicManifest(currentExam);
+    const errors = window.NstuProgramming.validatePublicManifest(model), runner = window.NSTU_RUNNER_TEMPLATE;
+    const revision = JSON.stringify(model);
+    if (revision === programmingPreviewRevision) return;
+    programmingPreviewRevision = revision;
+    if (errors.length || !runner || typeof runner.programmingJs !== "string") {
+      frame.srcdoc = `<p>${escapeHtml(errors.join(" ") || "Canonical programming preview assets are unavailable.")}</p>`; return;
+    }
+    const scriptText = text => text.replace(/<\/script/gi, "<\\/script");
+    const bootstrap = `window.NSTU_EXAM_PREVIEW=true;window.NSTU_EXAM_MANIFEST=${revision.replace(/</g, "\\u003c")};`;
+    frame.srcdoc = runner.indexHtml
+      .replace('<link rel="stylesheet" href="styles.css">', `<style>${runner.stylesCss}</style>`)
+      .replaceAll('src="assets/nstu-brand.png"', `src="data:image/png;base64,${runner.brandPngBase64}"`)
+      .replace('<script src="../shared/programming.js"></script>', `<script>${bootstrap}${scriptText(runner.programmingJs)}</script>`)
+      .replace('<script src="app.js"></script>', `<script>${scriptText(runner.appJs)}</script>`);
+  }
 
   function resetPreviewState() {
+    programmingPreviewRevision = "";
     previewIndex = 0;
     previewAnswers = {};
     selectedTokenForPlacement = null;
@@ -544,6 +660,10 @@
   }
 
   function renderPreview() {
+    const isProgramming = currentExam.contentMode === "computer_science";
+    if (el("cs-preview-frame")) el("cs-preview-frame").hidden = !isProgramming;
+    el("preview-split-container").hidden = isProgramming;
+    if (isProgramming) { renderProgrammingPreview(); return; }
     el("preview-exam-title").textContent = currentExam.title || "IELTS Assessment Preview";
     const minutes = Math.round((currentExam.durationSeconds || 3600) / 60);
     el("preview-timer").textContent = `${String(minutes).padStart(2, "0")}:00`;
@@ -962,6 +1082,7 @@
   }
 
   function validateExam(exam) {
+    if (exam.contentMode === "computer_science") return window.NstuProgramming.validatePublicManifest(exam);
     const errors = [];
     if (!exam.id || !/^[a-zA-Z0-9._-]{1,96}$/.test(exam.id)) {
       errors.push("Package ID must be 1–96 alphanumeric characters (dashes and underscores allowed).");
@@ -1024,6 +1145,7 @@
   // Authoring keeps its full model. This boundary admits only values the current
   // schema, stager and native JsonReader can consume without data substitution.
   function validateExportContract(exam) {
+    if (exam.contentMode === "computer_science") return window.NstuProgramming.validatePublicManifest(exam);
     const errors = [];
     const object = value => value !== null && typeof value === "object" && !Array.isArray(value);
     const text = (value, path, min, max, maxBytes = 65536) => {
@@ -1099,6 +1221,7 @@
   }
 
   function compileManifest(exam) {
+    if (exam.contentMode === "computer_science") return window.NstuProgramming.projectPublicManifest(exam);
     // Generate clean manifest matching manifest.schema.json
     const manifest = {
       id: exam.id,
@@ -1474,6 +1597,8 @@
         zip.add("exam/web/index.html", runner.indexHtml);
         zip.add("exam/web/styles.css", runner.stylesCss);
         zip.add("exam/web/app.js", runner.appJs);
+        if (typeof runner.programmingJs !== "string" || !runner.programmingJs) throw new Error("Bundled programming runtime is incomplete.");
+        zip.add("exam/shared/programming.js", runner.programmingJs);
       } else {
         // Fallback fetch
         const [hRes, cRes, jRes, png] = await Promise.all([
@@ -1486,6 +1611,7 @@
         zip.add("exam/web/index.html", losslessRunnerText(hRes));
         zip.add("exam/web/styles.css", losslessRunnerText(cRes));
         zip.add("exam/web/app.js", losslessRunnerText(jRes));
+        zip.add("exam/shared/programming.js", losslessRunnerText(await readRunnerAsset("../shared/programming.js", 1024 * 1024)));
       }
       zip.add("exam/web/assets/nstu-brand.png", brand);
 
@@ -1529,6 +1655,11 @@
     // Admission is read-only: do not touch the current draft or Preview until
     // every renderer-consumed field of the candidate is safe to use.
     const admit = (candidate) => {
+      if (candidate && candidate.contentMode === "computer_science") {
+        const errors = window.NstuProgramming.validatePublicManifest(candidate);
+        if (errors.length) throw new Error(errors.join(" "));
+        return;
+      }
       const object = (value, path) => {
         if (value === null || typeof value !== "object" || Array.isArray(value)) {
           throw new Error(`${path} must be an object.`);
@@ -1609,6 +1740,7 @@
       } else {
         throw new Error("Please select a .nstuexam or .json file.");
       }
+      if (candidate && Object.hasOwn(candidate, "manifest") && Object.hasOwn(candidate, "requiresReview")) { reviewCodeforcesImport(candidate); return; }
       admit(candidate);
       currentExam = candidate;
       activeQuestionIndex = 0;
@@ -1623,7 +1755,7 @@
   function saveDraft() {
     syncExamMetadata();
 
-    const jsonStr = JSON.stringify(currentExam, null, 2);
+    const jsonStr = JSON.stringify(currentExam.contentMode === "computer_science" ? window.NstuProgramming.projectPublicManifest(currentExam) : currentExam, null, 2);
     const blob = new Blob([jsonStr], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1644,6 +1776,24 @@
      ======================================================================== */
 
   function init() {
+    el("btn-import-codeforces")?.addEventListener("click", () => { closeFileDisclosureForCommand(); el("file-import-input").click(); });
+    el("cs-review-confirm")?.addEventListener("change", () => { el("btn-add-codeforces").disabled = !el("cs-review-confirm").checked; });
+    el("btn-add-codeforces")?.addEventListener("click", addReviewedCodeforces);
+    el("btn-cancel-codeforces")?.addEventListener("click", () => { codeforcesReview = null; el("cs-import-review").close(); });
+    el("cs-import-review")?.addEventListener("cancel", () => { codeforcesReview = null; });
+    el("btn-new-cs")?.addEventListener("click", () => {
+      saveDraft(); closeFileDisclosureForCommand();
+      currentExam = { id: `cs-${Date.now().toString(36)}`, title: "Computer science assessment", subject: "Computer science", durationSeconds: 3600,
+        contentMode: "computer_science", programmingVersion: 1, sessionMode: "exam", languages: ["cpp20", "python3"], questions: [programmingProblem("q1-programming")] };
+      activeQuestionIndex = 0; resetPreviewState(); renderEditor();
+      showToast("Computer science draft created. Previous draft download prepared.", "info");
+    });
+    el("cs-session-mode")?.addEventListener("change", event => { if (currentExam.contentMode === "computer_science") currentExam.sessionMode = event.target.value; });
+    el("btn-add-cs-sample")?.addEventListener("click", () => {
+      const q = currentExam.questions[activeQuestionIndex]; if (!q || q.type !== "programming" || q.samples.length >= 8) return;
+      let number = q.samples.length + 1; while (q.samples.some(sample => sample.id === `sample-${number}`)) ++number;
+      q.samples.push({ id: `sample-${number}`, input: "", output: "" }); renderProgrammingAuthoring(q);
+    });
     const themeButton = el("btn-studio-theme");
     const applyTheme = (theme) => {
       const dark = theme === "dark";

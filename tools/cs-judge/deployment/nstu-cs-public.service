@@ -1,0 +1,26 @@
+[Unit]
+Description=NSTU isolated public sample worker
+After=isolate.service
+Requires=isolate.service
+
+[Service]
+Type=simple
+User=nstu-cs-public
+Group=nstu-cs-broker
+ExecStart=/usr/bin/python3 /opt/nstu-cs/worker.py --config /etc/nstu-cs/config.json --lane public
+WorkingDirectory=/opt/nstu-cs
+RuntimeDirectory=nstu-cs-public
+RuntimeDirectoryMode=0750
+StateDirectory=nstu-cs-public
+StateDirectoryMode=0700
+UMask=0007
+NoNewPrivileges=false
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+KillMode=mixed
+TimeoutStopSec=120
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

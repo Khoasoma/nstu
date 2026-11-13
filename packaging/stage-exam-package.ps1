@@ -423,11 +423,103 @@ function Assert-ExamAllowedOrigin {
     }
 }
 
+function Assert-ProgrammingProperties {
+    param($Object, [string[]]$Allowed)
+    foreach ($property in $Object.PSObject.Properties) {
+        if ($Allowed -cnotcontains $property.Name) { throw "Unsupported programming property: $($property.Name)" }
+    }
+}
+
+function Assert-ProgrammingText {
+    param($Value, [int]$MaximumBytes, [switch]$Required)
+    Assert-JsonString -Value $Value -Context 'Programming text' -MaximumLength $MaximumBytes
+    $encoding = [Text.UTF8Encoding]::new($false, $true)
+    if (($Required -and $Value.Length -eq 0) -or $encoding.GetByteCount($Value) -gt $MaximumBytes -or
+        $Value -match '[\x00-\x08\x0B\x0C\x0E-\x1F]') { throw 'Programming text exceeds its UTF-8 budget or contains unsupported controls.' }
+}
+
+function Test-ProgrammingManifest {
+    param($Manifest, $EntryKinds, [int]$ManifestByteLength)
+    Assert-ProgrammingProperties -Object $Manifest -Allowed @(
+        'id','title','subject','candidate','durationSeconds','allowedOrigins','documents','questions',
+        'contentMode','programmingVersion','sessionMode','languages')
+    if ($ManifestByteLength -le 0) {
+        $ManifestByteLength = [Text.UTF8Encoding]::new($false, $true).GetByteCount(($Manifest | ConvertTo-Json -Depth 16 -Compress))
+    }
+    if ($ManifestByteLength -gt 131072) { throw 'Programming manifest exceeds the native 128 KiB JSON limit.' }
+    if ($Manifest.contentMode -cne 'computer_science' -or
+        (Get-JsonInteger -Value $Manifest.programmingVersion -Context 'Programming version' -Minimum 1 -Maximum 1) -ne 1 -or
+        @('exam','contest','practice') -cnotcontains $Manifest.sessionMode) { throw 'Unsupported programming version or session mode.' }
+    $languages = Get-JsonArray -Value $Manifest.languages -Context 'Programming languages' -MinimumCount 2 -MaximumCount 2
+    if ($languages[0] -cne 'cpp20' -or $languages[1] -cne 'python3') { throw 'Programming requires cpp20 and python3.' }
+    $id = Get-JsonPropertyValue -Object $Manifest -Name 'id' -Required
+    Assert-ProgrammingText -Value $id -MaximumBytes 96 -Required
+    if ($id -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}$') { throw 'Invalid programming package identifier.' }
+    Assert-ProgrammingText -Value $Manifest.title -MaximumBytes 240 -Required
+    [void](Get-JsonInteger -Value $Manifest.durationSeconds -Context 'Programming duration' -Minimum 60 -Maximum 86400)
+    foreach ($field in @('subject','candidate')) {
+        if (Test-JsonPropertyPresent -Object $Manifest -Name $field) {
+            Assert-ProgrammingText -Value $Manifest.$field -MaximumBytes $(if ($field -eq 'subject') { 120 } else { 160 })
+        }
+    }
+    foreach ($field in @('allowedOrigins','documents')) {
+        if (Test-JsonPropertyPresent -Object $Manifest -Name $field) {
+            [void](Get-JsonArray -Value $Manifest.$field -Context "Programming $field" -MaximumCount 0)
+        }
+    }
+    $questions = Get-JsonArray -Value $Manifest.questions -Context 'Programming questions' -MinimumCount 1 -MaximumCount 64
+    $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($question in $questions) {
+        Assert-ProgrammingProperties -Object $question -Allowed @('id','type','prompt','instruction','points','revision',
+            'inputDescription','outputDescription','constraints','explanation','samples','timeLimitMs','memoryLimitMiB')
+        Assert-ProgrammingText -Value $question.id -MaximumBytes 96 -Required
+        if ($question.type -cne 'programming' -or $question.id -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}$' -or
+            -not $ids.Add($question.id)) { throw 'Invalid or duplicated programming problem.' }
+        [void](Get-JsonInteger -Value $question.revision -Context 'Problem revision' -Minimum 1 -Maximum 4294967295)
+        [void](Get-JsonInteger -Value $question.timeLimitMs -Context 'Problem time limit' -Minimum 100 -Maximum 10000)
+        [void](Get-JsonInteger -Value $question.memoryLimitMiB -Context 'Problem memory limit' -Minimum 16 -Maximum 512)
+        Assert-ProgrammingText -Value $question.prompt -MaximumBytes 8000 -Required
+        foreach ($field in @('instruction','inputDescription','outputDescription','constraints','explanation')) {
+            if (Test-JsonPropertyPresent -Object $question -Name $field) {
+                Assert-ProgrammingText -Value $question.$field -MaximumBytes 4000
+            }
+        }
+        if (Test-JsonPropertyPresent -Object $question -Name 'points') {
+            [void](Get-JsonInteger -Value $question.points -Context 'Problem points' -Minimum 0 -Maximum 1000)
+        }
+        $samples = Get-JsonArray -Value $question.samples -Context 'Public samples' -MinimumCount 1 -MaximumCount 8
+        $sampleIds = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($sample in $samples) {
+            Assert-ProgrammingProperties -Object $sample -Allowed @('id','input','output')
+            Assert-ProgrammingText -Value $sample.id -MaximumBytes 96 -Required
+            if ($sample.id -cnotmatch '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,95}$' -or -not $sampleIds.Add($sample.id)) { throw 'Invalid public sample identifier.' }
+            Assert-ProgrammingText -Value (Get-JsonPropertyValue -Object $sample -Name 'input' -Required) -MaximumBytes 4096
+            Assert-ProgrammingText -Value (Get-JsonPropertyValue -Object $sample -Name 'output' -Required) -MaximumBytes 4096
+        }
+    }
+    $surface = @('manifest.json','manifest.p7s','exam/web/index.html','exam/web/app.js','exam/web/styles.css',
+        'exam/shared/programming.js','exam/web/assets/nstu-brand.png')
+    foreach ($path in $EntryKinds.Keys) {
+        if ($EntryKinds[$path] -eq 'file' -and $surface -cnotcontains $path) { throw "Undeclared or private programming file: $path" }
+        if ($EntryKinds[$path] -ne 'file' -and @('exam','exam/','exam/web','exam/web/','exam/shared','exam/shared/','exam/web/assets','exam/web/assets/') -cnotcontains $path) {
+            throw "Undeclared programming directory: $path"
+        }
+    }
+    foreach ($path in @('exam/web/index.html','exam/web/app.js','exam/web/styles.css','exam/shared/programming.js')) {
+        if (-not $EntryKinds.ContainsKey($path) -or $EntryKinds[$path] -ne 'file') { throw "Programming runtime asset is missing: $path" }
+    }
+    return [pscustomobject]@{ Id = $id; AssetPaths = @('exam/shared/programming.js') }
+}
+
 function Test-ExamManifest {
     param(
         [Parameter(Mandatory = $true)]$Manifest,
-        [Parameter(Mandatory = $true)]$EntryKinds
+        [Parameter(Mandatory = $true)]$EntryKinds,
+        [int]$ManifestByteLength = 0
     )
+    if ((Test-JsonPropertyPresent -Object $Manifest -Name 'contentMode') -and $Manifest.contentMode -ceq 'computer_science') {
+        return Test-ProgrammingManifest -Manifest $Manifest -EntryKinds $EntryKinds -ManifestByteLength $ManifestByteLength
+    }
     Assert-JsonProperties -Object $Manifest -Context 'Exam manifest' -Allowed @(
         'id', 'title', 'subject', 'candidate', 'durationSeconds', 'allowedOrigins', 'documents', 'questions')
 
@@ -1050,7 +1142,7 @@ try {
     } catch {
         throw "Exam manifest.json is not valid UTF-8 JSON: $($_.Exception.Message)"
     }
-    $manifestValidation = Test-ExamManifest -Manifest $manifest -EntryKinds $pathKinds
+    $manifestValidation = Test-ExamManifest -Manifest $manifest -EntryKinds $pathKinds -ManifestByteLength $manifestBytes.Length
     $manifestId = $manifestValidation.Id
     if (-not [string]::IsNullOrWhiteSpace($PackageId)) {
         if ($PackageId -notmatch '^[A-Za-z0-9._-]{1,96}$' -or

@@ -7,6 +7,9 @@
 #include "nstu/exam_sync.hpp"
 
 #include <windows.h>
+#include <aclapi.h>
+#include <sddl.h>
+#include <wtsapi32.h>
 
 #if NSTU_HAS_WEBVIEW2
 #include <wrl.h>
@@ -727,7 +730,94 @@ int uri_hex_digit(unsigned char character) noexcept {
     return true;
 }
 
+bool programming_id(std::string_view text) {
+    const auto alphanumeric = [](unsigned char byte) {
+        return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9');
+    };
+    if (text.empty() || text.size() > exam::programming::kMaximumIdBytes ||
+        (!alphanumeric(static_cast<unsigned char>(text.front())) && text.front() != '_')) return false;
+    return std::all_of(text.begin(), text.end(), [&](unsigned char byte) {
+        return alphanumeric(byte) || byte == '_' || byte == '.' || byte == '-';
+    });
+}
+
+bool public_fields(const JsonValue& value, const std::set<std::string>& allowed) {
+    return value.kind == JsonValue::Kind::object && std::all_of(value.object.begin(), value.object.end(),
+        [&](const auto& item) { return allowed.contains(item.first); });
+}
+
+bool programming_text(const JsonValue& object, const char* field, std::size_t maximum,
+                      bool required = true, bool allow_empty = false) {
+    std::string text;
+    return string_member(object, field, text, required) && (!required || allow_empty || !text.empty()) &&
+        text.size() <= maximum && std::all_of(text.begin(), text.end(), [](unsigned char byte) {
+            return (byte >= 32u && byte != 127u) || byte == '\t' || byte == '\n' || byte == '\r';
+        });
+}
+
+const std::set<std::string> kProgrammingPackageFiles{
+    "manifest.json", "manifest.p7s", "exam/web/index.html", "exam/web/app.js", "exam/web/styles.css",
+    "exam/shared/programming.js", "exam/web/assets/nstu-brand.png"};
+
+bool programming_manifest_shape(const JsonValue& manifest) {
+    const std::set<std::string> fields{"id", "title", "subject", "candidate", "durationSeconds", "contentMode",
+        "programmingVersion", "sessionMode", "languages", "questions", "documents", "allowedOrigins"};
+    std::string id, mode, session;
+    std::uint64_t version = 0, duration = 0;
+    if (!public_fields(manifest, fields) || !string_member(manifest, "id", id) || !programming_id(id) ||
+        !programming_text(manifest, "title", 240) || !programming_text(manifest, "subject", 120, false, true) ||
+        !programming_text(manifest, "candidate", 160, false, true) ||
+        !string_member(manifest, "contentMode", mode) || mode != "computer_science" ||
+        !string_member(manifest, "sessionMode", session) || (session != "exam" && session != "contest" && session != "practice") ||
+        !uint64_member(manifest, "programmingVersion", version) || version != 1 ||
+        !uint64_member(manifest, "durationSeconds", duration) || duration < 60 || duration > 86400) return false;
+    for (const auto* field : {"documents", "allowedOrigins"}) {
+        const auto* value = member(manifest, field);
+        if (value && (value->kind != JsonValue::Kind::array || !value->array.empty())) return false;
+    }
+    const auto* languages = member(manifest, "languages");
+    if (!languages || languages->kind != JsonValue::Kind::array || languages->array.size() != 2 ||
+        languages->array[0].kind != JsonValue::Kind::string || languages->array[0].scalar != "cpp20" ||
+        languages->array[1].kind != JsonValue::Kind::string || languages->array[1].scalar != "python3") return false;
+    const auto* questions = member(manifest, "questions");
+    if (!questions || questions->kind != JsonValue::Kind::array || questions->array.empty() || questions->array.size() > 64) return false;
+    std::set<std::string> ids;
+    const std::set<std::string> problem_fields{"id", "type", "revision", "prompt", "instruction", "points", "inputDescription",
+        "outputDescription", "constraints", "explanation", "samples", "timeLimitMs", "memoryLimitMiB"};
+    for (const auto& question : questions->array) {
+        std::string problem_id, type;
+        std::uint64_t revision = 0, time = 0, memory = 0, points = 100;
+        if (!public_fields(question, problem_fields) || !string_member(question, "id", problem_id) ||
+            !programming_id(problem_id) || !ids.insert(problem_id).second ||
+            !string_member(question, "type", type) || type != "programming" ||
+            !uint64_member(question, "revision", revision) || revision == 0 || revision > UINT32_MAX ||
+            !programming_text(question, "prompt", 8000) || !uint64_member(question, "points", points, false) || points > 1000 ||
+            !uint64_member(question, "timeLimitMs", time) || time < 100 || time > 10000 ||
+            !uint64_member(question, "memoryLimitMiB", memory) || memory < 16 || memory > 512) return false;
+        for (const auto* field : {"instruction", "inputDescription", "outputDescription", "constraints", "explanation"}) {
+            if (!programming_text(question, field, 4000, false, true)) return false;
+        }
+        const auto* samples = member(question, "samples");
+        if (!samples || samples->kind != JsonValue::Kind::array || samples->array.empty() || samples->array.size() > 8) return false;
+        std::set<std::string> sample_ids;
+        for (const auto& sample : samples->array) {
+            std::string sample_id;
+            if (!public_fields(sample, {"id", "input", "output"}) || !string_member(sample, "id", sample_id) ||
+                !programming_id(sample_id) || !sample_ids.insert(sample_id).second ||
+                !programming_text(sample, "input", 4096, true, true) ||
+                !programming_text(sample, "output", 4096, true, true)) return false;
+        }
+    }
+    return true;
+}
+
 bool validate_manifest_shape(const JsonValue& manifest, std::string* error) {
+    std::string content_mode;
+    if (string_member(manifest, "contentMode", content_mode, false) && content_mode == "computer_science") {
+        if (programming_manifest_shape(manifest)) return true;
+        set_error(error, "CS manifest violates the public programming contract");
+        return false;
+    }
     std::string id;
     std::string title;
     std::uint64_t duration = 0;
@@ -846,6 +936,10 @@ bool collect_manifest_assets(const std::string& manifest_json,
     if (!parse_json_object(manifest_json, manifest, error) ||
         !validate_manifest_shape(manifest, error)) {
         return false;
+    }
+    std::string content_mode;
+    if (string_member(manifest, "contentMode", content_mode, false) && content_mode == "computer_science") {
+        assets.insert("exam/shared/programming.js");
     }
     const auto* questions = member(manifest, "questions");
     if (questions == nullptr || questions->kind != JsonValue::Kind::array) {
@@ -1258,6 +1352,358 @@ std::string ack_status_name(exam::AnswerAckStatus status) {
 
 } // namespace
 
+bool validate_programming_manifest(std::string_view manifest_json, std::string* error) {
+    JsonValue manifest;
+    if (manifest_json.size() > 128u * 1024u || !parse_json_object(manifest_json, manifest, error) ||
+        !programming_manifest_shape(manifest)) {
+        set_error(error, "CS manifest violates the public programming contract");
+        return false;
+    }
+    return true;
+}
+
+bool validate_programming_policy_probe_json(std::string_view json, std::uint32_t exit_code) {
+    JsonValue reply;
+    std::uint64_t version = 0;
+    std::string status, code;
+    return exit_code == 0 && json.size() <= 4096 && parse_json_object(json, reply, nullptr) &&
+        public_fields(reply, {"version", "status", "code"}) && reply.object.size() == 3 &&
+        uint64_member(reply, "version", version) && version == 1 &&
+        string_member(reply, "status", status) && status == "verified" &&
+        string_member(reply, "code", code) && code == "policy_verified";
+}
+
+namespace {
+
+struct PolicyHandle {
+    HANDLE value = nullptr;
+    explicit PolicyHandle(HANDLE handle = nullptr) : value(handle) {}
+    ~PolicyHandle() { if (value && value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+    PolicyHandle(const PolicyHandle&) = delete;
+    PolicyHandle& operator=(const PolicyHandle&) = delete;
+    bool valid() const noexcept { return value && value != INVALID_HANDLE_VALUE; }
+};
+
+struct PolicyAttributes {
+    LPPROC_THREAD_ATTRIBUTE_LIST value = nullptr;
+    ~PolicyAttributes() { if (value) DeleteProcThreadAttributeList(value); }
+};
+
+bool policy_trusted_sid(PSID sid) {
+    if (!sid || !IsValidSid(sid)) return false;
+    if (IsWellKnownSid(sid, WinLocalSystemSid) || IsWellKnownSid(sid, WinBuiltinAdministratorsSid)) return true;
+    PSID installer = nullptr;
+    const bool converted = ConvertStringSidToSidW(
+        L"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464", &installer) != FALSE;
+    const bool trusted = converted && EqualSid(sid, installer);
+    if (installer) LocalFree(installer);
+    return trusted;
+}
+
+bool policy_protected_handle(HANDLE handle, bool ancestor) {
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                        &owner, nullptr, &dacl, nullptr, &descriptor) != ERROR_SUCCESS) return false;
+    bool valid = policy_trusted_sid(owner) && dacl != nullptr;
+    const DWORD write_mask = WRITE_DAC | WRITE_OWNER | DELETE | FILE_DELETE_CHILD | FILE_WRITE_DATA |
+        FILE_WRITE_EA | FILE_WRITE_ATTRIBUTES | GENERIC_ALL | GENERIC_WRITE |
+        (ancestor ? 0 : FILE_APPEND_DATA);
+    for (DWORD index = 0; valid && index < dacl->AceCount; ++index) {
+        void* raw = nullptr;
+        if (!GetAce(dacl, index, &raw)) { valid = false; break; }
+        const auto* header = static_cast<const ACE_HEADER*>(raw);
+        if (header->AceFlags & INHERIT_ONLY_ACE) continue;
+        if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+            const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw);
+            if ((ace->Mask & write_mask) && !policy_trusted_sid(const_cast<DWORD*>(&ace->SidStart))) valid = false;
+        } else if (header->AceType != ACCESS_DENIED_ACE_TYPE) {
+            valid = false;
+        }
+    }
+    LocalFree(descriptor);
+    return valid;
+}
+
+bool policy_protected_path(const std::filesystem::path& path, std::string_view expected_hash = {}) {
+    if (!path.is_absolute() || path.native().find_first_of(L"*?\"") != std::wstring::npos) return false;
+    auto current = path.root_path();
+    PolicyHandle root(CreateFileW(current.c_str(), READ_CONTROL,
+        FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    BY_HANDLE_FILE_INFORMATION root_info{};
+    if (!root.valid() || !GetFileInformationByHandle(root.value, &root_info) ||
+        (root_info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !policy_protected_handle(root.value, true)) return false;
+    for (const auto& component : path.relative_path()) {
+        current /= component;
+        const bool leaf = current == path;
+        PolicyHandle handle(CreateFileW(current.c_str(), GENERIC_READ | READ_CONTROL,
+            FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!handle.valid() || !GetFileInformationByHandle(handle.value, &info) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) || !policy_protected_handle(handle.value, !leaf)) return false;
+        if (leaf && !expected_hash.empty()) {
+            if ((info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || info.nFileSizeHigh != 0 ||
+                info.nFileSizeLow == 0 || info.nFileSizeLow > 256u * 1024u) return false;
+            std::vector<std::byte> bytes(info.nFileSizeLow);
+            DWORD read = 0;
+            if (!ReadFile(handle.value, bytes.data(), info.nFileSizeLow, &read, nullptr) || read != info.nFileSizeLow) return false;
+            const auto digest = security::sha256(bytes);
+            if (!digest || hex_string(*digest) != expected_hash) return false;
+        }
+    }
+    return true;
+}
+
+bool policy_student_account(std::uint32_t session_id) {
+    HANDLE raw = nullptr;
+    if (!WTSQueryUserToken(session_id, &raw)) return false;
+    PolicyHandle token(raw);
+    DWORD size = 0;
+    (void)GetTokenInformation(token.value, TokenUser, nullptr, 0, &size);
+    if (size == 0 || size > 4096) return false;
+    std::vector<std::byte> bytes(size);
+    if (!GetTokenInformation(token.value, TokenUser, bytes.data(), size, &size)) return false;
+    const auto* user = reinterpret_cast<const TOKEN_USER*>(bytes.data());
+    wchar_t configured_sid[184]{};
+    DWORD sid_bytes = sizeof(configured_sid);
+    HKEY configuration = nullptr;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NSTU\\ComputerScience", 0,
+                     KEY_QUERY_VALUE | KEY_WOW64_64KEY, &configuration) != ERROR_SUCCESS) return false;
+    const auto read = RegGetValueW(configuration, nullptr, L"StudentSid", RRF_RT_REG_SZ,
+                                 nullptr, configured_sid, &sid_bytes);
+    RegCloseKey(configuration);
+    if (read != ERROR_SUCCESS) return false;
+    PSID configured = nullptr;
+    const bool converted = ConvertStringSidToSidW(configured_sid, &configured) != FALSE;
+    const bool matches = converted && EqualSid(user->User.Sid, configured);
+    if (configured) LocalFree(configured);
+    TOKEN_ELEVATION elevation{};
+    TOKEN_ELEVATION_TYPE type{};
+    return matches && GetTokenInformation(token.value, TokenElevation, &elevation, sizeof(elevation), &size) &&
+        !elevation.TokenIsElevated && GetTokenInformation(token.value, TokenElevationType, &type, sizeof(type), &size) &&
+        type == TokenElevationTypeDefault && !policy_trusted_sid(user->User.Sid);
+}
+
+bool run_policy_probe(const std::filesystem::path& executable, const std::filesystem::path& script,
+                      const std::filesystem::path& windows) {
+    SECURITY_ATTRIBUTES security_attributes{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE reader = nullptr, writer = nullptr;
+    if (!CreatePipe(&reader, &writer, &security_attributes, 4096)) return false;
+    PolicyHandle output(reader), input(writer);
+    PolicyHandle null_input(CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      &security_attributes, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+    PolicyHandle job(CreateJobObjectW(nullptr, nullptr));
+    if (!null_input.valid() || !job.valid() || !SetHandleInformation(output.value, HANDLE_FLAG_INHERIT, 0)) return false;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    if (!SetInformationJobObject(job.value, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) return false;
+    SIZE_T attribute_bytes = 0;
+    (void)InitializeProcThreadAttributeList(nullptr, 1, 0, &attribute_bytes);
+    if (attribute_bytes == 0) return false;
+    std::vector<std::byte> attribute_storage(attribute_bytes);
+    PolicyAttributes attributes;
+    const auto attribute_list = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attribute_storage.data());
+    if (!InitializeProcThreadAttributeList(attribute_list, 1, 0, &attribute_bytes)) return false;
+    attributes.value = attribute_list;
+    std::array<HANDLE, 2> inherited{input.value, null_input.value};
+    const bool attributes_set = UpdateProcThreadAttribute(attributes.value, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        inherited.data(), sizeof(inherited), nullptr, nullptr) != FALSE;
+    STARTUPINFOEXW startup{};
+    startup.StartupInfo.cb = sizeof(startup);
+    startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    startup.StartupInfo.wShowWindow = SW_HIDE;
+    startup.StartupInfo.hStdOutput = input.value;
+    startup.StartupInfo.hStdError = input.value;
+    startup.StartupInfo.hStdInput = null_input.value;
+    startup.lpAttributeList = attributes.value;
+    std::wstring command = L"\"" + executable.wstring() + L"\" -NoLogo -NoProfile -NonInteractive -File \"" + script.wstring() + L"\"";
+    std::wstring environment = L"SystemRoot=" + windows.wstring();
+    environment.push_back(L'\0');
+    environment += L"PSModulePath=" + (executable.parent_path() / L"Modules").wstring();
+    environment.push_back(L'\0');
+    environment.push_back(L'\0');
+    PROCESS_INFORMATION process{};
+    const bool created = attributes_set && CreateProcessW(executable.c_str(), command.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+        environment.data(), executable.parent_path().c_str(), &startup.StartupInfo, &process);
+    if (!created) return false;
+    PolicyHandle child(process.hProcess), thread(process.hThread);
+    CloseHandle(input.value);
+    input.value = nullptr;
+    bool valid = AssignProcessToJobObject(job.value, child.value) && ResumeThread(thread.value) != static_cast<DWORD>(-1);
+    std::string reply;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    DWORD wait = WAIT_TIMEOUT;
+    do {
+        DWORD available = 0;
+        if (!PeekNamedPipe(output.value, nullptr, 0, nullptr, &available, nullptr)) {
+            if (GetLastError() != ERROR_BROKEN_PIPE) valid = false;
+        } else if (available) {
+            if (available > 4096 - reply.size()) { valid = false; break; }
+            std::array<char, 4096> buffer{};
+            DWORD read = 0;
+            if (!ReadFile(output.value, buffer.data(), available, &read, nullptr)) { valid = false; break; }
+            reply.append(buffer.data(), read);
+        }
+        wait = WaitForSingleObject(child.value, 20);
+        if (wait == WAIT_OBJECT_0) {
+            DWORD remaining = 0;
+            if (PeekNamedPipe(output.value, nullptr, 0, nullptr, &remaining, nullptr) && remaining) continue;
+            break;
+        }
+        if (wait != WAIT_TIMEOUT || std::chrono::steady_clock::now() >= deadline) { valid = false; break; }
+    } while (valid);
+    DWORD exit_code = 1;
+    if (!valid || wait != WAIT_OBJECT_0) {
+        (void)TerminateJobObject(job.value, 1);
+        (void)TerminateProcess(child.value, 1);
+        (void)WaitForSingleObject(child.value, 5000);
+        return false;
+    }
+    return GetExitCodeProcess(child.value, &exit_code) && validate_programming_policy_probe_json(reply, exit_code);
+}
+
+} // namespace
+
+bool probe_programming_workstation_policy(std::uint32_t student_session_id) {
+    try {
+        BOOL wow64 = FALSE;
+        if (!IsWow64Process(GetCurrentProcess(), &wow64) || wow64) return false;
+        HANDLE raw = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw)) return false;
+        PolicyHandle token(raw);
+        std::array<std::byte, 256> identity{};
+        DWORD size = 0;
+        if (!GetTokenInformation(token.value, TokenUser, identity.data(), static_cast<DWORD>(identity.size()), &size) ||
+            !IsWellKnownSid(reinterpret_cast<const TOKEN_USER*>(identity.data())->User.Sid, WinLocalSystemSid) ||
+            !policy_student_account(student_session_id)) return false;
+        std::array<wchar_t, 32768> module{}, system{}, windows{};
+        const auto module_length = GetModuleFileNameW(nullptr, module.data(), static_cast<DWORD>(module.size()));
+        const auto system_length = GetSystemDirectoryW(system.data(), static_cast<UINT>(system.size()));
+        const auto windows_length = GetWindowsDirectoryW(windows.data(), static_cast<UINT>(windows.size()));
+        if (module_length == 0 || module_length >= module.size() || system_length == 0 || system_length >= system.size() ||
+            windows_length == 0 || windows_length >= windows.size()) return false;
+        const auto root = std::filesystem::path(module.data()).parent_path() / L"cs-policy";
+        const auto script = root / L"verify-cs-policy.ps1";
+        const auto helper = root / L"cs-policy-functions.ps1";
+        const auto executable = std::filesystem::path(system.data()) / L"WindowsPowerShell/v1.0/powershell.exe";
+        if (!policy_protected_path(script, "1816f7fe314ac06be4986b8a3ba7b5c8397b6309a06b7b5ef77e7224f4e8a3d8") ||
+            !policy_protected_path(helper, "562d35edf0ba67d36227062bc7c851f09cca889f71406f2a7dda54fcaadce35c") ||
+            !policy_protected_path(executable)) return false;
+        return run_policy_probe(executable, script, std::filesystem::path(windows.data()));
+    } catch (...) { return false; }
+}
+
+bool track_browser_programming_request(
+    std::map<std::string, exam::programming::Request>& pending,
+    const exam::programming::Request& request) {
+    using exam::programming::Operation;
+    try {
+        const auto wire = exam::programming::encode_request(request);
+        if (wire.empty()) return false;
+        const auto existing = pending.find(request.request_id);
+        if (existing != pending.end()) return exam::programming::encode_request(existing->second) == wire;
+        const auto context = exam::encode_state_request(request.context);
+        const auto previous = std::find_if(pending.begin(), pending.end(), [&](const auto& entry) {
+            const auto& saved = entry.second;
+            return request.operation == Operation::draft && saved.operation == Operation::draft &&
+                exam::encode_state_request(saved.context) == context && saved.problem_id == request.problem_id &&
+                saved.problem_revision == request.problem_revision && saved.language == request.language;
+        });
+        if (previous != pending.end() && (request.draft_revision < previous->second.draft_revision ||
+            (request.draft_revision == previous->second.draft_revision && request.source != previous->second.source))) return false;
+        if (previous == pending.end() && pending.size() >= 128) return false;
+        pending.emplace(request.request_id, request);
+        if (previous != pending.end()) pending.erase(previous);
+        return true;
+    } catch (const std::exception&) { return false; }
+}
+
+std::optional<exam::programming::Request> parse_browser_programming_request(
+    std::string_view json, std::string_view manifest_json, const exam::StateRequest& trusted_context, std::string* error) {
+    using exam::programming::Operation;
+    JsonValue root, manifest;
+    if (!parse_json_object(json, root, error) || !validate_programming_manifest(manifest_json, error) ||
+        !parse_json_object(manifest_json, manifest, error)) return std::nullopt;
+    std::string type, operation;
+    exam::programming::Request request;
+    request.context = trusted_context;
+    if (!string_member(root, "type", type) || type != "exam_programming_request" ||
+        !string_member(root, "operation", operation) || !string_member(root, "requestId", request.request_id)) return std::nullopt;
+    bool known = false;
+    for (const auto op : {Operation::draft, Operation::submit, Operation::run, Operation::cancel,
+                          Operation::recover, Operation::finalize, Operation::ready}) {
+        if (exam::programming::operation_name(op) == operation) { request.operation = op; known = true; break; }
+    }
+    if (!known) return std::nullopt;
+    const std::set<std::string> identity_fields{"packageId", "packageDigestHex", "clientIdHex", "sessionIdHex", "candidateId"};
+    auto allowed = identity_fields;
+    allowed.insert({"type", "context", "programmingVersion", "operation", "requestId"});
+    std::uint64_t version = 1;
+    if (!uint64_member(root, "programmingVersion", version, false) || version != 1) return std::nullopt;
+    const auto check_context = [&](const JsonValue& value) {
+        std::string package, candidate, digest, client, session;
+        exam::StateRequest claimed;
+        return string_member(value, "packageId", package) && string_member(value, "candidateId", candidate) &&
+            package == trusted_context.package_id && candidate == trusted_context.candidate_id &&
+            string_member(value, "packageDigestHex", digest) && parse_hex(digest, claimed.package_digest) &&
+            claimed.package_digest == trusted_context.package_digest &&
+            string_member(value, "clientIdHex", client) && parse_hex(client, claimed.client_id) && claimed.client_id == trusted_context.client_id &&
+            string_member(value, "sessionIdHex", session) && parse_hex(session, claimed.session_id) && claimed.session_id == trusted_context.session_id;
+    };
+    const auto* nested = member(root, "context");
+    const bool flat = std::any_of(identity_fields.begin(), identity_fields.end(), [&](const auto& field) { return member(root, field) != nullptr; });
+    if ((!nested && !flat) || (nested && (!public_fields(*nested, identity_fields) || !check_context(*nested))) ||
+        (flat && !check_context(root))) return std::nullopt;
+    if (request.operation != Operation::ready && request.operation != Operation::finalize) {
+        allowed.insert({"problemId", "problemRevision", "language"});
+        std::uint64_t revision = 0;
+        if (!string_member(root, "problemId", request.problem_id) || !string_member(root, "language", request.language) ||
+            !uint64_member(root, "problemRevision", revision) || revision == 0 || revision > UINT32_MAX) return std::nullopt;
+        request.problem_revision = static_cast<std::uint32_t>(revision);
+        const auto* questions = member(manifest, "questions");
+        const auto question = std::find_if(questions->array.begin(), questions->array.end(), [&](const auto& value) {
+            std::string id;
+            std::uint64_t expected_revision = 0;
+            return string_member(value, "id", id) && id == request.problem_id &&
+                uint64_member(value, "revision", expected_revision) && expected_revision == revision;
+        });
+        if (question == questions->array.end()) return std::nullopt;
+        if (request.operation == Operation::run) {
+            allowed.insert("sampleId");
+            if (!string_member(root, "sampleId", request.sample_id)) return std::nullopt;
+            const auto* samples = member(*question, "samples");
+            if (std::none_of(samples->array.begin(), samples->array.end(), [&](const auto& sample) {
+                    std::string id;
+                    return string_member(sample, "id", id) && id == request.sample_id;
+                })) return std::nullopt;
+        }
+    }
+    if (request.operation == Operation::draft || request.operation == Operation::submit || request.operation == Operation::run) {
+        allowed.insert({"source", "draftRevision"});
+        if (!string_member(root, "source", request.source) || !uint64_member(root, "draftRevision", request.draft_revision)) return std::nullopt;
+    }
+    if (request.operation == Operation::cancel) {
+        allowed.insert("targetRunId");
+        if (!string_member(root, "targetRunId", request.target_run_id)) return std::nullopt;
+    }
+    if (request.operation == Operation::finalize) {
+        allowed.insert({"receiptIds", "noSourceProblemIds"});
+        for (const auto& field : {std::pair{"receiptIds", &request.receipt_ids}, std::pair{"noSourceProblemIds", &request.no_source_problem_ids}}) {
+            const auto* array = member(root, field.first);
+            if (!array || array->kind != JsonValue::Kind::array || array->array.size() > exam::programming::kMaximumInventoryEntries) return std::nullopt;
+            for (const auto& entry : array->array) {
+                if (entry.kind != JsonValue::Kind::string) return std::nullopt;
+                field.second->push_back(entry.scalar);
+            }
+        }
+    }
+    if (!public_fields(root, allowed) || !exam::programming::validate_request(request)) return std::nullopt;
+    return request;
+}
+
 bool validate_exam_user_data_path(
     const std::filesystem::path& allowed_user_data_root,
     const std::filesystem::path& user_data_root,
@@ -1380,6 +1826,7 @@ bool extract_exam_lockdown_policy(
     std::string* error) {
     out.allowed_origins.clear();
     out.duration_seconds = 0;
+    out.programming_mode.clear();
 
     JsonValue manifest;
     if (!parse_json_object(manifest_json, manifest, error)) {
@@ -1392,6 +1839,11 @@ bool extract_exam_lockdown_policy(
         return false;
     }
     out.duration_seconds = static_cast<std::uint32_t>(duration);
+    std::string content_mode;
+    if (string_member(manifest, "contentMode", content_mode) && content_mode == "computer_science") {
+        if (!validate_programming_manifest(manifest_json, error) ||
+            !string_member(manifest, "sessionMode", out.programming_mode)) return false;
+    }
 
     const auto* allowed_origins = member(manifest, "allowedOrigins");
     if (allowed_origins == nullptr) {
@@ -1476,6 +1928,11 @@ bool inspect_exam_package(const std::filesystem::path& package_root,
     }
     report.manifest_json.assign(reinterpret_cast<const char*>(manifest_data.data()),
                                 manifest_data.size());
+    JsonValue package_manifest;
+    std::string content_mode;
+    const bool programming_package = parse_json_object(report.manifest_json, package_manifest, error) &&
+        string_member(package_manifest, "contentMode", content_mode, false) && content_mode == "computer_science";
+    if (programming_package && !validate_programming_manifest(report.manifest_json, error)) return false;
     if (!validate_manifest_asset_files(root, report.manifest_json, error)) {
         return false;
     }
@@ -1504,6 +1961,10 @@ bool inspect_exam_package(const std::filesystem::path& package_root,
         if (fs_error || relative.empty() ||
             relative.generic_string().find("..") == 0) {
             set_error(error, "exam package contains an invalid relative path");
+            return false;
+        }
+        if (programming_package && !kProgrammingPackageFiles.contains(relative.generic_string())) {
+            set_error(error, "CS package contains an unknown or private file");
             return false;
         }
         const auto size = iterator->file_size(fs_error);
@@ -1585,6 +2046,8 @@ struct ExamHost::Impl {
     std::set<std::string> allowed_package_assets;
     std::set<std::string> valid_question_ids;
     bool ready_reported = false;
+    bool programming_package = false;
+    std::map<std::string, exam::programming::Request> programming_pending;
     // Incremented whenever an exam host operation is stopped/restarted.  The
     // WebView2 API completes asynchronously, so callbacks from an older
     // operation must never mutate a newly-started host.
@@ -2143,7 +2606,20 @@ HRESULT on_web_message(ExamHost::Impl& host,
     }
     std::string type;
     if (!string_member(root, "type", type)) return S_OK;
-    if (type == "exam_answer_event") {
+    if (type == "exam_programming_request" && host.programming_package) {
+        exam::StateRequest trusted{host.context.package_id, host.context.package_digest, host.context.client_id,
+                                  host.context.session_id, host.context.candidate_id};
+        const auto request = parse_browser_programming_request(json, host.package.manifest_json, trusted, &parse_error);
+        if (!request || !host.callbacks.send_to_service) {
+            notify_status(host, "Programming request rejected by the native host.");
+            return S_OK;
+        }
+        if (!track_browser_programming_request(host.programming_pending, *request)) {
+            (void)post_webview_json(host, exam::programming::unavailable_response_json(*request, "native_queue_unavailable"));
+            return S_OK;
+        }
+        host.callbacks.send_to_service({AgentMessageType::exam_programming_request, exam::programming::encode_request(*request)});
+    } else if (type == "exam_answer_event" && !host.programming_package) {
         exam::AnswerEvent event;
         if (!parse_answer_event(root, host.context, event, &parse_error)) {
             notify_status(host, "Exam answer event was rejected: " + parse_error);
@@ -2158,7 +2634,7 @@ HRESULT on_web_message(ExamHost::Impl& host,
             host.callbacks.send_to_service(
                 {AgentMessageType::exam_answer_event, payload});
         }
-    } else if (type == "exam_state_request") {
+    } else if (type == "exam_state_request" && !host.programming_package) {
         exam::StateRequest request;
         if (!parse_state_request(root, host.context, request, &parse_error)) {
             notify_status(host, "Exam state request was rejected: " + parse_error);
@@ -2645,6 +3121,8 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
         return false;
     }
     impl_->valid_question_ids.clear();
+    impl_->programming_package = validate_programming_manifest(impl_->package.manifest_json);
+    impl_->programming_pending.clear();
     collect_manifest_question_ids(impl_->package.manifest_json, impl_->valid_question_ids);
     exam::StateRequest telemetry_context;
     telemetry_context.package_id = impl_->context.package_id;
@@ -2852,6 +3330,14 @@ void ExamHost::drain_bridge() {
                 response->candidate_id == impl_->context.candidate_id) {
                 post_webview_json(*impl_, make_state_json(*response));
             }
+        } else if (message->type == AgentMessageType::exam_programming_response && impl_->programming_package) {
+            const std::string json(reinterpret_cast<const char*>(message->payload.data()), message->payload.size());
+            const auto response = exam::programming::parse_response_json(json);
+            if (!response) continue;
+            const auto pending = impl_->programming_pending.find(response->request_id);
+            if (pending == impl_->programming_pending.end()) continue;
+            const auto validated = exam::programming::parse_response_json(json, &pending->second);
+            if (validated && post_webview_json(*impl_, validated->json)) impl_->programming_pending.erase(pending);
         } else if (message->type == AgentMessageType::exam_begin) {
             const auto begin = exam::decode_exam_begin_command(message->payload);
             if (begin.has_value() && same_context(*begin, impl_->context)) {

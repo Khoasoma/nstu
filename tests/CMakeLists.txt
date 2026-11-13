@@ -56,6 +56,19 @@ nstu_enable_warnings(nstu_exam_control_tests)
 nstu_enable_test_assertions(nstu_exam_control_tests)
 add_test(NAME nstu.exam_control COMMAND nstu_exam_control_tests)
 
+add_executable(nstu_programming_protocol_tests programming_protocol_tests.cpp)
+target_link_libraries(nstu_programming_protocol_tests PRIVATE nstu_common)
+nstu_enable_warnings(nstu_programming_protocol_tests)
+nstu_enable_test_assertions(nstu_programming_protocol_tests)
+add_test(NAME nstu.programming_protocol COMMAND nstu_programming_protocol_tests)
+
+add_executable(nstu_exam_operator_action_tests exam_operator_action_tests.cpp)
+target_include_directories(nstu_exam_operator_action_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../server/app")
+target_compile_features(nstu_exam_operator_action_tests PRIVATE cxx_std_20)
+nstu_enable_warnings(nstu_exam_operator_action_tests)
+nstu_enable_test_assertions(nstu_exam_operator_action_tests)
+add_test(NAME nstu.exam_operator_action COMMAND nstu_exam_operator_action_tests)
+
 add_executable(nstu_exam_digest_tests exam_digest_tests.cpp)
 target_include_directories(nstu_exam_digest_tests PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../common/include")
@@ -220,6 +233,12 @@ nstu_enable_test_assertions(nstu_iocp_dispatcher_tests)
 add_test(NAME nstu.iocp_dispatcher COMMAND nstu_iocp_dispatcher_tests)
 
 if(TARGET nstu_server_state)
+    add_executable(nstu_programming_broker_tests programming_broker_tests.cpp)
+    target_link_libraries(nstu_programming_broker_tests PRIVATE nstu_server_state)
+    nstu_enable_warnings(nstu_programming_broker_tests)
+    nstu_enable_test_assertions(nstu_programming_broker_tests)
+    add_test(NAME nstu.programming_broker COMMAND nstu_programming_broker_tests)
+
     add_executable(nstu_remote_session_fake_child
         remote_session_fake_child.cpp
         remote_session_fake_child.rc)
@@ -348,6 +367,19 @@ if(TARGET nstu_server_state)
     nstu_enable_warnings(nstu_exam_grader_tests)
     nstu_enable_test_assertions(nstu_exam_grader_tests)
     add_test(NAME nstu.exam_grader COMMAND nstu_exam_grader_tests)
+endif()
+
+if(TARGET nstu_client_platform)
+    add_executable(nstu_programming_outbox_tests programming_outbox_tests.cpp)
+    target_link_libraries(nstu_programming_outbox_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_programming_outbox_tests)
+    nstu_enable_test_assertions(nstu_programming_outbox_tests)
+    add_test(NAME nstu.programming_outbox COMMAND nstu_programming_outbox_tests)
+    add_executable(nstu_programming_host_tests programming_host_tests.cpp)
+    target_link_libraries(nstu_programming_host_tests PRIVATE nstu_client_platform)
+    nstu_enable_warnings(nstu_programming_host_tests)
+    nstu_enable_test_assertions(nstu_programming_host_tests)
+    add_test(NAME nstu.programming_host COMMAND nstu_programming_host_tests)
 endif()
 
 if(TARGET nstu_client_platform)
