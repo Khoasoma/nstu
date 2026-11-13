@@ -54,9 +54,9 @@ async function finalizeOwnedFixture(fixture, ledger, primary, prefix = 'nstu-own
   const leaf = relative(resolve(tmpdir()), absolute);
   assert.ok(leaf.startsWith(prefix) && !leaf.includes(sep) && !leaf.includes('/') && !leaf.includes('\\'));
   const preservation = { fixture: absolute, ledger: ledger.snapshot(), primary: primary ? { message: primary.message, stack: primary.stack } : null };
-  if (!ledger.mayDelete()) {
-    await writeFile(join(absolute, 'preservation-receipt.json'), JSON.stringify(preservation, null, 2) + '\n');
+  if (primary || !ledger.mayDelete()) {
     console.error('PRESERVED OWNED FIXTURE: ' + absolute);
+    await writeFile(join(absolute, 'preservation-receipt.json'), JSON.stringify(preservation, null, 2) + '\n');
     return { ...preservation, deletionAttempted: false };
   }
   await rm(absolute, { recursive: true, force: true });

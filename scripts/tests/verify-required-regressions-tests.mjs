@@ -132,7 +132,29 @@ async function invoke(command, args, env = process.env, options = {}) {
     lastResult = result;
     console.log('GATE02_INVOCATION ' + JSON.stringify({ id: entry.id, label: entry.label, state: entry.state, result: entry.result,
       ...(gitScoped ? { fixtureGitIsolation: { cwd, markerSha256: hash(markerBytes), relocationEnvironmentRemovedOrBound: true, privateGlobalConfig: emptyGitConfig } } : {}) }));
-    console.log('GATE02_OUTPUT ' + JSON.stringify({ invocationId: entry.id, stdoutBase64: result.output.stdout.toString('base64'), stderrBase64: result.output.stderr.toString('base64') }));
+    const failedOwner = entry.label === 'copied current55 owner suite retaining original49' && result.execution.effectiveExitCode !== 0;
+    if (failedOwner) {
+      let lastCase = null;
+      try {
+        const row = JSON.parse(result.output.stderr.toString('utf8').split(/\r?\n/).filter(line => line.startsWith('{"label":')).at(-1));
+        const cause = row.execution?.primaryErrors?.[0]?.message;
+        lastCase = { label: typeof row.label === 'string' ? row.label.slice(0, 160) : null,
+          executionKind: typeof row.execution?.kind === 'string' ? row.execution.kind.slice(0, 64) : null,
+          primaryError: typeof cause === 'string' ? cause.slice(0, 256) : null };
+      } catch { /* Stderr is opaque diagnostic data; malformed rows cannot change acceptance. */ }
+      console.error('GATE02_OWNER_FAILURE ' + JSON.stringify({ invocationId: entry.id, executionKind: result.execution.kind,
+        rawWorkerExitDWORD: result.execution.rawWorkerExitDWORD, cleanupConfirmed: result.cleanup.confirmed, lastCase,
+        stderrTail: result.output.stderr.subarray(-768).toString('utf8') }));
+    }
+    if (failedOwner && result.output.stdout.length === 0) {
+      await assertOwnedLeaf();
+      entry.outputFiles = { stdoutPath: join(root, 'owner-failure-' + entry.id + '.stdout.bin'),
+        stderrPath: join(root, 'owner-failure-' + entry.id + '.stderr.bin') };
+      await writeFile(entry.outputFiles.stdoutPath, result.output.stdout, { flag: 'wx' });
+      await writeFile(entry.outputFiles.stderrPath, result.output.stderr, { flag: 'wx' });
+      console.log('GATE02_OUTPUT_FILES ' + JSON.stringify({ invocationId: entry.id, ...entry.outputFiles,
+        stdoutSha256: hash(result.output.stdout), stderrSha256: hash(result.output.stderr) }));
+    } else console.log('GATE02_OUTPUT ' + JSON.stringify({ invocationId: entry.id, stdoutBase64: result.output.stdout.toString('base64'), stderrBase64: result.output.stderr.toString('base64') }));
     await checkRuntime();
     return result;
   } catch (error) {
@@ -329,7 +351,76 @@ try {
   assert.equal(hash(Buffer.from(JSON.stringify(faultRows.slice(0, 49).map(row => row.label)))), original49LabelsSHA256);
   assert.deepEqual(faultRows.slice(49).map(row => row.label), livenessLabels);
   assert.deepEqual(faultDiagnosticRows.map(row => row.label), faultRows.map(row => row.label));
-  pass('actual copied owner-suite assertion fails before outer positives', { faultCohort: faultCohort.cohort, faultNestedInvocations: nested });
+  const preservedFaultFixture = faultLines.find(line => line.startsWith('Owned entrypoint fixture: '))?.slice('Owned entrypoint fixture: '.length);
+  assert.ok(preservedFaultFixture, 'Failed entrypoint must identify its actual fixture');
+  assert.ok(fault.output.stderr.toString().split(/\r?\n/).includes('PRESERVED OWNED FIXTURE: ' + preservedFaultFixture),
+    'Primary entrypoint failure must preserve its fixture even when every owned attempt is confirmed');
+  assert.equal(await realpath(preservedFaultFixture), resolve(preservedFaultFixture));
+  const preservedFaultLeaf = relative(tempBase, preservedFaultFixture);
+  assert.ok(preservedFaultLeaf.startsWith('nstu-gate01-') && !preservedFaultLeaf.includes(sep));
+  assert.equal(hash(await readFile(join(preservedFaultFixture, '.fixture-owner.json'))), nested[0].fixtureGitIsolation.markerSha256);
+  const faultReceipt = JSON.parse(await readFile(join(preservedFaultFixture, 'preservation-receipt.json')));
+  assert.equal(faultReceipt.root, preservedFaultFixture);
+  assert.ok(faultReceipt.primary?.message && faultReceipt.primary.stack, 'Primary entrypoint error must remain in the receipt');
+  assert.equal(faultReceipt.attempts.length, 3);
+  assert.ok(faultReceipt.attempts.every(entry => entry.state === 'confirmed' && entry.result.cleanup.confirmed === true));
+  assert.deepEqual(faultReceipt.attempts.map(entry => entry.result), nested.map(entry => entry.result));
+  const preservedOwnerLines = faultStderr.toString().split(/\r?\n/).filter(line => line.startsWith('PRESERVED OWNED FIXTURE: '));
+  assert.equal(preservedOwnerLines.length, 1, 'Injected owner primary failure must preserve its own fixture');
+  const preservedOwnerFixture = preservedOwnerLines[0].slice('PRESERVED OWNED FIXTURE: '.length);
+  assert.equal(await realpath(preservedOwnerFixture), resolve(preservedOwnerFixture));
+  const preservedOwnerLeaf = relative(tempBase, preservedOwnerFixture);
+  assert.ok(preservedOwnerLeaf.startsWith('nstu-owned-') && !preservedOwnerLeaf.includes(sep));
+  const ownerFaultReceipt = JSON.parse(await readFile(join(preservedOwnerFixture, 'preservation-receipt.json')));
+  assert.equal(ownerFaultReceipt.fixture, preservedOwnerFixture);
+  assert.equal(ownerFaultReceipt.primary.message, 'GATE02 injected owner-suite assertion failure');
+  assert.match(ownerFaultReceipt.primary.stack, /GATE02 injected owner-suite assertion failure/);
+  assert.equal(ownerFaultReceipt.ledger.length, 55);
+  assert.ok(ownerFaultReceipt.ledger.every(entry => entry.state === 'confirmed' && entry.result.cleanup.confirmed === true));
+  const firstOwnerAssertion = '    assert.equal(owned.handleListCount, 3);';
+  assert.equal(originalFaultTest.split(firstOwnerAssertion).length, 2);
+  await writeFile(faultTest, originalFaultTest.replace(firstOwnerAssertion,
+    "    assert.fail('GATE02 injected early owner-suite assertion failure');\n" + firstOwnerAssertion));
+  const earlyFault = await invoke(process.execPath, [join(faultRoot, copiedSelfTest)], process.env,
+    { cwd: faultRoot, label: 'actual early-owner assertion preserves complete diagnostic bytes' });
+  nativeBoundary(earlyFault); assert.notEqual(earlyFault.execution.rawWorkerExitDWORD, 0); assert.equal(earlyFault.execution.effectiveExitCode, 1);
+  assert.doesNotMatch(outputText(earlyFault), /OWNED PROCESS TESTS: PASS|GATE ENTRYPOINT TESTS: PASS|LOCAL GATE: PASS|REQUIRED REGRESSIONS: PASS/);
+  const earlyLines = earlyFault.output.stdout.toString().split(/\r?\n/);
+  const earlyNested = earlyLines.filter(line => line.startsWith('GATE02_INVOCATION ')).map(line => JSON.parse(line.slice('GATE02_INVOCATION '.length)));
+  assert.equal(earlyNested.length, 3); assert.ok(earlyNested.every(entry => entry.state === 'confirmed' && entry.result.cleanup.confirmed === true));
+  const earlyStderr = earlyFault.output.stderr.toString();
+  const earlyDiagnosticLine = earlyStderr.split(/\r?\n/).find(line => line.startsWith('GATE02_OWNER_FAILURE '));
+  assert.ok(earlyDiagnosticLine, 'Failed owner must name its actual case and error before a missing stdout cohort masks it');
+  assert.ok(Buffer.byteLength(earlyDiagnosticLine) <= 8192, 'Owner failure console diagnostic must remain bounded');
+  assert.ok(earlyStderr.indexOf(earlyDiagnosticLine) < earlyStderr.indexOf('GATE02_PRIMARY_FAILURE '));
+  const earlyDiagnostic = JSON.parse(earlyDiagnosticLine.slice('GATE02_OWNER_FAILURE '.length));
+  assert.equal(earlyDiagnostic.invocationId, 3);
+  assert.equal(earlyDiagnostic.lastCase.label, 'native exit0 and explicit x64 whitelist');
+  assert.match(earlyDiagnostic.stderrTail, /GATE02 injected early owner-suite assertion failure/);
+  const earlyFixture = earlyLines.find(line => line.startsWith('Owned entrypoint fixture: '))?.slice('Owned entrypoint fixture: '.length);
+  assert.ok(earlyFixture); assert.equal(await realpath(earlyFixture), resolve(earlyFixture));
+  const earlyLeaf = relative(tempBase, earlyFixture);
+  assert.ok(earlyLeaf.startsWith('nstu-gate01-') && !earlyLeaf.includes(sep));
+  assert.equal(hash(await readFile(join(earlyFixture, '.fixture-owner.json'))), earlyNested[0].fixtureGitIsolation.markerSha256);
+  assert.ok(earlyStderr.split(/\r?\n/).includes('PRESERVED OWNED FIXTURE: ' + earlyFixture));
+  const earlyOutputLine = earlyLines.find(line => line.startsWith('GATE02_OUTPUT_FILES '));
+  assert.ok(earlyOutputLine, 'Early failed owner must preserve full stdout/stderr outside giant console lines');
+  const earlyOutput = JSON.parse(earlyOutputLine.slice('GATE02_OUTPUT_FILES '.length));
+  assert.equal(earlyOutput.invocationId, 3);
+  assert.equal(earlyOutput.stdoutPath, join(earlyFixture, 'owner-failure-3.stdout.bin'));
+  assert.equal(earlyOutput.stderrPath, join(earlyFixture, 'owner-failure-3.stderr.bin'));
+  const earlyStdoutBytes = await readFile(earlyOutput.stdoutPath), earlyStderrBytes = await readFile(earlyOutput.stderrPath);
+  assert.equal(earlyStdoutBytes.length, 0);
+  assert.equal(hash(earlyStdoutBytes), earlyOutput.stdoutSha256); assert.equal(hash(earlyStderrBytes), earlyOutput.stderrSha256);
+  assert.equal(hash(earlyStdoutBytes), earlyNested.at(-1).result.output.stdoutSha256);
+  assert.equal(hash(earlyStderrBytes), earlyNested.at(-1).result.output.stderrSha256);
+  assert.match(earlyStderrBytes.toString(), /GATE02 injected early owner-suite assertion failure/);
+  const earlyReceipt = JSON.parse(await readFile(join(earlyFixture, 'preservation-receipt.json')));
+  assert.equal(earlyReceipt.root, earlyFixture); assert.equal(earlyReceipt.attempts.length, 3);
+  assert.ok(earlyReceipt.attempts.every(entry => entry.state === 'confirmed' && entry.result.cleanup.confirmed === true));
+  assert.deepEqual(earlyReceipt.attempts.at(-1).outputFiles, { stdoutPath: earlyOutput.stdoutPath, stderrPath: earlyOutput.stderrPath });
+  pass('actual copied owner-suite assertion fails before outer positives', { faultCohort: faultCohort.cohort, faultNestedInvocations: nested,
+    earlyOwnerFailure: { diagnostic: earlyDiagnostic, outputFiles: earlyOutput, nestedInvocations: earlyNested } });
 
   const identity = copiedOwner.createRunIdentity();
   const actorPath = join(runtimeDirectory, 'owned-regression-process-tests.mjs'), actorHash = hash(await readFile(actorPath));
@@ -365,10 +456,10 @@ try {
 } finally {
   try {
     await assertOwnedLeaf();
-    if (attempts.some(entry => entry.state !== 'confirmed')) {
+    if (primaryFailure || attempts.some(entry => entry.state !== 'confirmed')) {
       const receipt = { root, attempts, mutations, primary: primaryFailure ? safeError(primaryFailure) : null };
-      await writeFile(join(root, 'preservation-receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
       console.error('PRESERVED OWNED FIXTURE: ' + root);
+      await writeFile(join(root, 'preservation-receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
       if (!primaryFailure) throw new Error('Unconfirmed owned launch requires fixture preservation');
     } else await rm(root, { recursive: true, force: true });
   } catch (error) {
