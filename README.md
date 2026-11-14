@@ -1,14 +1,31 @@
-# Project NSTU
+![Project nstu banner](docs/assets/banner.png)
+
+# Project nstu
+
+[![C++](https://img.shields.io/badge/C%2B%2B-20%2B-blue?logo=cplusplus&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Windows CI](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml)
+
+[![Contributors](https://img.shields.io/github/contributors/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/graphs/contributors)
+[![Commit activity](https://img.shields.io/github/commit-activity/m/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits/main)
+[![Last commit](https://img.shields.io/github/last-commit/Khoasoma/nstu/main)](https://github.com/Khoasoma/nstu/commits/main)
+[![Issues](https://img.shields.io/github/issues/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/issues)
 
 [English](README.md) | [Tiếng Việt](README.vi.md)
 
 **Bringing the examination lifecycle to computers.**
 
-Project NSTU is an open-source initiative to digitize the complete examination lifecycle: preparing assessments, organizing examinations, supervising candidates, collecting submissions, judging, reviewing decisions and publishing results.
+Project nstu is an open-source initiative to digitize the complete examination lifecycle: preparing assessments, organizing examinations, supervising candidates, collecting submissions, judging, reviewing decisions and publishing results.
 
 Classroom and computer-lab management provide supporting infrastructure for this goal. The current repository contains Windows classroom and assessment foundations; the complete examination workflow is still **In Progress**.
 
-## Why Project NSTU
+## Why Project nstu
+
+Project nstu began when its creator discovered compromised computers at their younger sibling's school. The machines had been hijacked for cryptocurrency mining and the exfiltration of school data. A review also found unlicensed computer-management software and other unlicensed applications. Whether those applications contained malicious code remains unconfirmed.
+
+For the creator, the incident showed how uncertain software provenance and licensing can undermine confidence in expanding computer labs or moving examinations onto computers. Vietnam's [May 2026 copyright-enforcement plan](https://xaydungchinhsach.chinhphu.vn/tang-cuong-kiem-tra-xu-ly-vi-pham-ban-quyen-119260512163548071.htm) includes inspections of computer-program copyright at businesses. In parallel, the Ministry of Education and Training's [announced examination roadmap](https://vqa.moet.gov.vn/vi/news/tin-tuc-su-kien/bcd-xay-dung-de-an-to-chuc-thi-tot-nghiep-thpt-tren-may-tinh-hop-phien-dau-tien-230.html) envisages computer-based graduation examinations at eligible sites from 2027.
+
+That experience motivated an openly licensed, inspectable foundation for computer-lab training and the complete examination lifecycle. The aim is a rigorous training environment and, after independent security, recovery, hardware and workflow qualification, a reliable platform for official examinations. Current builds remain **INDEV**.
 
 Teachers and examination organizers need a practical digital workflow connecting assessment content, people, rooms, candidate tools, submissions and result review.
 
@@ -78,8 +95,6 @@ Existing project credits include Lê Anh Tuấn, Bùi Hồ Hải Đăng and Nguy
 
 Sample data and simulated actions; these images are design previews.
 
-<img width="300" alt="Project NSTU banner" src="docs/assets/banner.png" />
-
 ![Classroom interface design in light appearance](docs/assets/classroom-design-light.png)
 
 ![Classroom interface design in dark appearance](docs/assets/classroom-design-dark.png)
@@ -88,4 +103,4 @@ Sample data and simulated actions; these images are design previews.
 
 ## License
 
-Project NSTU is released under the [MIT License](LICENSE). Component-specific licensing information is retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Project nstu is released under the [MIT License](LICENSE). Component-specific licensing information is retained in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

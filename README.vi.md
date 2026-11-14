@@ -1,14 +1,31 @@
-# Project NSTU
+![Banner Project nstu](docs/assets/banner.vi.png)
+
+# Project nstu
+
+[![C++](https://img.shields.io/badge/C%2B%2B-20%2B-blue?logo=cplusplus&logoColor=white)](https://en.wikipedia.org/wiki/C%2B%2B)
+[![Giấy phép MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Windows CI](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml/badge.svg?branch=main)](https://github.com/Khoasoma/nstu/actions/workflows/windows.yml)
+
+[![Người đóng góp](https://img.shields.io/github/contributors/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/graphs/contributors)
+[![Hoạt động commit](https://img.shields.io/github/commit-activity/m/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/commits/main)
+[![Commit gần nhất](https://img.shields.io/github/last-commit/Khoasoma/nstu/main)](https://github.com/Khoasoma/nstu/commits/main)
+[![Issues](https://img.shields.io/github/issues/Khoasoma/nstu)](https://github.com/Khoasoma/nstu/issues)
 
 [English](README.md) | [Tiếng Việt](README.vi.md)
 
 **Số hóa toàn bộ quy trình tổ chức kỳ thi.**
 
-Project NSTU là một dự án mã nguồn mở hướng tới số hóa toàn bộ vòng đời kỳ thi: soạn đề, tổ chức thi, giám sát thí sinh, thu bài, chấm thi, xét duyệt và công bố kết quả.
+Project nstu là một dự án mã nguồn mở hướng tới số hóa toàn bộ vòng đời kỳ thi: soạn đề, tổ chức thi, giám sát thí sinh, thu bài, chấm thi, xét duyệt và công bố kết quả.
 
 Quản lý lớp học và phòng máy là hạ tầng hỗ trợ mục tiêu này. Kho mã hiện có các nền tảng quản lý phòng máy và bài thi trên Windows; quy trình thi hoàn chỉnh vẫn **Đang phát triển**.
 
-## Vì sao cần Project NSTU
+## Vì sao cần Project nstu
+
+Project nstu bắt đầu từ trải nghiệm của người khởi tạo tại trường của em mình. Hệ thống máy tính đã bị xâm nhập, bị lợi dụng để đào tiền mã hóa và đưa dữ liệu nhà trường ra ngoài. Việc rà soát cũng phát hiện phần mềm quản lý máy tính và nhiều ứng dụng khác không có giấy phép hợp lệ. Việc các ứng dụng đó có chứa mã độc hay không vẫn chưa được xác nhận.
+
+Trải nghiệm đó cho thấy nguồn gốc phần mềm và tình trạng giấy phép không rõ ràng có thể làm suy giảm niềm tin trong việc mở rộng phòng máy hoặc chuyển sang thi trên máy tính. [Kế hoạch tăng cường thực thi bản quyền tháng 5/2026](https://xaydungchinhsach.chinhphu.vn/tang-cuong-kiem-tra-xu-ly-vi-pham-ban-quyen-119260512163548071.htm) của Việt Nam bao gồm kiểm tra bản quyền chương trình máy tính tại doanh nghiệp. Song song, [lộ trình thi được Bộ Giáo dục và Đào tạo công bố](https://vqa.moet.gov.vn/vi/news/tin-tuc-su-kien/bcd-xay-dung-de-an-to-chuc-thi-tot-nghiep-thpt-tren-may-tinh-hop-phien-dau-tien-230.html) dự kiến tổ chức thi tốt nghiệp THPT trên máy tính tại các điểm đủ điều kiện từ năm 2027.
+
+Đó là động lực xây dựng một nền tảng mã nguồn mở, có giấy phép rõ ràng và có thể kiểm tra cho hoạt động phòng máy cũng như toàn bộ vòng đời kỳ thi. Mục tiêu là một môi trường luyện tập đủ nghiêm túc và, sau khi kiểm chứng độc lập về an ninh, khôi phục, phần cứng và quy trình, trở thành nền tảng đáng tin cậy cho các kỳ thi chính thức. Các bản hiện tại vẫn được đánh dấu **INDEV**.
 
 Giáo viên và người tổ chức kỳ thi cần một quy trình số thiết thực kết nối đề thi, người tham gia, phòng thi, công cụ của thí sinh, bài nộp và việc xét duyệt kết quả.
 
@@ -78,8 +95,6 @@ Các ghi nhận đóng góp hiện có gồm Lê Anh Tuấn, Bùi Hồ Hải Đ�
 
 Ảnh xem trước thiết kế sử dụng dữ liệu mẫu và thao tác mô phỏng.
 
-<img width="300" alt="Banner Project NSTU" src="docs/assets/banner.vi.png" />
-
 ![Thiết kế giao diện lớp học ở chế độ sáng](docs/assets/classroom-design-light.png)
 
 ![Thiết kế giao diện lớp học ở chế độ tối](docs/assets/classroom-design-dark.png)
@@ -88,4 +103,4 @@ Các ghi nhận đóng góp hiện có gồm Lê Anh Tuấn, Bùi Hồ Hải Đ�
 
 ## Giấy phép
 
-Project NSTU được phát hành theo [giấy phép MIT](LICENSE). Thông tin giấy phép của từng thành phần được giữ trong [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Project nstu được phát hành theo [giấy phép MIT](LICENSE). Thông tin giấy phép của từng thành phần được giữ trong [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
