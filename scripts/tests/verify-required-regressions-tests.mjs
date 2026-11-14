@@ -54,6 +54,65 @@ const summary = result => ({ ...result, output: { ...result.output, stdout: unde
   stdoutSha256: hash(result.output.stdout), stderrSha256: hash(result.output.stderr) } });
 let copiedOwner, parentRuntime, ownerBaseline, sourcePaths, lastResult, primaryFailure, passed = 0;
 const attempts = [], caseRecords = [], mutations = [];
+const outputChunkBytes = 3072;
+function emitOwnedOutput(invocationId, output) {
+  assert.ok(Number.isSafeInteger(invocationId) && invocationId > 0);
+  assert.ok(Buffer.isBuffer(output.stdout) && Buffer.isBuffer(output.stderr));
+  assert.ok(output.stdout.length + output.stderr.length <= 8 * 1024 * 1024);
+  for (const stream of ['stdout', 'stderr']) {
+    for (let offset = 0, seq = 0; offset < output[stream].length; offset += outputChunkBytes, ++seq)
+      console.log('GATE02_OUTPUT_CHUNK ' + JSON.stringify({ invocationId, stream, seq,
+        bytesBase64: output[stream].subarray(offset, offset + outputChunkBytes).toString('base64') }));
+  }
+  console.log('GATE02_OUTPUT_END ' + JSON.stringify({ invocationId, stdoutBytes: output.stdout.length, stderrBytes: output.stderr.length,
+    stdoutChunks: Math.ceil(output.stdout.length / outputChunkBytes), stderrChunks: Math.ceil(output.stderr.length / outputChunkBytes),
+    stdoutSha256: hash(output.stdout), stderrSha256: hash(output.stderr) }));
+}
+function decodeOwnedOutput(lines, invocationId) {
+  assert.ok(Number.isSafeInteger(invocationId) && invocationId > 0);
+  const chunks = { stdout: [], stderr: [] };
+  let footer = null, totalBytes = 0;
+  for (const line of lines) {
+    const chunkLine = line.startsWith('GATE02_OUTPUT_CHUNK '), endLine = line.startsWith('GATE02_OUTPUT_END ');
+    if (!chunkLine && !endLine) continue;
+    assert.ok(Buffer.byteLength(line) <= 6144, 'Bounded output frame required');
+    const frame = copiedOwner.decodeControlJson(Buffer.from(line.slice(chunkLine ? 'GATE02_OUTPUT_CHUNK '.length : 'GATE02_OUTPUT_END '.length)));
+    assert.ok(frame && typeof frame === 'object' && !Array.isArray(frame));
+    assert.deepEqual(Object.keys(frame).sort(), (chunkLine ? ['invocationId', 'stream', 'seq', 'bytesBase64'] :
+      ['invocationId', 'stdoutBytes', 'stderrBytes', 'stdoutChunks', 'stderrChunks', 'stdoutSha256', 'stderrSha256']).sort());
+    assert.ok(Number.isSafeInteger(frame.invocationId) && frame.invocationId > 0);
+    if (chunkLine) {
+      assert.ok(['stdout', 'stderr'].includes(frame.stream));
+      assert.ok(Number.isSafeInteger(frame.seq) && frame.seq >= 0);
+      assert.ok(typeof frame.bytesBase64 === 'string' && frame.bytesBase64.length <= 4096, 'Bounded Base64 string required');
+      const bytes = Buffer.from(frame.bytesBase64, 'base64');
+      assert.ok(bytes.length > 0 && bytes.length <= outputChunkBytes);
+      assert.equal(bytes.toString('base64'), frame.bytesBase64, 'Canonical Base64 required');
+      if (frame.invocationId !== invocationId) continue;
+      assert.equal(footer, null, 'No output chunks after END');
+      assert.equal(frame.seq, chunks[frame.stream].length, 'Exact ordered output sequence required');
+      totalBytes += bytes.length;
+      assert.ok(totalBytes <= 8 * 1024 * 1024, 'Native output byte bound retained');
+      chunks[frame.stream].push(bytes);
+    } else {
+      for (const key of ['stdoutBytes', 'stderrBytes', 'stdoutChunks', 'stderrChunks'])
+        assert.ok(Number.isSafeInteger(frame[key]) && frame[key] >= 0 && frame[key] <= 8 * 1024 * 1024);
+      assert.ok(frame.stdoutBytes + frame.stderrBytes <= 8 * 1024 * 1024);
+      for (const key of ['stdoutSha256', 'stderrSha256']) assert.ok(typeof frame[key] === 'string' && /^[A-F0-9]{64}$/.test(frame[key]));
+      if (frame.invocationId !== invocationId) continue;
+      assert.equal(footer, null, 'Exactly one output END required'); footer = frame;
+    }
+  }
+  assert.ok(footer, 'Complete output END required');
+  const output = {};
+  for (const stream of ['stdout', 'stderr']) {
+    assert.equal(chunks[stream].length, footer[stream + 'Chunks']);
+    output[stream] = Buffer.concat(chunks[stream]);
+    assert.equal(output[stream].length, footer[stream + 'Bytes']);
+    assert.equal(hash(output[stream]), footer[stream + 'Sha256']);
+  }
+  return output;
+}
 
 async function assertOwnedLeaf() {
   const absolute = await realpath(root);
@@ -130,6 +189,11 @@ async function invoke(command, args, env = process.env, options = {}) {
       label: entry.label });
     entry.result = summary(result); entry.state = result.cleanup?.confirmed === true ? 'confirmed' : 'unconfirmed';
     lastResult = result;
+    // Source-progress markers keep the native receipt visible before large writes.
+    console.log('GATE02_RESULT_READY ' + JSON.stringify({ invocationId: entry.id, executionKind: result.execution.kind,
+      rawWorkerExitDWORD: result.execution.rawWorkerExitDWORD, effectiveExitCode: result.execution.effectiveExitCode,
+      cleanupConfirmed: result.cleanup.confirmed, stdoutBytes: result.output.stdout.length, stderrBytes: result.output.stderr.length,
+      stdoutSha256: entry.result.output.stdoutSha256, stderrSha256: entry.result.output.stderrSha256 }));
     console.log('GATE02_INVOCATION ' + JSON.stringify({ id: entry.id, label: entry.label, state: entry.state, result: entry.result,
       ...(gitScoped ? { fixtureGitIsolation: { cwd, markerSha256: hash(markerBytes), relocationEnvironmentRemovedOrBound: true, privateGlobalConfig: emptyGitConfig } } : {}) }));
     const failedOwner = entry.label === 'copied current55 owner suite retaining original49' && result.execution.effectiveExitCode !== 0;
@@ -170,8 +234,10 @@ async function invoke(command, args, env = process.env, options = {}) {
       await writeFile(entry.outputFiles.stderrPath, result.output.stderr, { flag: 'wx' });
       console.log('GATE02_OUTPUT_FILES ' + JSON.stringify({ invocationId: entry.id, ...entry.outputFiles,
         stdoutSha256: hash(result.output.stdout), stderrSha256: hash(result.output.stderr) }));
-    } else console.log('GATE02_OUTPUT ' + JSON.stringify({ invocationId: entry.id, stdoutBase64: result.output.stdout.toString('base64'), stderrBase64: result.output.stderr.toString('base64') }));
+    } else emitOwnedOutput(entry.id, result.output);
+    console.log('GATE02_OUTPUT_COMPLETE ' + JSON.stringify({ invocationId: entry.id }));
     await checkRuntime();
+    console.log('GATE02_RUNTIME_COMPLETE ' + JSON.stringify({ invocationId: entry.id }));
     return result;
   } catch (error) {
     entry.state = 'unconfirmed'; entry.error = safeError(error);
@@ -353,10 +419,9 @@ try {
   assert.equal(nested.length, 3);
   assert.equal(nested.at(-1).result.execution.kind, 'worker-exit'); assert.notEqual(nested.at(-1).result.execution.rawWorkerExitDWORD, 0);
   assert.equal(nested.at(-1).result.cleanup.confirmed, true);
-  const nestedOutput = faultLines.filter(line => line.startsWith('GATE02_OUTPUT ')).map(line => JSON.parse(line.slice('GATE02_OUTPUT '.length)))
-    .find(blob => blob.invocationId === nested.at(-1).id);
+  const nestedOutput = decodeOwnedOutput(faultLines, nested.at(-1).id);
   assert.ok(nestedOutput);
-  const faultStdout = Buffer.from(nestedOutput.stdoutBase64, 'base64'), faultStderr = Buffer.from(nestedOutput.stderrBase64, 'base64');
+  const faultStdout = nestedOutput.stdout, faultStderr = nestedOutput.stderr;
   assert.equal(hash(faultStdout), nested.at(-1).result.output.stdoutSha256);
   assert.equal(hash(faultStderr), nested.at(-1).result.output.stderrSha256);
   assert.match(faultStderr.toString(), /GATE02 injected owner-suite assertion failure/);
