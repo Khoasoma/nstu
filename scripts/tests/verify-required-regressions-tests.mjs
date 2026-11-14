@@ -217,9 +217,10 @@ async function invoke(command, args, env = process.env, options = {}) {
             daclRestored: operations.some(operation => operation?.operation === 'SetKernelObjectSecurity' && operation.resourceRole === 'test-owned-descendant-dacl-restore' && operation.ok === true),
             cleanupConfirmed: inner.cleanup?.confirmed === true };
         }
-        if (typeof row.livenessOutput?.stderrBase64 === 'string') {
-          const encodedTail = row.livenessOutput.stderrBase64.slice(-1024), decodedTail = Buffer.from(encodedTail, 'base64');
-          if (decodedTail.length && decodedTail.toString('base64') === encodedTail) stderrTail = decodedTail.subarray(-768);
+        for (const candidate of [row.failedOutput?.stderrBase64, row.livenessOutput?.stderrBase64]) {
+          if (typeof candidate !== 'string') continue;
+          const encodedTail = candidate.slice(-1024), decodedTail = Buffer.from(encodedTail, 'base64');
+          if (decodedTail.length && decodedTail.toString('base64') === encodedTail) { stderrTail = decodedTail.subarray(-768); break; }
         }
       } catch { /* Stderr is opaque diagnostic data; malformed rows cannot change acceptance. */ }
       console.error('GATE02_OWNER_FAILURE ' + JSON.stringify({ invocationId: entry.id, executionKind: result.execution.kind,
@@ -234,7 +235,8 @@ async function invoke(command, args, env = process.env, options = {}) {
       await writeFile(entry.outputFiles.stderrPath, result.output.stderr, { flag: 'wx' });
       console.log('GATE02_OUTPUT_FILES ' + JSON.stringify({ invocationId: entry.id, ...entry.outputFiles,
         stdoutSha256: hash(result.output.stdout), stderrSha256: hash(result.output.stderr) }));
-    } else emitOwnedOutput(entry.id, result.output);
+    }
+    emitOwnedOutput(entry.id, result.output);
     console.log('GATE02_OUTPUT_COMPLETE ' + JSON.stringify({ invocationId: entry.id }));
     await checkRuntime();
     console.log('GATE02_RUNTIME_COMPLETE ' + JSON.stringify({ invocationId: entry.id }));
@@ -495,6 +497,10 @@ try {
   assert.equal(hash(earlyStdoutBytes), earlyOutput.stdoutSha256); assert.equal(hash(earlyStderrBytes), earlyOutput.stderrSha256);
   assert.equal(hash(earlyStdoutBytes), earlyNested.at(-1).result.output.stdoutSha256);
   assert.equal(hash(earlyStderrBytes), earlyNested.at(-1).result.output.stderrSha256);
+  const earlyTransport = decodeOwnedOutput(earlyLines, earlyOutput.invocationId);
+  assert.deepEqual(earlyTransport.stdout, earlyStdoutBytes); assert.deepEqual(earlyTransport.stderr, earlyStderrBytes);
+  assert.equal(hash(earlyTransport.stdout), earlyNested.at(-1).result.output.stdoutSha256);
+  assert.equal(hash(earlyTransport.stderr), earlyNested.at(-1).result.output.stderrSha256);
   assert.match(earlyStderrBytes.toString(), /GATE02 injected early owner-suite assertion failure/);
   const earlyReceipt = JSON.parse(await readFile(join(earlyFixture, 'preservation-receipt.json')));
   assert.equal(earlyReceipt.root, earlyFixture); assert.equal(earlyReceipt.attempts.length, 3);

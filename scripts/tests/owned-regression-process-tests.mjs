@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
 import { createConnection, createServer } from 'node:net';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtemp, readFile, writeFile, mkdir, cp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, mkdir, cp, rm, realpath } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, relative, sep, delimiter } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const self = fileURLToPath(import.meta.url);
+const tempBase = await realpath(tmpdir());
 const delay = ms => new Promise(done => setTimeout(done, ms));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex').toUpperCase();
 const pipeFrame = value => {
@@ -51,7 +52,8 @@ function createOwnerLedger() {
 }
 async function finalizeOwnedFixture(fixture, ledger, primary, prefix = 'nstu-owned-') {
   const absolute = resolve(fixture);
-  const leaf = relative(resolve(tmpdir()), absolute);
+  assert.equal(await realpath(absolute), absolute, 'Owned fixture leaf must remain canonical before finalization');
+  const leaf = relative(tempBase, absolute);
   assert.ok(leaf.startsWith(prefix) && !leaf.includes(sep) && !leaf.includes('/') && !leaf.includes('\\'));
   const preservation = { fixture: absolute, ledger: ledger.snapshot(), primary: primary ? { message: primary.message, stack: primary.stack } : null };
   if (primary || !ledger.mayDelete()) {
@@ -93,7 +95,7 @@ async function actor(kind, encoded) {
     try {
       let foreignPID = null;
       if (config.scenario === 'liveness-foreign') {
-        const foreign = await mkdtemp(join(tmpdir(), 'nstu-owned-liveness-')); fixtures.push(foreign);
+        const foreign = await mkdtemp(join(tempBase, 'nstu-owned-liveness-')); fixtures.push(foreign);
         let resolveOwned;
         const owned = new Promise(done => { resolveOwned = done; });
         foreignPromise = ledger.invoke('independent foreign liveness owner', () => owner.runOwned({ application: process.execPath,
@@ -104,7 +106,7 @@ async function actor(kind, encoded) {
         assert.ok(foreignPID && foreignControls);
       }
       for (const exitCode of config.scenario === 'liveness-signaled' ? [0, 259] : [0]) {
-        const fixture = await mkdtemp(join(tmpdir(), 'nstu-owned-liveness-')); fixtures.push(fixture);
+        const fixture = await mkdtemp(join(tempBase, 'nstu-owned-liveness-')); fixtures.push(fixture);
         const ticket = { token: randomBytes(32).toString('hex'), scenario: config.scenario, exitCode, foreignPID };
         const bytes = Buffer.from(JSON.stringify(ticket)); await writeFile(join(fixture, '.liveness-owner.json'), bytes);
         const binding = await owner.makeSourceBinding({ '.liveness-owner.json': hash(bytes) });
@@ -227,7 +229,7 @@ async function actor(kind, encoded) {
             'Native.SetKernelObjectSecurity(IntPtr.Zero,4,testOriginalSecurity)')]
         ];
         for (const [profile, mutate] of profiles) {
-          const fixture = await mkdtemp(join(tmpdir(), 'nstu-owned-liveness-')); fixtures.push(fixture);
+          const fixture = await mkdtemp(join(tempBase, 'nstu-owned-liveness-')); fixtures.push(fixture);
           const directory = join(fixture, 'copied-owner'); await mkdir(directory);
           for (const file of ['owned-regression-process.mjs', 'owned-regression-process.ps1', 'owned-regression-process-tests.mjs'])
             await cp(join(dirname(self), file), join(directory, file));
@@ -532,7 +534,7 @@ async function actor(kind, encoded) {
     return;
   }
   if (kind === 'correction-copied-preservation') {
-    const preservedLeaf = await mkdtemp(join(tmpdir(), 'nstu-owned-preserve-'));
+    const preservedLeaf = await mkdtemp(join(tempBase, 'nstu-owned-preserve-'));
     const copiedDirectory = join(preservedLeaf, 'copied-owner'); await mkdir(copiedDirectory);
     const sourceHashes = {};
     for (const filename of ['owned-regression-process.mjs', 'owned-regression-process.ps1', 'owned-regression-process-tests.mjs']) {
@@ -643,7 +645,7 @@ async function baselineRed() {
   const exact = source.slice(begin, end);
   assert.equal(exact.match(/assert.equal\(result.error, undefined/g)?.length, 1);
   const observed = exact.replace('  assert.equal(result.error, undefined', '  observe(result);\n  assert.equal(result.error, undefined');
-  const leafRoot = await mkdtemp(join(tmpdir(), 'nstu-gate01-'));
+  const leafRoot = await mkdtemp(join(tempBase, 'nstu-gate01-'));
   const fixtureActor = join(leafRoot, 'owned-regression-process-tests.mjs');
   await cp(self, fixtureActor);
   const unsafeCleanup = new Set();
@@ -716,7 +718,8 @@ async function baselineRed() {
     baselineFailure = error;
     throw error;
   } finally {
-    const leaf = relative(resolve(tmpdir()), resolve(leafRoot));
+    assert.equal(await realpath(leafRoot), resolve(leafRoot));
+    const leaf = relative(tempBase, resolve(leafRoot));
     assert.ok(leaf.startsWith('nstu-gate01-') && !leaf.includes(sep));
     if (releaseProofs.length === 2 && releaseProofs.every(proof => proof.confirmed)) {
       await rm(leafRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
@@ -734,7 +737,7 @@ async function main() {
   assert.equal(process.arch, 'x64', 'x64 native ABI is required');
   const owner = await import('./owned-regression-process.mjs');
   const runtime = await owner.resolveControllerRuntime(process.env);
-  const fixture = await mkdtemp(join(tmpdir(), 'nstu-owned-'));
+  const fixture = await mkdtemp(join(tempBase, 'nstu-owned-'));
   const records = [];
   const ledger = createOwnerLedger();
   let primaryFailure;
@@ -743,6 +746,8 @@ async function main() {
       argv: [self, '--actor', 'exit', '{"code":0}'], cwd: fixture, childEnv: process.env,
       controllerRuntime: runtime, ...options }));
     records.push({ label, ...summarize(result) });
+    if (!expectedFailure && result.execution.effectiveExitCode !== 0)
+      records.at(-1).failedOutput = { stdoutBase64: result.output.stdout.toString('base64'), stderrBase64: result.output.stderr.toString('base64') };
     let captureFailure;
     if (captureResult) {
       try { captureResult(result, records.at(-1)); }
@@ -992,7 +997,8 @@ $null = Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $Targe
     const preserved = JSON.parse(preservedOuter.output.stdout.toString().split('COPIED_PRESERVATION ')[1].trim());
     records.at(-1).copiedPreservationProof = preserved;
     const preservedLeaf = resolve(preserved.fixture);
-    const preservedOffset = relative(resolve(tmpdir()), preservedLeaf);
+    assert.equal(await realpath(preservedLeaf), preservedLeaf);
+    const preservedOffset = relative(tempBase, preservedLeaf);
     assert.ok(preservedOffset.startsWith('nstu-owned-preserve-') && !preservedOffset.includes(sep) && !preservedOffset.includes('/') && !preservedOffset.includes('\\'));
     assert.equal(preservedOuter.execution.rawWorkerExitDWORD, 0);
     assert.equal(preservedOuter.cleanup.confirmed, true);
@@ -1048,7 +1054,8 @@ $null = Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $Targe
     throw error;
   } finally {
     try {
-      const leaf = relative(resolve(tmpdir()), resolve(fixture));
+      assert.equal(await realpath(fixture), resolve(fixture));
+      const leaf = relative(tempBase, resolve(fixture));
       assert.ok(leaf.startsWith('nstu-owned-') && !leaf.includes(sep));
       await finalizeOwnedFixture(fixture, ledger, primaryFailure);
     }
