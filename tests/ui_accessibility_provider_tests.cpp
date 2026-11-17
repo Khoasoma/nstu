@@ -1723,7 +1723,44 @@ void actual_product_settings_patterns_commit_and_announce() {
     native_ok("ElementFromHandle.ownedHWND", automation->ElementFromHandle(product.window, &window_element));
     Com<IUIAutomationElement> window_owner(window_element);
     product.guard(window_element);
+    const auto trace_root_metadata = [&](const char* root_label, IUIAutomationElement* root_element) {
+        product.guard(root_element);
+        const std::array root_fields{std::pair{"Name", UIA_NamePropertyId}, std::pair{"AutomationId", UIA_AutomationIdPropertyId},
+                                     std::pair{"ProviderDescription", UIA_ProviderDescriptionPropertyId}};
+        for (const auto& [field_name, root_property] : root_fields) {
+            VARIANT root_value{};
+            std::unique_ptr<VARIANT, decltype(&VariantClear)> root_value_guard(&root_value, VariantClear);
+            native_ok(field_name, root_element->GetCurrentPropertyValue(root_property, &root_value));
+            std::cout << "Root metadata " << root_label << ' ' << field_name << " vt=" << root_value.vt << " value="
+                      << (root_value.vt == VT_BSTR && root_value.bstrVal
+                          ? native_utf8(std::wstring_view(root_value.bstrVal, SysStringLen(root_value.bstrVal))) : "<non-string>")
+                      << '\n' << std::flush;
+        }
+    };
+    trace_root_metadata("early-held", window_element);
     auto launcher = native_setting(automation.get(), window_element, product, 1);
+    trace_root_metadata("held-ready", window_element);
+    IUIAutomationElement* fresh_root = nullptr;
+    native_ok("Root.FreshElementFromHandle", automation->ElementFromHandle(product.window, &fresh_root));
+    Com<IUIAutomationElement> fresh_root_owner(fresh_root);
+    require(fresh_root != nullptr, "fresh owned root missing after launcher readiness");
+    trace_root_metadata("fresh-ready", fresh_root);
+    BOOL same_fresh_root = FALSE;
+    native_ok("Root.CompareHeldFresh", automation->CompareElements(window_element, fresh_root, &same_fresh_root));
+    const auto held_root_runtime = native_runtime(window_element), fresh_root_runtime = native_runtime(fresh_root);
+    std::cout << "Root held/fresh same=" << same_fresh_root << " runtimeSame=" << (held_root_runtime == fresh_root_runtime)
+              << " runtimeLengths=" << held_root_runtime.size() << ',' << fresh_root_runtime.size() << '\n' << std::flush;
+    {
+        VARIANT ready_root_id{};
+        std::unique_ptr<VARIANT, decltype(&VariantClear)> ready_root_id_guard(&ready_root_id, VariantClear);
+        native_ok("Root.ReadyAutomationId", fresh_root->GetCurrentPropertyValue(UIA_AutomationIdPropertyId, &ready_root_id));
+        require(ready_root_id.vt == VT_BSTR && ready_root_id.bstrVal &&
+                std::wstring_view(ready_root_id.bstrVal, SysStringLen(ready_root_id.bstrVal)) == L"nstu.settings.0",
+                "event subscription root is not the initialized custom product provider");
+    }
+    // An early HWND root can retain its MSAA proxy after the custom provider becomes available.
+    window_owner = std::move(fresh_root_owner);
+    window_element = window_owner.get();
     auto allocated_events = std::make_unique<ProductEvents>(product.process.dwProcessId);
     Com<ProductEvents> events(allocated_events.release());
     struct RemoveEvents { IUIAutomation* automation; ~RemoveEvents() { if (automation) (void)automation->RemoveAllEventHandlers(); } } remove_events{automation.get()};
