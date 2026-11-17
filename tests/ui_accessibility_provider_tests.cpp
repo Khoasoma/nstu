@@ -1957,23 +1957,46 @@ void actual_product_settings_patterns_commit_and_announce() {
     std::cout << "Compact reading bounds " << compact_reading.left << ',' << compact_reading.top << ',' << compact_reading.right << ',' << compact_reading.bottom
               << " pane " << compact_pane.left << ',' << compact_pane.top << ',' << compact_pane.right << ',' << compact_pane.bottom << '\n';
     require(contains(compact_pane) && contains(compact_root), "largest focused reading control was only partially visible");
+    const auto closed_combo_id = native_runtime(combo.get());
+    IUIAutomationElement* closed_combo = nullptr;
+    native_ok("Reading.CacheClosedCombo", combo->BuildUpdatedCache(event_cache, &closed_combo));
+    Com<IUIAutomationElement> closed_combo_owner(closed_combo);
+    require(closed_combo != nullptr, "closed reading combo cache missing");
     product.dismiss_pane();
     await_product([&] { BSTR stale = nullptr; const HRESULT result = pane->get_CurrentName(&stale); SysFreeString(stale); return result == static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE); }, "owned Escape did not close and retire the settings pane");
     product.guard(launcher.get()); native_ok("Settings.Reopen.Invoke", invoke->Invoke());
     auto reopened_pane = native_setting(automation.get(), window_element, product, 2);
     require(native_runtime(reopened_pane.get()) != pane_id, "actual settings pane reused its closed incarnation");
     combo = native_setting(automation.get(), window_element, product, 4);
+    const auto reopened_combo_id = native_runtime(combo.get());
+    require(reopened_combo_id != closed_combo_id, "reading combo reused its closed incarnation");
     require(native_selection(combo.get(), product) == L"Lớn nhất (200%)", "pane reopening lost actual reading choice");
-    product.guard(combo.get()); native_ok("Reading.reopenedSetFocus", combo->SetFocus());
-    await_product([&] {
-        Com<IUIAutomationElement> sender(events->focus_sender.exchange(nullptr));
+    const auto current_combo_focus = [&](IUIAutomationElement* sender) {
         if (!sender) return false;
         int pid = 0; BSTR id = nullptr;
         const HRESULT owner = sender->get_CachedProcessId(&pid), identity = sender->get_CachedAutomationId(&id);
         const bool matching = SUCCEEDED(owner) && SUCCEEDED(identity) && static_cast<DWORD>(pid) == product.process.dwProcessId &&
                               id && std::wcscmp(id, L"nstu.settings.4") == 0;
         SysFreeString(id);
-        return matching;
+        if (!matching) return false;
+        BOOL same_current = FALSE, same_closed = FALSE;
+        const HRESULT current = automation->CompareElements(sender, combo.get(), &same_current);
+        const HRESULT closed = automation->CompareElements(sender, closed_combo, &same_closed);
+        std::cout << "Reading focus candidate owner=" << pid << " currentHRESULT=0x" << std::hex
+                  << static_cast<unsigned long>(current) << " closedHRESULT=0x" << static_cast<unsigned long>(closed)
+                  << std::dec << " sameCurrent=" << same_current << " sameClosed=" << same_closed
+                  << " runtimeLengths=" << reopened_combo_id.size() << ',' << closed_combo_id.size() << '\n' << std::flush;
+        return SUCCEEDED(current) && same_current;
+    };
+    require(!current_combo_focus(closed_combo), "closed reading combo satisfied current-incarnation focus handshake");
+    IUIAutomationElement* reopened_cached_combo = nullptr;
+    native_ok("Reading.CacheReopenedCombo", combo->BuildUpdatedCache(event_cache, &reopened_cached_combo));
+    Com<IUIAutomationElement> reopened_cached_combo_owner(reopened_cached_combo);
+    require(reopened_cached_combo && current_combo_focus(reopened_cached_combo), "current reading combo failed focus identity probe");
+    product.guard(combo.get()); native_ok("Reading.reopenedSetFocus", combo->SetFocus());
+    await_product([&] {
+        Com<IUIAutomationElement> sender(events->focus_sender.exchange(nullptr));
+        return current_combo_focus(sender.get());
     }, "focus event did not identify the owned real reading combo");
     try {
         await_product([&] { const auto counts = events->snapshot(); return counts[0] == 2 && counts[1] >= 4 && counts[2] >= 8 && counts[3] > 0 && counts[4] > 0 && counts[5] > 0; }, "actual Settings invoke/selection/property/focus/structure event delivery missing");
