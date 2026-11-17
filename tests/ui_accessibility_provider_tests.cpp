@@ -1911,6 +1911,11 @@ void actual_product_settings_patterns_commit_and_announce() {
     require(native_selection(combo.get(), product) == L"Large (125%)", "Collapse changed current reading selection");
     auto vietnamese = native_setting(automation.get(), window_element, product, 13);
     product.guard(vietnamese.get()); native_ok("Vietnamese.SelectionItem.Select", native_pattern<IUIAutomationSelectionItemPattern>(vietnamese.get(), UIA_SelectionItemPatternId)->Select());
+    BOOL language_selected = FALSE;
+    native_ok("Vietnamese.committedSelection", native_pattern<IUIAutomationSelectionItemPattern>(vietnamese.get(), UIA_SelectionItemPatternId)->get_CurrentIsSelected(&language_selected));
+    require(language_selected, "actual language selection did not commit");
+    await_product([&] { return native_selection(combo.get(), product) == L"Chữ lớn (125%)" && native_name(combo.get()) == L"Cỡ chữ dễ đọc"; },
+                  "actual combo localization was not published after language selection");
     require(native_selection(combo.get(), product) == L"Chữ lớn (125%)" && native_name(combo.get()) == L"Cỡ chữ dễ đọc", "actual combo did not localize its selected name separately from field name");
     auto dark = native_setting(automation.get(), window_element, product, 16);
     product.guard(dark.get()); native_ok("Dark.SelectionItem.Select", native_pattern<IUIAutomationSelectionItemPattern>(dark.get(), UIA_SelectionItemPatternId)->Select());
