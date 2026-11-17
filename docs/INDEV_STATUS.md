@@ -253,3 +253,22 @@ Deferral still advances memory before persistence, and other transitions still
 ignore save failures. Post-close races, existing mapped views, crash/power-loss
 recovery, signed updater transport/apply, real VM/UWF/Deep Freeze behavior and
 production or exam acceptance are not established by these increments or CI.
+
+## BYOD Contest Rooms and Teacher Accessibility — November 17, 2026
+
+This increment is **INDEV**. It adds an ordinary student IDE with LAN room
+discovery and explicit SAS-confirmed joining, a dedicated teacher Contests
+workspace, durable membership and reconnect handling, and optional aggregate
+standings. Teacher reading presets enlarge text and controls; compact layouts
+and Settings/Contests accessibility bindings support keyboard and assistive use.
+
+The separate portable contest trial carries the teacher and student executables,
+WebView2 loader, pinned public package extractor and shared PowerShell runtime.
+Follow [BYOD_CONTEST_TRIAL.md](BYOD_CONTEST_TRIAL.md) for runtime pins, teacher
+broker configuration and a synthetic peer rehearsal. Real C++20/Python judging
+requires a separately qualified Linux judgehost.
+
+Build, regression and inventory checks qualify their respective code and assets.
+Physical WLAN and multiple laptops, mixed DPI, Vietnamese IME, independent user
+profiles, assistive technology coverage and real judging still require runtime
+qualification before official examination use.
