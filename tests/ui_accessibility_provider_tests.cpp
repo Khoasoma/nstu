@@ -1551,7 +1551,9 @@ struct ProductEvents final : IUIAutomationEventHandler, IUIAutomationPropertyCha
         return S_OK;
     }
     HRESULT STDMETHODCALLTYPE HandleFocusChangedEvent(IUIAutomationElement* sender) noexcept override {
-        if (sender) sender->AddRef();
+        int sender_pid = 0;
+        if (!sender || FAILED(sender->get_CachedProcessId(&sender_pid)) || static_cast<DWORD>(sender_pid) != pid) return S_OK;
+        sender->AddRef();
         if (auto* previous = focus_sender.exchange(sender)) previous->Release();
         ++counts[4];
         return S_OK;
@@ -1769,6 +1771,31 @@ void actual_product_settings_patterns_commit_and_announce() {
     Com<IUIAutomationCacheRequest> event_cache_owner(event_cache);
     native_ok("EventCache.ProcessId", event_cache->AddProperty(UIA_ProcessIdPropertyId));
     native_ok("EventCache.AutomationId", event_cache->AddProperty(UIA_AutomationIdPropertyId));
+    {
+        IUIAutomationElement *owned_sender = nullptr, *foreign_sender = nullptr, *uncached_sender = nullptr;
+        native_ok("FocusProbe.OwnedCache", window_element->BuildUpdatedCache(event_cache, &owned_sender));
+        Com<IUIAutomationElement> owned_sender_owner(owned_sender);
+        native_ok("FocusProbe.ForeignCache", automation->GetRootElementBuildCache(event_cache, &foreign_sender));
+        Com<IUIAutomationElement> foreign_sender_owner(foreign_sender);
+        require(owned_sender && foreign_sender, "native focus probe targets are missing");
+        int foreign_pid = 0;
+        native_ok("FocusProbe.ForeignPid", foreign_sender->get_CachedProcessId(&foreign_pid));
+        require(static_cast<DWORD>(foreign_pid) != product.process.dwProcessId, "focus probe target is not foreign");
+        IUIAutomationCacheRequest* empty_cache = nullptr;
+        native_ok("FocusProbe.EmptyCache", automation->CreateCacheRequest(&empty_cache));
+        Com<IUIAutomationCacheRequest> empty_cache_owner(empty_cache);
+        native_ok("FocusProbe.UncachedTarget", window_element->BuildUpdatedCache(empty_cache, &uncached_sender));
+        Com<IUIAutomationElement> uncached_sender_owner(uncached_sender);
+        int uncached_pid = 0;
+        require(uncached_sender && FAILED(uncached_sender->get_CachedProcessId(&uncached_pid)), "focus probe unexpectedly has a cached PID");
+        ProductEvents probe(product.process.dwProcessId);
+        native_ok("FocusProbe.Owned", probe.HandleFocusChangedEvent(owned_sender));
+        require(probe.counts[4].load() == 1 && probe.focus_sender.load() == owned_sender, "owned cached focus was not retained once");
+        native_ok("FocusProbe.Null", probe.HandleFocusChangedEvent(nullptr));
+        native_ok("FocusProbe.Uncached", probe.HandleFocusChangedEvent(uncached_sender));
+        native_ok("FocusProbe.Foreign", probe.HandleFocusChangedEvent(foreign_sender));
+        require(probe.counts[4].load() == 1 && probe.focus_sender.load() == owned_sender, "rejected focus changed the owned count or retained sender");
+    }
     native_ok("Subscribe.Invoked", automation->AddAutomationEventHandler(UIA_Invoke_InvokedEventId, launcher.get(), TreeScope_Element, nullptr, events.get()));
     native_ok("Subscribe.Selection", automation->AddAutomationEventHandler(UIA_SelectionItem_ElementSelectedEventId, window_element, TreeScope_Subtree, nullptr, events.get()));
     PROPERTYID properties[]{UIA_ExpandCollapseExpandCollapseStatePropertyId, UIA_SelectionItemIsSelectedPropertyId,
@@ -1960,8 +1987,13 @@ void actual_product_settings_patterns_commit_and_announce() {
     const auto settled = events->snapshot();
     std::this_thread::sleep_for(std::chrono::milliseconds(350));
     const auto unchanged = events->snapshot();
+    std::cout << "Settled Settings events invoke=" << settled[0] << " selection=" << settled[1] << " expand=" << settled[2]
+              << " properties=" << settled[3] << " focus=" << settled[4] << " structure=" << settled[5] << '\n';
     std::cout << "Owned Settings events invoke=" << unchanged[0] << " selection=" << unchanged[1] << " expand=" << unchanged[2]
               << " properties=" << unchanged[3] << " focus=" << unchanged[4] << " structure=" << unchanged[5] << '\n';
+    std::cout << "Settings event delta invoke=" << unchanged[0] - settled[0] << " selection=" << unchanged[1] - settled[1]
+              << " expand=" << unchanged[2] - settled[2] << " properties=" << unchanged[3] - settled[3]
+              << " focus=" << unchanged[4] - settled[4] << " structure=" << unchanged[5] - settled[5] << '\n' << std::flush;
     require(unchanged[0] == 2, "one launcher activation emitted duplicate Invoked events");
     require(settled == unchanged, "unchanged actual Settings frames repeatedly emitted events");
     native_ok("RemoveAllEventHandlers", automation->RemoveAllEventHandlers()); remove_events.automation = nullptr;
