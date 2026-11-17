@@ -241,8 +241,8 @@ void teacher_reading_sizes_fit_real_vietnamese_fonts() {
             assert(ImGui::GetFrameHeight() + 0.01f >= 44.2f * dpi * zoom);
             const auto text = ImGui::CalcTextSize("Giáo viên kiểm tra đề thi: ế ể ợ Đ");
             assert(text.x > 0 && text.y > 0 && text.y < ImGui::GetFrameHeight());
-            for (const ImWchar codepoint : {0x1EBF, 0x1EC3, 0x1EE3, 0x0110}) {
-                const auto* glyph = ImGui::GetFontBaked()->FindGlyphNoFallback(codepoint);
+            for (const int codepoint : {0x1EBF, 0x1EC3, 0x1EE3, 0x0110}) {
+                const auto* glyph = ImGui::GetFontBaked()->FindGlyphNoFallback(static_cast<ImWchar>(codepoint));
                 assert(glyph && glyph->Visible);
                 assert(glyph->Y0 >= -ImGui::GetStyle().FramePadding.y);
                 assert(glyph->Y1 <= ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y);

@@ -3374,8 +3374,8 @@ void contest_semantic_focus(const accessibility::Node& node) {
         }
     };
     if (const auto command = contest_semantic_request(node, accessibility::Action::scroll)) scroll(*command);
-    else for (const auto& command : g_contest_waiting) if (command.key == node.key && command.action == accessibility::Action::scroll &&
-        (!command.text_revision || (node.text && node.text->revision == command.text_revision))) scroll(command);
+    else for (const auto& pending_scroll : g_contest_waiting) if (pending_scroll.key == node.key && pending_scroll.action == accessibility::Action::scroll &&
+        (!pending_scroll.text_revision || (node.text && node.text->revision == pending_scroll.text_revision))) scroll(pending_scroll);
     if (const auto command = contest_semantic_request(node, accessibility::Action::focus)) {
         if (node.scroll_owner && !settings_item_fully_visible(node)) scroll(*command);
         if (binding->id && !ImGui::GetCurrentContext()->DragDropActive && !ImGui::GetCurrentContext()->MovingWindow) {

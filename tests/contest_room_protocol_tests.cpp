@@ -63,10 +63,10 @@ void codec_rejections() {
             auto wrong = payload; wrong[offset] ^= std::byte{0x80};
             assert(!decode_message(wrong, pinned, side));
         }
-        auto wrong_domain = payload; wrong_domain[kMessageHeaderBytes + 2] ^= std::byte{1};
-        assert(!decode_message(wrong_domain, pinned, side));
-        auto wrong_authority = payload; wrong_authority.back() ^= std::byte{1};
-        assert(!decode_message(wrong_authority, pinned, side));
+        auto wrong_message_domain = payload; wrong_message_domain[kMessageHeaderBytes + 2] ^= std::byte{1};
+        assert(!decode_message(wrong_message_domain, pinned, side));
+        auto wrong_message_authority = payload; wrong_message_authority.back() ^= std::byte{1};
+        assert(!decode_message(wrong_message_authority, pinned, side));
         auto extra = payload; extra.push_back(std::byte{0});
         assert(!decode_message(extra, pinned, side));
         auto other = pinned; other.round_id[0] = '3';
