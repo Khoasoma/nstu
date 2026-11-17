@@ -1764,9 +1764,30 @@ void actual_product_settings_patterns_commit_and_announce() {
     auto expand = native_pattern<IUIAutomationExpandCollapsePattern>(combo.get(), UIA_ExpandCollapsePatternId);
     const auto change_expansion = [&](const char* operation, bool opening) {
         product.guard(combo.get());
+        const auto trace_events = [&](const char* stage) {
+            const auto counts = events->snapshot();
+            std::cout << operation << ' ' << stage << " invoke=" << counts[0] << " selection=" << counts[1]
+                      << " expand=" << counts[2] << " properties=" << counts[3] << " focus=" << counts[4]
+                      << " structure=" << counts[5] << '\n' << std::flush;
+        };
+        ExpandCollapseState before_state{}, after_state{};
+        native_ok("Reading.beforeExpansionState", expand->get_CurrentExpandCollapseState(&before_state));
+        const auto before_runtime = native_runtime(combo.get());
+        std::cout << operation << " beforeState=" << before_state << '\n' << std::flush;
+        trace_events("before");
         const int before = events->counts[2].load();
         native_ok(operation, opening ? expand->Expand() : expand->Collapse());
-        await_product([&] { return events->counts[2].load() > before; }, "actual reading expansion change did not deliver its property event");
+        native_ok("Reading.afterExpansionState", expand->get_CurrentExpandCollapseState(&after_state));
+        const auto after_runtime = native_runtime(combo.get());
+        std::cout << operation << " afterState=" << after_state << " runtimeSame=" << (before_runtime == after_runtime)
+                  << " runtimeLengths=" << before_runtime.size() << ',' << after_runtime.size() << '\n' << std::flush;
+        trace_events("after");
+        try {
+            await_product([&] { return events->counts[2].load() > before; }, "actual reading expansion change did not deliver its property event");
+        } catch (...) {
+            trace_events("timeout");
+            throw;
+        }
     };
     change_expansion("Reading.Expand", true);
     require(native_selection(combo.get(), product) == L"Comfortable (100%)", "expanded product combo lost default selection");
