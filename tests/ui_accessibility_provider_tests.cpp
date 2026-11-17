@@ -2026,6 +2026,7 @@ void actual_product_settings_patterns_commit_and_announce() {
 Com<IUIAutomationElement> native_contest(IUIAutomation* automation, IUIAutomationElement* window,
                                        const OwnedProduct& product, const wchar_t* label, CONTROLTYPEID type) {
     product.guard(window);
+    std::cout << "Contest lookup Name=" << native_utf8(label) << " ControlType=" << type << '\n' << std::flush;
     VARIANT name_value{}, type_value{}; name_value.vt = VT_BSTR; name_value.bstrVal = SysAllocString(label);
     type_value.vt = VT_I4; type_value.lVal = type;
     require(name_value.bstrVal != nullptr, "native Contest label allocation failed");
@@ -2168,9 +2169,49 @@ void actual_product_contest_fields_ranges_tabs_toggles_and_guards() {
     native_ok("Contest.Port.NormalizeActive",native_set_value(port_value.get(),L"+01")); require(native_value(port_value.get()) == L"1", "active native partial integer did not reload admitted canonical value");
     native_ok("Contest.Port.Restore",native_set_value(port_value.get(),L"47002"));
     const auto title_runtime = native_runtime(title.get());
+    RECT contest_client{};
+    product.guard();
+    require(GetClientRect(product.window, &contest_client), "owned Contest geometry unavailable");
+    std::cout << "Contest owned client=" << contest_client.right - contest_client.left << 'x' << contest_client.bottom - contest_client.top << '\n' << std::flush;
+    VARIANT workspace_name{}; workspace_name.vt = VT_BSTR; workspace_name.bstrVal = SysAllocString(L"Workspace");
+    require(workspace_name.bstrVal != nullptr, "Workspace condition allocation failed");
+    IUIAutomationCondition* workspace_condition = nullptr;
+    const HRESULT workspace_condition_result = automation->CreatePropertyCondition(UIA_NamePropertyId, workspace_name, &workspace_condition);
+    VariantClear(&workspace_name);
+    native_ok("Contest.Workspace.Condition", workspace_condition_result);
+    Com<IUIAutomationCondition> workspace_condition_owner(workspace_condition);
     for (const wchar_t* tab_name : {L"Admission",L"Participants",L"Standings",L"Setup"}) {
-        auto tab = find(tab_name,UIA_TabItemControlTypeId); native_ok("Contest.Tab.Select",native_pattern<IUIAutomationSelectionItemPattern>(tab.get(),UIA_SelectionItemPatternId)->Select());
+        product.guard();
+        IUIAutomationElement* raw_workspace = nullptr;
+        native_ok("Contest.Workspace.Find", window->FindFirst(TreeScope_Subtree, workspace_condition, &raw_workspace));
+        Com<IUIAutomationElement> workspace(raw_workspace);
+        Com<IUIAutomationExpandCollapsePattern> workspace_disclosure;
+        std::cout << "Contest Workspace present=" << static_cast<bool>(workspace) << '\n' << std::flush;
+        if (workspace) {
+            product.guard(workspace.get());
+            CONTROLTYPEID workspace_type = 0;
+            native_ok("Contest.Workspace.Type", workspace->get_CurrentControlType(&workspace_type));
+            require(workspace_type == UIA_GroupControlTypeId, "Workspace is not the real disclosure group");
+            BSTR workspace_id = nullptr;
+            native_ok("Contest.Workspace.Identity", workspace->get_CurrentAutomationId(&workspace_id));
+            const bool owned_workspace = workspace_id && std::wstring_view(workspace_id, SysStringLen(workspace_id)).starts_with(L"nstu.contests.");
+            SysFreeString(workspace_id);
+            require(owned_workspace, "Workspace used a foreign identity namespace");
+            workspace_disclosure = native_pattern<IUIAutomationExpandCollapsePattern>(workspace.get(), UIA_ExpandCollapsePatternId);
+            native_ok("Contest.Workspace.Open", workspace_disclosure->Expand());
+        }
+        auto tab = find(tab_name,UIA_TabItemControlTypeId);
+        const auto tab_runtime = native_runtime(tab.get());
+        native_ok("Contest.Tab.Select",native_pattern<IUIAutomationSelectionItemPattern>(tab.get(),UIA_SelectionItemPatternId)->Select());
+        if (workspace) {
+            await_product([&] { BSTR retired_name = nullptr; const HRESULT retired = tab->get_CurrentName(&retired_name); SysFreeString(retired_name);
+                return retired == static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE); }, "selected compact tab did not retire with its closed popup");
+            native_ok("Contest.Workspace.Reopen", workspace_disclosure->Expand());
+            tab = find(tab_name,UIA_TabItemControlTypeId);
+            require(native_runtime(tab.get()) != tab_runtime, "compact tab reused its closed popup incarnation");
+        }
         BOOL selected = FALSE; native_ok("Contest.Tab.IsSelected",native_pattern<IUIAutomationSelectionItemPattern>(tab.get(),UIA_SelectionItemPatternId)->get_CurrentIsSelected(&selected)); require(selected, "real required tab selection did not commit");
+        if (workspace) native_ok("Contest.Workspace.Close", workspace_disclosure->Collapse());
     }
     auto reopened_title = find(L"Room title",UIA_EditControlTypeId);
     require(native_runtime(reopened_title.get()) != title_runtime && native_value(native_pattern<IUIAutomationValuePattern>(reopened_title.get(),UIA_ValuePatternId).get()) == long_title,
