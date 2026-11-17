@@ -1762,8 +1762,34 @@ void actual_product_settings_patterns_commit_and_announce() {
     native_ok("Reading.HasKeyboardFocus", combo->get_CurrentHasKeyboardFocus(&focused));
     require(focused, "native SetFocus did not commit actual ImGui reading focus");
     auto expand = native_pattern<IUIAutomationExpandCollapsePattern>(combo.get(), UIA_ExpandCollapsePatternId);
+    IUIAutomationTreeWalker* raw_walker = nullptr;
+    native_ok("Reading.RawViewWalker", automation->get_RawViewWalker(&raw_walker));
+    Com<IUIAutomationTreeWalker> walker(raw_walker);
+    const auto trace_ancestry = [&](const char* stage) {
+        IUIAutomationElement* parent_pane = nullptr;
+        native_ok("Reading.RawParentPane", walker->GetParentElement(combo.get(), &parent_pane));
+        Com<IUIAutomationElement> parent_pane_owner(parent_pane);
+        require(parent_pane != nullptr, "reading raw parent pane is missing");
+        product.guard(parent_pane);
+        IUIAutomationElement* parent_root = nullptr;
+        native_ok("Reading.RawParentRoot", walker->GetParentElement(parent_pane, &parent_root));
+        Com<IUIAutomationElement> parent_root_owner(parent_root);
+        require(parent_root != nullptr, "reading raw parent root is missing");
+        product.guard(parent_root);
+        BOOL same_pane = FALSE, same_root = FALSE;
+        native_ok("Reading.CompareParentPane", automation->CompareElements(parent_pane, pane.get(), &same_pane));
+        native_ok("Reading.CompareParentRoot", automation->CompareElements(parent_root, window_element, &same_root));
+        UIA_HWND root_handle{};
+        native_ok("Reading.RawRootNativeWindow", parent_root->get_CurrentNativeWindowHandle(&root_handle));
+        const auto root_runtime = native_runtime(parent_root), anchor_runtime = native_runtime(window_element);
+        std::cout << "Reading ancestry " << stage << " paneSame=" << same_pane << " rootSame=" << same_root
+                  << " rootRuntimeSame=" << (root_runtime == anchor_runtime) << " rootRuntimeLengths="
+                  << root_runtime.size() << ',' << anchor_runtime.size() << " rootNativeWindow=" << root_handle
+                  << " ownedPID=" << product.process.dwProcessId << '\n' << std::flush;
+    };
     const auto change_expansion = [&](const char* operation, bool opening) {
         product.guard(combo.get());
+        trace_ancestry("before");
         const auto trace_events = [&](const char* stage) {
             const auto counts = events->snapshot();
             std::cout << operation << ' ' << stage << " invoke=" << counts[0] << " selection=" << counts[1]
@@ -1777,6 +1803,7 @@ void actual_product_settings_patterns_commit_and_announce() {
         trace_events("before");
         const int before = events->counts[2].load();
         native_ok(operation, opening ? expand->Expand() : expand->Collapse());
+        trace_ancestry("after");
         native_ok("Reading.afterExpansionState", expand->get_CurrentExpandCollapseState(&after_state));
         const auto after_runtime = native_runtime(combo.get());
         std::cout << operation << " afterState=" << after_state << " runtimeSame=" << (before_runtime == after_runtime)
