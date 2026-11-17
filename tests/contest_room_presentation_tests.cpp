@@ -224,11 +224,11 @@ int main() {
             ContestRoomPanel panel;
             assert(std::string(panel.active_tab_label(vi)) == (vi ? "Thiết lập" : "Setup"));
             panel.draw(OperatorRole::teacher, vi, dark, dpi, heading.font, sas.font, true);
-            ImGuiWindow* content = nullptr;
+            ImGuiWindow* content_window = nullptr;
             for (auto* window : ImGui::GetCurrentContext()->Windows)
                 if (window->ParentWindow == ImGui::GetCurrentWindow() &&
-                    std::string_view(window->Name).find("contest-content") != std::string_view::npos) content = window;
-            assert(content && content->InnerRect.GetHeight() >= layout::minimum_content_height * dpi);
+                    std::string_view(window->Name).find("contest-content") != std::string_view::npos) content_window = window;
+            assert(content_window && content_window->InnerRect.GetHeight() >= layout::minimum_content_height * dpi);
             ImGui::End(); ImGui::Render();
 
             ImGui::NewFrame();
