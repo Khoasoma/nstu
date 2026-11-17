@@ -145,6 +145,7 @@
   const manifest = normalizeManifest(window.NSTU_EXAM_MANIFEST);
   const programming = manifest.contentMode === "computer_science" && window.NstuProgramming;
   const programmingPreview = window.NSTU_EXAM_PREVIEW === true;
+  const ordinaryProgramming = Boolean(programming && !programmingPreview && window.NSTU_EXAM_HOST_POLICY === "ordinary_user");
   // Native package validation normally guarantees these shapes. Keep the
   // static-preview and failure paths defensive as well: a malformed manifest
   // must produce an unavailable-question message, not a blank kiosk page.
@@ -908,11 +909,85 @@
   const text = (key) => (I18N[state.language][key] || I18N.en[key] || key);
   const question = () => manifest.questions[state.index];
   let programmingSession = null, programmingHost = null, programmingClock = null, programmingRetryAt = 0;
+  let contestLifecycle = null, contestClosed = false, contestFinishPending = false, contestReadOnly = false;
+  let closeCapture = null, completedCloseCapture = null, closeCaptureStatus = "", closeCaptureLocked = false;
+  const closeCaptureNonces = new Set();
   const programmingViews = new Map();
+  function cancelCloseCapture() {
+    if (closeCapture) { closeCapture.cancelers.forEach(cancel => cancel()); closeCapture = null; }
+    completedCloseCapture = null;
+    closeCaptureLocked = false;
+  }
+  function invalidateCloseCapture() {
+    closeCaptureStatus = "failed";
+    if (closeCapture) { closeCapture.invalidated = true; return; }
+    if (completedCloseCapture) {
+      const capture = completedCloseCapture;
+      if (!postHostMessage({ type: "exam_close_capture_failed", context: { ...capture.context }, nonce: capture.nonce,
+        localSaved: false, documents: [], reason: "document_unavailable" })) { updateSubmissionLock(); return; }
+      if (completedCloseCapture !== capture) return;
+      completedCloseCapture = null;
+    }
+    closeCaptureLocked = false;
+    updateSubmissionLock();
+  }
+  function validCloseMessage(message) {
+    return ordinaryProgramming && bridgeReady() && !Object.keys(message).some(key => !["type", "context", "nonce"].includes(key)) &&
+      typeof message.nonce === "string" && /^[0-9a-f]{64}$/.test(message.nonce) && message.context && typeof message.context === "object" && !Array.isArray(message.context) &&
+      Object.keys(message.context).length === 5 && ["packageId", "packageDigestHex", "clientIdHex", "sessionIdHex", "candidateId"].every(key => message.context[key] === examContext[key]);
+  }
+  function cancelCloseFromNative(message) {
+    const capture = completedCloseCapture || closeCapture;
+    if (!validCloseMessage(message) || !capture || capture.nonce !== message.nonce || capture.session !== programmingSession) return;
+    cancelCloseCapture(); closeCaptureStatus = "failed"; updateSubmissionLock();
+  }
+  function closeStatusText() {
+    if (!closeCaptureStatus) return "";
+    if (closeCaptureStatus === "capturing") return state.language === "vi" ? "Đang lưu bản nháp trước khi đóng…" : "Preserving drafts before closing…";
+    if (closeCaptureStatus === "waiting") return state.language === "vi" ? "Tạm dừng chỉnh sửa trong khi bản nháp được lưu trước khi đóng." : "Editing is paused while drafts are preserved for closing.";
+    return state.language === "vi" ? "Cửa sổ vẫn mở cho đến khi bản nháp được lưu bền vững." : "The editor stays open until drafts are durably preserved.";
+  }
+  async function captureForClose(message) {
+    if (!validCloseMessage(message) || closeCaptureNonces.has(message.nonce) || completedCloseCapture) return;
+    if (closeCaptureNonces.size >= 256) return;
+    closeCaptureNonces.add(message.nonce); cancelCloseCapture();
+    const session = programmingSession;
+    const token = { context: { ...message.context }, nonce: message.nonce, session, cancelers: new Set(), current: () => closeCapture === token && programmingSession === session };
+    closeCapture = token; closeCaptureStatus = "capturing";
+    let inventory;
+    try {
+      const entries = Array.from(programmingViews), views = entries.map(([, view]) => view);
+      const sameViews = () => entries.length === programmingViews.size && entries.every(([id, view]) => programmingViews.get(id) === view);
+      const ended = await Promise.all(views.map(view => view.wait_for_close(token)));
+      if (!token.current()) return;
+      if (!sameViews() || !ended.every(Boolean) || views.some(view => view.close_composing())) inventory = { complete: false, localSaved: session.localSaved(), documents: [], reason: sameViews() ? "composition_pending" : "document_unavailable" };
+      else {
+        closeCaptureLocked = true; views.forEach(view => view.refresh());
+        const captured = views.map(view => view.capture_for_close(token));
+        inventory = captured.every(Array.isArray) ? session.flush_for_close(captured.flat()) : { complete: false, localSaved: session.localSaved(), documents: [], reason: "document_unavailable" };
+        if (token.invalidated || !sameViews() || captured.some((snapshots, index) => !snapshots || !views[index].matches_close_capture(snapshots))) inventory = { complete: false, localSaved: session.localSaved(), documents: [], reason: "document_unavailable" };
+      }
+    } catch (_) { inventory = { complete: false, localSaved: false, documents: [], reason: "document_unavailable" }; }
+    if (!token.current()) return;
+    closeCapture = null; completedCloseCapture = token; closeCaptureStatus = inventory.complete ? "waiting" : "failed";
+    closeCaptureLocked = true;
+    const reply = { type: inventory.complete ? "exam_close_capture_complete" : "exam_close_capture_failed", context: { ...message.context }, nonce: message.nonce,
+      localSaved: inventory.localSaved, documents: inventory.documents };
+    if (!inventory.complete) reply.reason = inventory.reason;
+    // Posting is only a browser observation; the native owner verifies durable IDs before closing.
+    const posted = postHostMessage(reply);
+    if (completedCloseCapture === token) {
+      if (posted && !inventory.complete) { completedCloseCapture = null; closeCaptureLocked = false; }
+      if (!posted) closeCaptureStatus = "failed";
+    }
+    programmingViews.forEach(view => view.refresh());
+  }
   function initializeProgrammingSession() {
     if (!programming) return;
+    cancelCloseCapture(); closeCaptureStatus = "";
     programmingViews.clear();
     programmingClock = null;
+    contestLifecycle = null; contestClosed = false; contestFinishPending = false; contestReadOnly = false;
     programmingRetryAt = window.performance.now();
     if (programmingHost) programmingHost.textContent = "";
     let storage = null;
@@ -922,8 +997,8 @@
         clientIdHex: examContext.clientIdHex, sessionIdHex: examContext.sessionIdHex, candidateId: examContext.candidateId },
       key: contextKey(examContext) ? `${storageKey}:programming-v1` : programmingPreview ? `nstu-programming-preview:${manifest.id}` : "",
       storage, hash: source => hexString(sha256(utf8Encode(source))),
-      send: message => !programmingPreview && bridgeReady() && postHostMessage(message),
-      onChange: () => { programmingViews.forEach(view => view.refresh()); }
+      send: message => !programmingPreview && bridgeReady() && (!ordinaryProgramming || contextKey(message.context) === contextKey(examContext)) && postHostMessage(message),
+      onChange: () => { if (!closeCapture) programmingViews.forEach(view => view.refresh()); }
     });
   }
   function renderProgrammingQuestion() {
@@ -939,13 +1014,16 @@
     }
     document.querySelector('[data-action="submit"]').textContent = state.language === "vi" ? "Kết thúc bài làm" : "Finish attempt";
     document.querySelector('[data-action="submit"]').hidden = programmingPreview;
+    if (ordinaryProgramming) document.querySelector('[data-action="submit"]').disabled = !state.started || contestClosed;
     document.querySelector('[data-i18n="questions"]').textContent = state.language === "vi" ? "Bài toán" : "Problems";
     document.querySelector('[data-i18n="computerBasedAssessment"]').textContent = state.language === "vi" ? "Tin học" : "Computer science";
     const problem = question();
     let view = programmingViews.get(problem.id);
     if (!view) {
       view = programming.mountWorkspace(programmingHost, programmingSession, problem,
-        { language: () => state.language, started: () => programmingPreview || state.started, preview: programmingPreview });
+        { language: () => state.language, started: () => programmingPreview || state.started && !contestClosed, preview: programmingPreview,
+          ordinary: ordinaryProgramming, closeStatus: closeStatusText, closeCapturing: () => closeCapture !== null || closeCaptureStatus === "failed",
+          closeLocked: () => closeCaptureLocked || contestReadOnly, onCloseEdit: invalidateCloseCapture });
       programmingViews.set(problem.id, view);
     }
     programmingViews.forEach((item, id) => { item.root.hidden = id !== problem.id; item.refresh(); });
@@ -955,6 +1033,7 @@
   function updateSubmissionLock() {
     if (programming) {
       if (programmingSession) programmingViews.forEach(view => view.refresh());
+      if (ordinaryProgramming) document.querySelector('[data-action="submit"]').disabled = !state.started || contestClosed;
       return;
     }
     const finalized = state.serverFinalized === true ||
@@ -2233,9 +2312,13 @@
       try { message = JSON.parse(message); } catch (_) { return; }
     }
     if (!message || typeof message.type !== "string") return;
+    if (message.type === "exam_close_capture_request") { void captureForClose(message); return; }
+    if (message.type === "exam_close_capture_cancel") { cancelCloseFromNative(message); return; }
+    if (message.type === "exam_contest_lifecycle") { applyContestLifecycle(message); return; }
     if (programming && message.type === "exam_programming_response") {
       if (programmingSession && programmingSession.receive(message)) {
-        if (state.started && ["ready", "recover"].includes(message.operation) && Number.isSafeInteger(message.serverTime) && message.serverTime > 0) {
+        if (ordinaryProgramming && completedCloseCapture && ["unavailable", "rejected", "conflict", "closed"].includes(message.status)) closeCaptureStatus = "failed";
+        if (!ordinaryProgramming && state.started && ["ready", "recover"].includes(message.operation) && Number.isSafeInteger(message.serverTime) && message.serverTime > 0) {
           const remaining = Math.max(0, state.activeDurationSeconds - Math.floor((message.serverTime - state.serverStartUnixMilliseconds) / 1000));
           const monotonic = window.performance.now();
           const previous = programmingClock ? Math.max(0, programmingClock.remaining - Math.floor((monotonic - programmingClock.monotonic) / 1000)) : remaining;
@@ -2263,6 +2346,7 @@
       }
       const previousStorageKey = storageKey;
       const contextChanged = nextContextKey !== activeStorageContextKey;
+      if (ordinaryProgramming && completedCloseCapture && contextChanged) return;
       examContext = nextContext;
       configureStorage(nextContext);
       if (contextChanged) {
@@ -2281,6 +2365,7 @@
       beginStateReconcile();
       flushAnswerBridge();
     } else if (message.type === "exam_begin") {
+      if (ordinaryProgramming) return;
       const begin = message.begin && typeof message.begin === "object"
         ? message.begin : message;
       const duration = Number(begin.durationSeconds);
@@ -3131,17 +3216,84 @@
     timer.classList.toggle("danger", state.remainingSeconds <= 60);
   }
 
+  function finishClosedContest() {
+    if (!contestFinishPending || !programmingSession) return;
+    const entries = Array.from(programmingViews), views = entries.map(([, view]) => view);
+    if (views.some(view => view.close_composing())) return;
+    const token = { current: () => contestFinishPending && entries.length === programmingViews.size &&
+      entries.every(([id, view]) => programmingViews.get(id) === view) };
+    const snapshots = views.map(view => view.capture_for_close(token));
+    if (!token.current() || snapshots.some(snapshot => !snapshot) ||
+        views.some((view, index) => !view.matches_close_capture(snapshots[index]))) return;
+    contestReadOnly = true;
+    const inventory = programmingSession.flush_for_close(snapshots.flat());
+    if (inventory.complete) {
+      programmingSession.finish();
+      contestFinishPending = false;
+    } else {
+      setConnectionStatus(state.language === "vi" ? "Mã nguồn đang chờ lưu bền vững. Hãy giữ cửa sổ này mở." : "Source preservation is pending. Keep this window open.");
+    }
+    updateSubmissionLock(); renderQuestionList(); renderProgrammingQuestion();
+  }
+
+  function applyContestLifecycle(message) {
+    if (!ordinaryProgramming || !programmingSession || !message.context ||
+        Object.keys(message).length !== 7 || Object.keys(message).some(key => !["type", "context", "phase", "revision", "serverStart", "deadline", "serverTime"].includes(key)) ||
+        Object.keys(message.context).length !== 5 || Object.keys(message.context).some(key => !["packageId", "packageDigestHex", "clientIdHex", "sessionIdHex", "candidateId"].includes(key)) ||
+        contextKey(message.context) !== contextKey(examContext) || !["Draft", "Joining", "Prepared", "Running", "Closed"].includes(message.phase) ||
+        !["revision", "serverStart", "deadline", "serverTime"].every(key => Number.isSafeInteger(message[key]) && message[key] >= 0) ||
+        message.revision === 0 || message.serverTime === 0) return;
+    const active = message.serverStart !== 0 || message.deadline !== 0;
+    if (active && (message.serverStart === 0 || message.deadline - message.serverStart !== manifest.durationSeconds * 1000 || message.serverTime < message.serverStart) ||
+        message.phase === "Running" && !active || !["Running", "Closed"].includes(message.phase) && active) return;
+    if (contestLifecycle && (message.revision < contestLifecycle.revision || message.serverTime < contestLifecycle.serverTime ||
+        message.revision === contestLifecycle.revision && message.phase !== contestLifecycle.phase ||
+        contestLifecycle.phase === "Closed" && message.phase !== "Closed" ||
+        contestLifecycle.phase === "Running" && !["Running", "Closed"].includes(message.phase) ||
+        (contestLifecycle.serverStart || contestLifecycle.phase === "Closed") &&
+          (message.serverStart !== contestLifecycle.serverStart || message.deadline !== contestLifecycle.deadline))) return;
+    contestLifecycle = { ...message, context: { ...message.context } };
+    if (message.phase === "Closed") {
+      contestClosed = true; contestFinishPending = !programmingSession.frozen();
+      if (active) {
+        state.started = true; state.serverStartUnixMilliseconds = message.serverStart; state.activeDurationSeconds = manifest.durationSeconds;
+        el("loading-screen").hidden = true; el("loading-screen").setAttribute("aria-busy", "false"); el("exam-shell").hidden = false;
+      }
+      programmingSession.invalidateRunner(); state.remainingSeconds = 0; updateTimer();
+      updateSubmissionLock(); finishClosedContest(); return;
+    }
+    if (message.phase !== "Running" || contestClosed) return;
+    const monotonic = rawPerformanceMs();
+    if (monotonic === null || programmingClock && monotonic < programmingClock.monotonic) return;
+    const remaining = Math.max(0, Math.ceil((message.deadline - message.serverTime) / 1000));
+    const previous = programmingClock ? Math.max(0, programmingClock.remaining - Math.floor((monotonic - programmingClock.monotonic) / 1000)) : remaining;
+    programmingClock = { remaining: Math.min(previous, remaining), monotonic };
+    state.serverStartUnixMilliseconds = message.serverStart; state.activeDurationSeconds = manifest.durationSeconds;
+    state.remainingSeconds = programmingClock.remaining; state.started = true;
+    el("loading-screen").hidden = true; el("loading-screen").setAttribute("aria-busy", "false"); el("exam-shell").hidden = false;
+    updateSubmissionLock(); updateTimer();
+    if (state.remainingSeconds === 0) { contestClosed = true; contestFinishPending = true; finishClosedContest(); }
+  }
+
   function tick() {
     if (programming) {
       if (programmingPreview) return;
-      const now = window.performance.now();
+      const now = ordinaryProgramming ? rawPerformanceMs() : window.performance.now();
+      if (ordinaryProgramming && (now === null || programmingClock && now < programmingClock.monotonic)) {
+        contestClosed = true; contestFinishPending = !programmingSession.frozen(); programmingSession.invalidateRunner();
+        state.remainingSeconds = 0; updateTimer(); finishClosedContest(); return;
+      }
+      if (ordinaryProgramming && contestFinishPending) finishClosedContest();
       if (!programmingSession.finished() && now - programmingRetryAt >= 5000) {
         programmingRetryAt = now; programmingSession.retry();
       }
       if (!state.started || programmingSession.frozen()) return;
       const remaining = programmingClock ? Math.max(0, programmingClock.remaining - Math.floor((now - programmingClock.monotonic) / 1000)) : 0;
       state.remainingSeconds = remaining; updateTimer();
-      if (remaining === 0) submitResponse();
+      if (remaining === 0) {
+        if (ordinaryProgramming) { contestClosed = true; contestFinishPending = true; programmingSession.invalidateRunner(); finishClosedContest(); }
+        else submitResponse();
+      }
       return;
     }
     if (!state.started || state.submitted) return;
@@ -3173,7 +3325,12 @@
 
   function submitResponse() {
     if (programming) {
-      if (programmingPreview || !programmingSession) return false;
+      if (programmingPreview || !programmingSession || ordinaryProgramming && !state.started) return false;
+      if (ordinaryProgramming) {
+        contestClosed = true; contestFinishPending = !programmingSession.frozen();
+        programmingSession.invalidateRunner(); finishClosedContest();
+        return programmingSession.finished();
+      }
       programmingViews.forEach(view => view.capture());
       const result = programmingSession.finish();
       renderQuestionList(); renderProgrammingQuestion(); return result;
@@ -3365,8 +3522,8 @@
   if (programming) initializeProgrammingSession();
   const synchronizedStart = Boolean(hostWebView() && examContext.synchronizedStart);
   state.started = programming ? programmingPreview : !synchronizedStart;
-  el("loading-screen").hidden = programming ? programmingPreview : !synchronizedStart;
-  el("exam-shell").hidden = programming ? !programmingPreview : synchronizedStart;
+  el("loading-screen").hidden = programming ? programmingPreview || ordinaryProgramming : !synchronizedStart;
+  el("exam-shell").hidden = programming ? !programmingPreview && !ordinaryProgramming : synchronizedStart;
   bindEvents();
   applyLanguage();
   activateQuestion(0, "navigation_initial");

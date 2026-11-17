@@ -2,6 +2,7 @@
 
 #include "nstu/agent_protocol.hpp"
 #include "nstu/exam_bridge.hpp"
+#include "nstu/exam_control.hpp"
 #include "nstu/exam_telemetry.hpp"
 #include "nstu/programming.hpp"
 
@@ -22,8 +23,19 @@
 
 namespace nstu::client {
 
-// The host consumes an unpacked, already-enrolled package.  It never accepts
-// a path supplied by the web page; the service/provisioning layer supplies the
+enum class ExamHostPolicy : std::uint8_t { managed, ordinary_user };
+
+struct ExamHostWindowPolicy {
+    DWORD style = WS_POPUP;
+    DWORD extended_style = WS_EX_TOPMOST | WS_EX_TOOLWINDOW;
+    bool managed_lockdown = true;
+};
+
+[[nodiscard]] std::optional<ExamHostWindowPolicy> exam_host_window_policy(
+    ExamHostPolicy policy) noexcept;
+
+// The host consumes an unpacked, verified package. It never accepts
+// a path supplied by the web page; the trusted native owner supplies the
 // package root and identity-bound context before the window is created.
 struct ExamHostOptions {
     std::filesystem::path package_root;
@@ -41,6 +53,84 @@ struct ExamHostOptions {
     std::string context_json;
     std::string expected_digest_hex;
     bool require_digest = true;
+    ExamHostPolicy policy = ExamHostPolicy::managed;
+    // Ordinary callers supply the trusted per-user packages directory and a
+    // separate trusted profile root. Neither root may come from the web page.
+    std::filesystem::path allowed_package_root;
+};
+
+struct ExamCloseCaptureDocument {
+    std::string problem_id;
+    std::uint32_t problem_revision = 0;
+    std::string language;
+    std::uint64_t draft_revision = 0;
+    std::string source_digest;
+    std::string request_id;
+    // Browser observations only: forwarded/queued/received never prove native durability.
+    std::string status;
+    bool operator==(const ExamCloseCaptureDocument&) const = default;
+};
+
+enum class ExamHostContestPhase { draft, joining, prepared, running, closed };
+struct ExamHostContestLifecycle {
+    exam::StateRequest context;
+    ExamHostContestPhase phase = ExamHostContestPhase::draft;
+    std::uint64_t revision = 0, server_start = 0, deadline = 0, server_time = 0;
+};
+class ExamHostContestLifecycleState {
+public:
+    [[nodiscard]] bool accept(const ExamHostContestLifecycle& value);
+    [[nodiscard]] std::string json() const;
+    [[nodiscard]] bool publish(const std::function<bool(std::string_view)>& post) const;
+    void reset() noexcept { current_.reset(); ++publication_; }
+private:
+    std::optional<ExamHostContestLifecycle> current_;
+    std::uint64_t publication_ = 0;
+};
+
+struct ExamCloseCaptureReport {
+    exam::StateRequest context;
+    std::uint64_t generation = 0;
+    std::string nonce;
+    bool complete = false;
+    bool local_saved = false;
+    std::vector<ExamCloseCaptureDocument> documents;
+    std::string reason;
+};
+
+// UI-thread state independent of WebView creation, like host telemetry state.
+// Keeps the native nonce live through preservation; cancellation invalidates it
+// before posting to JS. Metadata never contains source or grants durable proof.
+class ExamHostCloseCaptureState {
+public:
+    using Clock = std::chrono::steady_clock;
+    [[nodiscard]] bool start(exam::StateRequest context, std::string_view manifest,
+                             std::uint64_t generation);
+    void stop() noexcept;
+    [[nodiscard]] bool prepare(const std::function<bool(std::string_view)>& post,
+                               Clock::time_point now = Clock::now());
+    // Failed posts retain only the cancellation for retry, never a closing report.
+    [[nodiscard]] bool cancel(const std::function<bool(std::string_view)>& post);
+    // Allocation-free revocation; keep only the nonce needed to release the browser barrier.
+    void invalidate() noexcept;
+    [[nodiscard]] bool accept(std::string_view json, Clock::time_point now = Clock::now());
+    [[nodiscard]] bool expired(Clock::time_point now = Clock::now()) const noexcept;
+    [[nodiscard]] std::optional<ExamCloseCaptureReport> report() const { return report_; }
+    [[nodiscard]] bool is_current_complete(const ExamCloseCaptureReport& report) const noexcept;
+    // Runs the owner's bounded durable predicate against a snapshot, then checks
+    // that it remained live. Only actual host teardown consumes a successful one.
+    [[nodiscard]] bool preserve(const std::function<bool(const ExamCloseCaptureReport&)>& predicate);
+private:
+    exam::StateRequest context_{};
+    std::map<std::string, std::uint32_t> problems_;
+    std::uint64_t generation_ = 0;
+    std::string nonce_;
+    std::string cancellation_nonce_;
+    std::optional<ExamCloseCaptureReport> report_;
+    Clock::time_point deadline_{};
+    std::set<std::string> issued_nonces_;
+    bool preserving_ = false;
+    bool cancelling_ = false;
 };
 
 struct ExamHostCallbacks {
@@ -48,6 +138,24 @@ struct ExamHostCallbacks {
     // for the service pipe; it must not perform blocking I/O on this thread.
     std::function<void(AgentMessage)> send_to_service;
     std::function<void(std::string)> status;
+    // Ordinary policy uses only these typed callbacks, never the service pipe.
+    // True means the owner accepted the request into its queue, not Received.
+    std::function<bool(const exam::programming::Request&)> enqueue_programming_request;
+    std::function<bool(const exam::ExamReadyReport&)> report_ready;
+    // Bounded, nonblocking UI-thread predicate. False keeps the editor open
+    // while the owner captures current drafts (including IME) asynchronously.
+    // True requires completed capture and durable preservation of drafts and
+    // these pending immutable requests. It never means Submit/Finish/Received.
+    // For an editable ordinary page the host requires a live complete capture
+    // before calling this predicate. The owner must verify EVERY capture_report()
+    // document's exact tuple/revision/digest/request ID using native durable
+    // outbox or validated receipt evidence, plus pending requests. Browser status,
+    // localSaved and the pending map are insufficient. Re-checks after this
+    // callback reject cancellation/revocation/replacement during preservation.
+    std::function<bool(const std::map<std::string, exam::programming::Request>&)> before_close;
+    // Optional bounded, nonblocking UI-thread notification. A missing report
+    // means capture was consumed/cancelled; failed reports revoke completion.
+    std::function<void(std::optional<ExamCloseCaptureReport>)> capture_updated;
 };
 
 enum class ExamHostState : std::uint8_t {
@@ -66,6 +174,11 @@ struct ExamPackageReport {
     std::string manifest_json;
     std::string digest_hex;
 };
+
+// The same package/context validation used by start(), without creating UI.
+[[nodiscard]] bool validate_exam_host_options(
+    const ExamHostOptions& options, ExamPackageReport& report,
+    std::string* error = nullptr);
 
 struct ExamLockdownPolicy {
     std::vector<std::string> allowed_origins;   // validated, de-duplicated
@@ -232,19 +345,29 @@ public:
     ExamHost(const ExamHost&) = delete;
     ExamHost& operator=(const ExamHost&) = delete;
 
-    // Must be called on the agent's UI/STA thread.  WebView2 initialization is
-    // asynchronous; success means the kiosk window and validation completed,
+    // Must be called on the owner's UI/STA thread. WebView2 initialization is
+    // asynchronous; success means the window and validation completed,
     // while the state may remain `initializing` until the browser is ready.
     // Agent command publications preserve enables for subsequently queued
     // operations. The default publication is for standalone callers.
+    // Replacing an ordinary host first passes its existing close gate.
     [[nodiscard]] bool start(HWND owner, const ExamHostOptions& options,
                              ExamHostCallbacks callbacks,
                              std::string* error = nullptr,
                              std::uint64_t command_publication = 0);
     // A queued stop clears only through its publication; a standalone stop
     // (publication zero) clears the entire pending enable slot.
+    // Forced teardown does not capture drafts; ordinary owners must complete
+    // their preservation contract before calling stop() or destroying the host.
     void stop(std::uint64_t command_publication = 0) noexcept;
+    // Ordinary WM_CLOSE uses this preservation gate. Managed callers use stop.
+    [[nodiscard]] bool request_close() noexcept;
+    [[nodiscard]] bool prepare_capture() noexcept;
+    [[nodiscard]] bool cancel_capture() noexcept;
+    [[nodiscard]] std::optional<ExamCloseCaptureReport> capture_report() const;
     void drain_bridge();
+    // Trusted ordinary-owner publication; coalesced until WebView is ready.
+    [[nodiscard]] bool apply_contest_lifecycle(const ExamHostContestLifecycle& lifecycle) noexcept;
     void enforce_foreground() noexcept;
 
     [[nodiscard]] bool active() const noexcept;

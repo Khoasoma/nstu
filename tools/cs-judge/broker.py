@@ -164,7 +164,7 @@ def validate_manifest(manifest):
 
 
 class Broker:
-    def __init__(self, database, token, runner=None, clock=None):
+    def __init__(self, database, token, runner=None, clock=None, owner_id=None):
         if not isinstance(token, str) or len(token.encode()) < 32:
             raise ValueError('operator secret must contain at least 32 bytes')
         self.token, self.runner = token, runner
@@ -172,6 +172,8 @@ class Broker:
         self.lock = threading.RLock()
         self.clock_lock = threading.Lock()
         self.clock_regressed = False
+        self.runner_probe_sequence = 0
+        self.latest_runner_probe = None
         self.runs = {}
         self.closed = False
         self.lease = open(str(database) + '.lock', 'a+b')
@@ -192,10 +194,16 @@ class Broker:
             raise BrokerError('storage_unavailable', 503) from None
         try:
             self._initialize_database()
-            self.last_observed_clock = self.db.execute('SELECT max(last_clock) FROM sessions').fetchone()[0] or 0
-        except sqlite3.Error:
+            from contest_rooms import ContestRooms
+            self.rooms = ContestRooms(self, owner_id)
+            self.last_observed_clock = self.db.execute('SELECT max(last_clock) FROM '
+                '(SELECT last_clock FROM sessions UNION ALL SELECT last_clock FROM contest_rooms '
+                'UNION ALL SELECT last_clock FROM contest_clock)').fetchone()[0] or 0
+        except (sqlite3.Error, BrokerError) as error:
             self.db.close()
             self.lease.close()
+            if isinstance(error, BrokerError):
+                raise
             raise BrokerError('storage_unavailable', 503) from None
 
     def _initialize_database(self):
@@ -245,6 +253,9 @@ class Broker:
             raise BrokerError('invalid_fields')
         admission = self.capture_admission() if admission is None else admission
         try:
+            self.rooms.checkpoint(admission)
+            if route.startswith('/v1/contest-rooms/'):
+                return self.rooms.dispatch(route, body, admission)
             if route == '/v1/validate-context':
                 with self.lock:
                     return self._validate_context(body)
@@ -258,17 +269,19 @@ class Broker:
                 return self._run(body)
             if route == '/v1/programming' and body.get('operation') == 'cancel':
                 return self._cancel(body)
+            probe = self._runner_snapshot() if (route == '/v1/sessions' or route == '/v1/begin' or
+                     route == '/v1/programming' and body.get('operation') == 'ready') else None
             with self.lock, self.db:
                 if route == '/v1/packages':
                     return self._package(body)
                 if route == '/v1/grading':
                     return self._grading(body)
                 if route == '/v1/sessions':
-                    return self._create_session(body)
+                    return self._create_session(body, probe)
                 if route in {'/v1/begin', '/v1/stop'}:
-                    return self._lifecycle(route, body)
+                    return self._lifecycle(route, body, probe)
                 if route == '/v1/programming':
-                    return self._operation(body, admission)
+                    return self._operation(body, admission, probe)
             raise BrokerError('unknown_route', 404)
         except sqlite3.Error:
             raise BrokerError('storage_unavailable', 503) from None
@@ -339,7 +352,7 @@ class Broker:
         self.db.execute('INSERT OR IGNORE INTO grading VALUES(?,?,?)', (digest, body['packageDigestHex'], wire))
         return dict(status='registered', gradingDigestHex=digest)
 
-    def _create_session(self, body):
+    def _create_session(self, body, probe):
         fields(body, CONTEXT | {'programmingVersion', 'sessionMode', 'gradingDigestHex'},
                CONTEXT | {'programmingVersion', 'sessionMode', 'gradingDigestHex'})
         ctx = context(body)
@@ -351,7 +364,11 @@ class Broker:
         if not grading or grading['package_digest'] != ctx['packageDigestHex']:
             raise BrokerError('grading_unavailable', 409)
         key = session_key(ctx)
-        toolchain = self._runtime_identity()
+        if self.rooms.linked(key):
+            raise BrokerError('room_authority_required', 409)
+        if not self._runtime_matches(probe):
+            raise BrokerError('runtime_mismatch', 409)
+        toolchain = probe[1]
         old = self.db.execute('SELECT * FROM sessions WHERE key=?', (key,)).fetchone()
         if old and (old['grading_digest'] != body['gradingDigestHex'] or old['mode'] != body['sessionMode'] or old['toolchain'] != toolchain):
             raise BrokerError('conflict', 409)
@@ -374,28 +391,51 @@ class Broker:
                     operation=body['operation'], requestId=body['requestId'], status=status,
                     serverTime=self.clock(), **extra)
 
-    def _runtime_identity(self):
-        if self.runner is None:
-            return ''
-        config = getattr(self.runner, 'config', None)
-        if config:
-            return config_identity(config)
-        return self.runner.ready().get('toolchainId', '')
+    def _runner_snapshot(self):
+        with self.lock:
+            self.runner_probe_sequence += 1
+            sequence, runner = self.runner_probe_sequence, self.runner
+        identity, available, config_pin = '', False, ''
+        if runner is not None:
+            config = getattr(runner, 'config', None)
+            config_pin = config_identity(config) if config else ''
+            identity = config_pin
+            try:
+                result = runner.ready()
+                if not config:
+                    identity = result.get('toolchainId', '')
+                if not isinstance(identity, str) or len(identity.encode()) > 128:
+                    identity = ''
+                available = bool(result.get('available')) and result.get('languages') == LANGUAGES
+            except (OSError, RuntimeError, ValueError):
+                available = False
+        probe = runner, identity, available, config_pin, sequence
+        with self.lock:
+            # Slow earlier probes cannot replace newer completed health observations.
+            if self.latest_runner_probe is None or sequence > self.latest_runner_probe[4]:
+                self.latest_runner_probe = probe
+        return probe
 
-    def _available(self, session=None):
-        if self.runner is None:
+    def _runtime_matches(self, probe):
+        if (probe is None or probe[0] is not self.runner or self.latest_runner_probe is None or
+                probe[4] != self.latest_runner_probe[4]):
             return False
-        result = self.runner.ready()
-        return (bool(result.get('available')) and result.get('languages') == LANGUAGES and
-                (session is None or bool(session['toolchain']) and session['toolchain'] == self._runtime_identity()))
+        config = getattr(self.runner, 'config', None)
+        return (config_identity(config) if config else '') == probe[3]
 
-    def _lifecycle(self, route, body):
+    def _snapshot_available(self, probe, session):
+        return (self._runtime_matches(probe) and probe[2] and bool(session['toolchain']) and
+                session['toolchain'] == probe[1])
+
+    def _lifecycle(self, route, body, probe):
         allowed = CONTEXT | {'programmingVersion', 'requestId'}
         if route == '/v1/begin':
             allowed |= {'durationSeconds'}
         fields(body, allowed, allowed)
         identifier(body['requestId'])
         ctx, key, row = self._session(body)
+        if self.rooms.linked(key):
+            raise BrokerError('room_authority_required', 409)
         digest = hashlib.sha256(canonical_json(body)).hexdigest()
         operation = 'begin' if route == '/v1/begin' else 'stop'
         if row[operation + '_response']:
@@ -407,7 +447,7 @@ class Broker:
             duration = integer(body['durationSeconds'], 60, 86400)
             if row['state'] != 'waiting' or now < row['last_clock']:
                 raise BrokerError('attempt_closed', 409)
-            if not self._available(row):
+            if not self._snapshot_available(probe, row):
                 raise BrokerError('runner_unavailable', 503)
             response = dict(ctx, programmingVersion=1, requestId=body['requestId'], status='begun',
                             serverStartUnixMilliseconds=now, deadlineUnixMilliseconds=now + duration * 1000, serverTime=now)
@@ -440,7 +480,7 @@ class Broker:
         integer(body['draftRevision'], 1, 9007199254740991)
         return source, hashlib.sha256(source).hexdigest()
 
-    def _operation(self, body, admission):
+    def _operation(self, body, admission, probe=None):
         operation = body.get('operation')
         if not isinstance(operation, str):
             raise BrokerError('unknown_operation')
@@ -456,8 +496,9 @@ class Broker:
         fields(body, BASE | extra | {'recoveryOnly'}, BASE | extra)
         identifier(body['requestId'])
         ctx, key, session = self._session(body)
+        self.rooms.authorize(key, operation, admission[0])
         if operation == 'ready':
-            available = self._available(session)
+            available = self._snapshot_available(probe, session)
             return self._response(body, 'ready' if available else 'unavailable',
                                   runnerReady=available, reason='' if available else 'runner_unavailable')
         if operation == 'recover':
@@ -551,6 +592,7 @@ class Broker:
         response = self._response(body, 'finalized', receiptId=uuid.uuid4().hex)
         self.db.execute('INSERT INTO finalizations VALUES(?,?,?)', (key, fingerprint, canonical_json(response)))
         self.db.execute("UPDATE sessions SET state='closed' WHERE key=?", (key,))
+        self.rooms.finalized(key)
         active = self.runs.get(key)
         if active:
             active['cancel'].set()
@@ -563,6 +605,7 @@ class Broker:
         identifier(body['targetRunId'])
         with self.lock:
             ctx, key, _ = self._session(body)
+            self.rooms.authorize(key, 'cancel', self.clock())
             self._problem(ctx, body)
             active = self.runs.get(key)
             identity = (body['targetRunId'], body['problemId'], body['problemRevision'], body['language'])
@@ -578,8 +621,10 @@ class Broker:
         required = BASE | {'problemId', 'problemRevision', 'language', 'source', 'draftRevision', 'sampleId'}
         fields(body, required | {'recoveryOnly'}, required)
         identifier(body['requestId'])
+        probe = self._runner_snapshot()
         with self.lock, self.db:
             ctx, key, session = self._session(body)
+            self.rooms.authorize(key, 'run', self.clock())
             source, digest = self._solution(ctx, body)
             problem = self._problem(ctx, body)
             sample = next((s for s in problem['samples'] if s['id'] == body['sampleId']), None)
@@ -587,7 +632,7 @@ class Broker:
                 raise BrokerError('unknown_sample', 404)
             if session['state'] != 'active':
                 raise BrokerError('attempt_closed', 409)
-            if not self._available(session):
+            if not self._snapshot_available(probe, session):
                 raise BrokerError('runner_unavailable', 503)
             now, regressed = self.capture_admission()
             if regressed:
@@ -608,7 +653,7 @@ class Broker:
             expiry.daemon = True
             expiry.start()
         try:
-            result = self.runner.execute(source, body['language'], sample['input'].encode(), problem, 'public', cancel)
+            result = probe[0].execute(source, body['language'], sample['input'].encode(), problem, 'public', cancel)
             status = {'time_limit': 'timeout', 'memory_limit': 'runtime_error', 'output_limit': 'runtime_error'}.get(result['status'], result['status'])
             if status not in {'completed', 'compilation_error', 'runtime_error', 'timeout', 'cancelled'}:
                 raise RuntimeError('invalid public status')
@@ -628,15 +673,16 @@ class Broker:
                 active['done'].set()
 
     def judge_one(self):
+        probe = self._runner_snapshot()
         with self.lock, self.db:
             row = self.db.execute("SELECT submissions.* FROM submissions JOIN sessions ON sessions.key=submissions.session "
                                   "WHERE judge_state='pending' AND eligible=1 AND sessions.toolchain=? "
                                   "ORDER BY received,submissions.rowid LIMIT 1",
-                                  (self._runtime_identity(),)).fetchone()
+                                  (probe[1],)).fetchone()
             if row is None:
                 return False
             session = self.db.execute('SELECT * FROM sessions WHERE key=?', (row['session'],)).fetchone()
-            if not self._available(session):
+            if not self._snapshot_available(probe, session):
                 return False
             self.db.execute("UPDATE submissions SET judge_state='running',attempts=attempts+1 WHERE receipt=?", (row['receipt'],))
             ctx = decode_json(session['context'])
@@ -647,7 +693,7 @@ class Broker:
         try:
             # shortcut: each private case compiles in a fresh box; batch only after measured capacity requires it.
             for case in cases:
-                result = self.runner.execute(row['source'], row['language'], case['input'].encode(), problem, 'private', threading.Event())
+                result = probe[0].execute(row['source'], row['language'], case['input'].encode(), problem, 'private', threading.Event())
                 if result['status'] != 'completed' or result.get('truncated'):
                     if result['status'] == 'cancelled':
                         outcome = 'judge_error'
@@ -669,11 +715,12 @@ class Broker:
         return True
 
     def private_score(self, ctx):
-        """Trusted referee processing only; never exposed by the HTTP/candidate API."""
+        """Trusted referee processing; room projection alone selects publishable aggregates."""
         with self.lock:
             _, key, session = self._session(dict(ctx, programmingVersion=1))
             public = self._manifest(ctx)
-            rows = self.db.execute('SELECT * FROM submissions WHERE session=? AND eligible=1 ORDER BY received,rowid', (key,)).fetchall()
+            rows = self.db.execute('SELECT problem,received,judge_state,outcome FROM submissions '
+                                   'WHERE session=? AND eligible=1 ORDER BY received,rowid', (key,)).fetchall()
             score, solved, penalty = 0, 0, 0
             for problem in public['questions']:
                 attempts = [r for r in rows if r['problem'] == problem['id']]
@@ -692,7 +739,10 @@ class Broker:
                             break
                         if attempt['outcome'] in {'wrong_answer', 'runtime_error', 'time_limit', 'memory_limit', 'output_limit'}:
                             wrong += 1
-            return dict(score=score, solved=solved, penaltyMinutes=penalty, eligibleSubmissions=len(rows))
+            freshness = 'unavailable' if any(r['outcome'] == 'judge_error' for r in rows) else (
+                'pending' if any(r['judge_state'] != 'judged' for r in rows) else 'current')
+            return dict(score=score, solved=solved, penaltyMinutes=penalty,
+                        eligibleSubmissions=len(rows), freshness=freshness)
 
 
 def serve(app, port):
@@ -741,12 +791,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--database', required=True)
     parser.add_argument('--config')
+    parser.add_argument('--owner-id', help='single provisioned teacher principal for contest room routes')
     parser.add_argument('--port', type=int, default=47831)
     args = parser.parse_args()
     os.umask(0o077)
     Path(args.database).parent.mkdir(parents=True, exist_ok=True)
     config = decode_json(Path(args.config).read_bytes()) if args.config else None
-    app = Broker(args.database, os.environ.get('NSTU_CS_BROKER_TOKEN', ''), IsolateRunner(config))
+    app = Broker(args.database, os.environ.get('NSTU_CS_BROKER_TOKEN', ''), IsolateRunner(config), owner_id=args.owner_id)
     stop = threading.Event()
     def judge():
         while not stop.wait(0.2):

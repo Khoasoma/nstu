@@ -78,6 +78,7 @@ class FakeNode {
   setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
   setRangeText(value, start, end) { this.value = this.value.slice(0, start) + value + this.value.slice(end); this.selectionStart = this.selectionEnd = start + value.length; }
   focus() { this.ownerDocument.activeElement = this; }
+  blur() { if (this.ownerDocument.activeElement === this) this.ownerDocument.activeElement = null; }
   addEventListener(type, listener) {
     (this.listeners[type] ||= []).push(listener);
   }
@@ -239,6 +240,11 @@ function contextFor(candidateId, clientIdHex = HEX16, sessionIdHex = HEX16_B,
   };
 }
 
+function contestLifecycle(identity, phase, start, serverTime, revision = 3) {
+  const context = Object.fromEntries(["packageId", "packageDigestHex", "clientIdHex", "sessionIdHex", "candidateId"].map(key => [key, identity[key]]));
+  return { type: "exam_contest_lifecycle", context, phase, revision, serverStart: start, deadline: start ? start + 600000 : 0, serverTime };
+}
+
 function contextKey(context) {
   return JSON.stringify([
     context.packageId, context.packageDigestHex, context.clientIdHex,
@@ -318,6 +324,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
     }
   };
   if (options.programming) { window.localStorage = localStorage; window.NSTU_EXAM_PREVIEW = options.preview === true; }
+  if (options.ordinary) window.NSTU_EXAM_HOST_POLICY = "ordinary_user";
   if (Object.prototype.hasOwnProperty.call(options, "assetBase")) {
     window.NSTU_EXAM_ASSET_BASE = options.assetBase;
   }
@@ -344,7 +351,7 @@ function createHarness(initialContext, prepare, localStorage = new FakeStorage()
   if (options.programming) vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "exam", "shared", "programming.js"), "utf8"), context);
   const source = options.captureInspection ? APP_SOURCE.replace(/\}\(\)\);\s*$/, `
     window.captureInspection = { telemetry, emitTelemetrySample, flushTelemetry,
-      resetTelemetryState, saveAnswer, activateQuestion };
+      resetTelemetryState, saveAnswer, activateQuestion, submitResponse, programmingSession };
   }());`) : APP_SOURCE;
   vm.runInContext(source, context, { filename: "exam/web/app.js" });
   return {
@@ -2429,3 +2436,337 @@ testProgrammingTickRecoversRunnerReadiness();
 console.log("programming frozen tick persistence and broker-readiness recovery: 2 passed");
 testProgrammingCandidateUsesTypedBridgeAndMonotonicFinish();
 console.log("programming candidate typed bridge, editor preservation and monotonic timeout: PASS");
+
+const closeIdentity = identity => Object.fromEntries(["packageId", "packageDigestHex", "clientIdHex", "sessionIdHex", "candidateId"].map(key => [key, identity[key]]));
+const closeRequest = (identity, nonce = "12".repeat(32)) => ({ type: "exam_close_capture_request", context: closeIdentity(identity), nonce });
+const closeCancel = (identity, nonce = "12".repeat(32)) => ({ type: "exam_close_capture_cancel", context: closeIdentity(identity), nonce });
+const closeReplies = h => h.webview.messages.filter(message => ["exam_close_capture_complete", "exam_close_capture_failed"].includes(message.type));
+async function settleClose() { for (let index = 0; index < 12; ++index) await Promise.resolve(); }
+async function testOrdinaryPreparationAndCloseCapture() {
+  const identity = contextFor("ordinary-close", HEX16, HEX16_B, true);
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const editors = h.document.nodes.filter(node => node.className === "cs-source");
+  assert.equal(h.document.getElementById("exam-shell").hidden, false, "ordinary preparation shows the editor before Begin");
+  assert.equal(h.document.getElementById("loading-screen").hidden, true);
+  assert.equal(editors[0].disabled, false, "preparation permits draft editing");
+  assert.match(h.document.nodes.find(node => node.className === "cs-status").textContent, /waiting|timer has not started/i);
+  const timer = h.document.getElementById("timer").textContent;
+  for (const label of ["Run sample", "Submit solution"]) assert.equal(h.document.nodes.find(node => node.textContent === label).disabled, true);
+  assert.equal(h.document.querySelector('[data-action="submit"]').disabled, true, "preparation does not expose an early Finish");
+  submitFromForm(h); assert.equal(editors[0].disabled, false, "direct preparation form event cannot finalize the attempt");
+  const ready = h.webview.messages.find(message => message.operation === "ready");
+  h.webview.emit({ type: "exam_programming_response", operation: "ready", requestId: ready.requestId, status: "unavailable" });
+  editors[0].value = "\t// tiếng Việt\r\n"; editors[0].dispatchEvent({ type: "input" });
+  const language = h.document.nodes.find(node => node.className === "cs-language");
+  language.value = "python3"; language.dispatchEvent({ type: "change" });
+  editors[1].value = "print('ế')\r\n\n"; editors[1].dispatchEvent({ type: "compositionstart" });
+  const request = closeRequest(identity);
+  h.webview.emit(request); await settleClose();
+  assert.equal(closeReplies(h).length, 0, "close waits asynchronously for composition to end");
+  assert.equal(editors[1].value, "print('ế')\r\n\n", "capture never changes source to terminate IME");
+  editors[1].dispatchEvent({ type: "compositionend" });
+  editors[1].value += "# committed\r\n"; editors[1].dispatchEvent({ type: "input" });
+  await settleClose();
+  const reply = closeReplies(h)[0];
+  assert.ok(reply); assert.equal(reply.type, "exam_close_capture_complete");
+  assert.deepEqual(reply.context, request.context); assert.equal(reply.nonce, request.nonce);
+  assert.equal(reply.localSaved, true); assert.equal(reply.documents.length, 2);
+  for (const item of reply.documents) {
+    assert.equal(item.status, "forwarded"); assert.ok(item.requestId.length <= 96);
+    assert.ok(h.webview.messages.some(message => message.operation === "draft" && message.requestId === item.requestId && message.source === editors[item.language === "cpp20" ? 0 : 1].value));
+  }
+  assert.equal(JSON.stringify(reply).includes("committed"), false, "no source appears in native capture acknowledgment");
+  assert.equal(h.webview.messages.some(message => ["run", "submit", "finalize"].includes(message.operation)), false);
+  assert.equal(h.document.getElementById("timer").textContent, timer);
+  const forwarded = h.webview.messages.find(message => message.requestId === reply.documents[0].requestId);
+  h.webview.emit({ type: "exam_programming_response", operation: "draft", requestId: forwarded.requestId, problemId: forwarded.problemId,
+    problemRevision: forwarded.problemRevision, language: forwarded.language, draftRevision: forwarded.draftRevision, status: "unavailable", reason: "native outbox unavailable" });
+  assert.match(h.document.nodes.find(node => node.className === "cs-status").textContent, /stays open.*native outbox unavailable/i, "native enqueue rejection cannot close or label draft Received");
+  h.webview.emit(request); await settleClose(); assert.equal(closeReplies(h).length, 1, "duplicate nonce never repeats capture");
+  h.webview.emit(closeCancel(identity, request.nonce));
+  editors[0].value = "latest browser C++ without input notification\r\n";
+  editors[1].value = "latest browser Python without input notification\r\n";
+  h.webview.emit(closeRequest(identity, "90".repeat(32))); await settleClose();
+  for (const area of editors) assert.ok(h.webview.messages.some(message => message.operation === "draft" && message.source === area.value && area.value.startsWith("latest browser")), "capture snapshots all buffers before refreshing either editor");
+  h.webview.emit(closeCancel(identity, "90".repeat(32)));
+  const pending = closeRequest(identity, "34".repeat(32));
+  editors[1].dispatchEvent({ type: "compositionstart" }); h.webview.emit(pending); await settleClose();
+  runTimer(h, timer => timer.delay === 250); await settleClose();
+  assert.equal(closeReplies(h).at(-1).type, "exam_close_capture_failed");
+  assert.equal(closeReplies(h).at(-1).reason, "composition_pending");
+  assert.equal(editors[1].disabled, false, "failed capture leaves the editor usable");
+}
+async function testCloseCaptureCancellationAndFailures() {
+  const identity = contextFor("ordinary-cancellation", HEX16, HEX16_B, true);
+  for (const ordinary of [false, true]) {
+    const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary, manifest: PROGRAMMING_RETRY_MANIFEST });
+    for (const invalid of [closeRequest(identity, "A".repeat(64)), { ...closeRequest(identity), context: { ...closeIdentity(identity), candidateId: "foreign" } },
+      { ...closeRequest(identity), source: "forbidden" }, { ...closeRequest(identity), context: { ...closeIdentity(identity), extra: true } }]) h.webview.emit(invalid);
+    if (!ordinary) h.webview.emit(closeRequest(identity));
+    await settleClose(); assert.equal(closeReplies(h).length, 0);
+  }
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const editor = h.document.nodes.find(node => node.className === "cs-source"); editor.value = "retained composition";
+  editor.dispatchEvent({ type: "compositionstart" }); h.webview.emit(closeRequest(identity)); await settleClose();
+  const replacement = closeRequest(identity, "56".repeat(32)); h.webview.emit(replacement); await settleClose();
+  editor.dispatchEvent({ type: "compositionend" }); await settleClose();
+  assert.deepEqual(closeReplies(h).map(reply => reply.nonce), [replacement.nonce], "superseded capture completion is canceled");
+  h.webview.emit(closeCancel(identity, replacement.nonce));
+  editor.dispatchEvent({ type: "compositionstart" }); h.webview.emit(closeRequest(identity, "78".repeat(32))); await settleClose();
+  h.webview.emit({ type: "exam_context", context: { ...identity, candidateId: "next-candidate" } });
+  editor.dispatchEvent({ type: "compositionend" }); await settleClose();
+  assert.equal(closeReplies(h).length, 1, "old editor/context generation cannot complete capture");
+  assert.equal(h.webview.messages.filter(message => message.operation === "draft" && message.context.candidateId === identity.candidateId && message.source === "retained composition").length, 1,
+    "detached old editor cannot transmit into the new context");
+  const gated = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, captureInspection: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const ready = gated.webview.messages.find(message => message.operation === "ready");
+  const readyResponse = { type: "exam_programming_response", operation: "ready", requestId: ready.requestId, status: "ready", runnerReady: true };
+  gated.webview.emit(readyResponse);
+  const run = gated.document.nodes.find(node => node.textContent === "Run sample"), submit = gated.document.nodes.find(node => node.textContent === "Submit solution");
+  assert.equal(run.disabled, true); assert.equal(submit.disabled, true, "ready alone cannot start ordinary attempts");
+  const area = gated.document.nodes.find(node => node.className === "cs-source"); area.value = "ordinary draft"; area.dispatchEvent({ type: "input" });
+  area.dispatchEvent({ type: "keydown", key: "Enter", ctrlKey: true, preventDefault() {} }); submit.dispatchEvent({ type: "click" });
+  assert.equal(gated.webview.messages.some(message => ["run", "submit", "finalize"].includes(message.operation)), false);
+  gated.webview.emit(contestLifecycle(identity, "Running", gated.now(), gated.now()));
+  assert.equal(run.disabled, false); assert.equal(submit.disabled, false); assert.equal(gated.document.querySelector('[data-action="submit"]').disabled, false);
+  gated.setPerfNow(31000); gated.intervalCallbacks.find(timer => timer.delay === 1000).callback();
+  const remaining = gated.document.getElementById("timer").textContent;
+  gated.webview.emit(closeRequest(identity)); await settleClose();
+  assert.equal(gated.document.getElementById("timer").textContent, remaining, "close capture does not reset a running clock");
+  assert.equal(gated.webview.messages.some(message => ["run", "submit", "finalize"].includes(message.operation)), false);
+  gated.webview.emit(closeCancel(identity));
+  area.dispatchEvent({ type: "compositionstart" }); area.value = "frozen partial IME";
+  gated.webview.emit(closeRequest(identity, "ab".repeat(32))); await settleClose(); submitFromForm(gated);
+  // Model an already-frozen recovered Finish; ordinary UI Finish now waits for composition.
+  gated.window.captureInspection.programmingSession.finish();
+  area.value = "frozen latest IME committed bytes\r\n"; area.dispatchEvent({ type: "compositionend" }); await settleClose();
+  assert.equal(closeReplies(gated).at(-1).type, "exam_close_capture_failed", "close cannot replace a previously frozen Finish snapshot");
+  assert.equal(area.value, "frozen latest IME committed bytes\r\n", "failed preservation retains the latest visible IME bytes for assistance");
+  for (const failure of ["storage", "post"]) {
+    const storage = new FakeStorage(), store = storage.setItem.bind(storage); let fail = false;
+    storage.setItem = (key, value) => { if (fail && key.endsWith(":programming-v1")) throw new Error("quota"); store(key, value); };
+    const failed = createHarness(identity, null, storage, { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+    const area = failed.document.nodes.find(node => node.className === "cs-source"); area.value = "never discarded"; area.dispatchEvent({ type: "input" });
+    if (failure === "storage") fail = true;
+    else failed.webview.postMessage = () => { throw new Error("enqueue unavailable"); };
+    failed.webview.emit(closeRequest(identity)); await settleClose();
+    if (failure === "storage") assert.equal(closeReplies(failed)[0].type, "exam_close_capture_failed");
+    assert.equal(area.value, "never discarded"); assert.equal(area.disabled, false);
+    assert.match(failed.document.nodes.find(node => node.className === "cs-status").textContent, /open|unavailable|not saved/i);
+    assert.equal(failed.webview.messages.some(message => ["submit", "finalize"].includes(message.operation)), false);
+  }
+}
+async function testCloseCaptureUsesOneGlobalCompositionBarrier() {
+  const identity = contextFor("global-close-barrier", HEX16, HEX16_B, true);
+  const manifest = { ...PROGRAMMING_RETRY_MANIFEST, questions: [PROGRAMMING_RETRY_MANIFEST.questions[0], { ...PROGRAMMING_RETRY_MANIFEST.questions[0], id: "q2" }] };
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest });
+  const first = h.document.nodes.find(node => node.className === "cs-source");
+  first.value = "first problem before close\r\n"; first.dispatchEvent({ type: "input" });
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const second = h.document.nodes.filter(node => node.className === "cs-source")[2];
+  second.value = "second problem IME\r\n"; second.dispatchEvent({ type: "compositionstart" });
+  h.webview.emit(closeRequest(identity)); await settleClose();
+  assert.equal(closeReplies(h).length, 0);
+  h.document.querySelector('[data-action="previous"]').dispatchEvent({ type: "click" });
+  first.value = "newest first problem while second composes\r\n"; first.dispatchEvent({ type: "input" });
+  assert.equal(first.readOnly === true, false, "editing remains available until every composition settles");
+  second.dispatchEvent({ type: "compositionend" }); await settleClose();
+  const reply = closeReplies(h)[0]; assert.equal(reply.type, "exam_close_capture_complete");
+  const item = reply.documents.find(item => item.problemId === "q1" && item.language === "cpp20");
+  assert.equal(h.webview.messages.find(message => message.requestId === item.requestId).source, "newest first problem while second composes\r\n",
+    "one global barrier captures the latest first problem after the second problem finishes composition");
+  assert.equal(first.value, "newest first problem while second composes\r\n");
+  assert.ok(h.document.nodes.filter(node => node.className === "cs-source").every(node => node.readOnly), "all buffers remain read-only while native durable preservation is pending");
+}
+async function testOrdinaryRunClickRequiresBegin() {
+  const identity = contextFor("ordinary-run-click", HEX16, HEX16_B, true);
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const ready = h.webview.messages.find(message => message.operation === "ready");
+  h.webview.emit({ type: "exam_programming_response", operation: "ready", requestId: ready.requestId, status: "ready", runnerReady: true });
+  const editor = h.document.nodes.find(node => node.className === "cs-source"); editor.value = "ready before Begin"; editor.dispatchEvent({ type: "input" });
+  const run = h.document.nodes.find(node => node.textContent === "Run sample"); assert.equal(run.disabled, true);
+  run.dispatchEvent({ type: "click" });
+  assert.equal(h.webview.messages.some(message => message.operation === "run"), false, "synthetic ordinary Run click before Begin cannot emit a run request");
+}
+async function testCloseCaptureRejectsNewViewsAndPreservationEdits() {
+  const identity = contextFor("close-preservation-edits", HEX16, HEX16_B, true);
+  for (const mode of ["input", "raw"]) {
+    const storage = new FakeStorage(), write = storage.setItem.bind(storage); let mutate = false, duringReadOnly = false;
+    const h = createHarness(identity, null, storage, { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+    const editor = h.document.nodes.find(node => node.className === "cs-source"); editor.value = "snapshot before preservation"; editor.dispatchEvent({ type: "input" });
+    storage.setItem = (key, value) => {
+      write(key, value);
+      if (mutate && key.endsWith(":programming-v1")) {
+        mutate = false; duringReadOnly = editor.readOnly;
+        editor.value = `newest ${mode} edit during preservation\r\n`;
+        if (mode === "input") editor.dispatchEvent({ type: "input" });
+      }
+    };
+    mutate = true; h.webview.emit(closeRequest(identity)); await settleClose();
+    assert.equal(duringReadOnly, true, "read-only protection starts before persistence/hashing work");
+    assert.equal(closeReplies(h)[0].type, "exam_close_capture_failed", "a post-snapshot mutation cannot produce a successful close acknowledgment");
+    assert.equal(editor.value, `newest ${mode} edit during preservation\r\n`, "failed capture never refreshes an older snapshot over changed visible text");
+    assert.equal(editor.readOnly, false, "failed preservation releases read-only protection");
+    h.webview.emit(closeRequest(identity, "cd".repeat(32))); await settleClose();
+    const reply = closeReplies(h).at(-1); assert.equal(reply.type, "exam_close_capture_complete");
+    const item = reply.documents[0], request = h.webview.messages.find(message => message.requestId === item.requestId);
+    assert.equal(request.source, `newest ${mode} edit during preservation\r\n`); assert.equal(editor.readOnly, true);
+    let prevented = false; editor.dispatchEvent({ type: "beforeinput", preventDefault() { prevented = true; } });
+    assert.equal(prevented, true, "pending native preservation rejects further editing input without changing source");
+    h.webview.emit({ type: "exam_programming_response", operation: request.operation, requestId: request.requestId, problemId: request.problemId,
+      problemRevision: request.problemRevision, language: request.language, draftRevision: request.draftRevision, status: "unavailable", reason: "durable enqueue rejected" });
+    assert.equal(editor.readOnly, true, "a source enqueue failure retains completed nonce until native cancellation");
+    h.webview.emit(closeCancel(identity, reply.nonce));
+    assert.equal(editor.readOnly, false, "native failure releases the editor while retaining its latest source");
+    assert.equal(editor.value, request.source);
+  }
+  const manifest = { ...PROGRAMMING_RETRY_MANIFEST, questions: [PROGRAMMING_RETRY_MANIFEST.questions[0], { ...PROGRAMMING_RETRY_MANIFEST.questions[0], id: "q2" }] };
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest });
+  const first = h.document.nodes.filter(node => node.className === "cs-source")[1]; first.value = "first IME"; first.dispatchEvent({ type: "compositionstart" });
+  h.webview.emit(closeRequest(identity)); await settleClose();
+  h.document.querySelector('[data-action="next"]').dispatchEvent({ type: "click" });
+  const second = h.document.nodes.filter(node => node.className === "cs-source")[2]; second.value = "newly mounted newest draft\r\n"; second.dispatchEvent({ type: "input" });
+  first.dispatchEvent({ type: "compositionend" }); await settleClose();
+  assert.equal(closeReplies(h)[0].type, "exam_close_capture_failed", "a view added during the barrier cannot be silently excluded from a successful inventory");
+  h.webview.emit(closeRequest(identity, "ef".repeat(32))); await settleClose();
+  const reply = closeReplies(h).at(-1); assert.equal(reply.type, "exam_close_capture_complete");
+  const item = reply.documents.find(item => item.problemId === "q2");
+  assert.equal(h.webview.messages.find(message => message.requestId === item.requestId).source, "newly mounted newest draft\r\n");
+}
+async function testCompletedCaptureSurvivesUnrelatedReadyFailure() {
+  const identity = contextFor("completed-capture-ready", HEX16, HEX16_B, true);
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const editor = h.document.nodes.find(node => node.className === "cs-source"); editor.value = "complete source"; editor.dispatchEvent({ type: "input" });
+  h.webview.emit(closeRequest(identity)); await settleClose();
+  const reply = closeReplies(h)[0]; assert.equal(reply.type, "exam_close_capture_complete");
+  const ready = h.webview.messages.find(message => message.operation === "ready");
+  h.webview.emit({ type: "exam_programming_response", requestId: ready.requestId, operation: "ready", status: "unavailable" });
+  assert.equal(editor.readOnly, true, "unrelated Ready unavailable cannot release a completed capture nonce");
+  assert.equal(closeReplies(h).length, 1, "unrelated readiness does not revoke source capture evidence");
+  h.webview.emit({ type: "exam_context", context: { ...identity, candidateId: "uncanceled-next-candidate" } });
+  assert.match(h.document.getElementById("candidate-label").textContent, new RegExp(identity.candidateId), "context replacement cannot implicitly consume completed close evidence");
+  for (const cancel of [closeCancel(identity, "ff".repeat(32)), { ...closeCancel(identity), context: { ...closeIdentity(identity), candidateId: "foreign" } }, { ...closeCancel(identity), extra: true }]) h.webview.emit(cancel);
+  assert.equal(editor.readOnly, true, "only an exact current-context nonce cancellation releases completed capture");
+  h.webview.emit(closeCancel(identity)); assert.equal(editor.readOnly, false);
+  editor.value = "new typed bytes after native consumed cancellation\r\n"; editor.dispatchEvent({ type: "input" });
+  h.webview.emit(closeRequest(identity, "34".repeat(32))); await settleClose();
+  const newer = closeReplies(h).at(-1), item = newer.documents[0];
+  assert.equal(newer.nonce, "34".repeat(32)); assert.equal(newer.type, "exam_close_capture_complete");
+  assert.equal(h.webview.messages.find(message => message.requestId === item.requestId).source, editor.value);
+  h.webview.emit(closeCancel(identity)); assert.equal(editor.readOnly, true, "consumed old nonce cannot release a newer completed capture");
+  h.webview.emit(closeCancel(identity, newer.nonce)); assert.equal(editor.readOnly, false);
+  editor.value = "pending capture composition"; editor.dispatchEvent({ type: "compositionstart" });
+  h.webview.emit(closeRequest(identity, "56".repeat(32))); await settleClose();
+  h.webview.emit(closeCancel(identity, "56".repeat(32))); editor.dispatchEvent({ type: "compositionend" }); await settleClose();
+  assert.equal(closeReplies(h).length, 2, "native cancellation consumes a pending nonce and prevents its delayed completion");
+}
+async function testCompletedCapturePostsRevocationBeforeRelease() {
+  const identity = contextFor("completed-capture-revocation", HEX16, HEX16_B, true);
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const editor = h.document.nodes.find(node => node.className === "cs-source"); editor.value = "old durable source"; editor.dispatchEvent({ type: "input" });
+  h.webview.emit(closeRequest(identity)); await settleClose();
+  const post = h.webview.postMessage.bind(h.webview); let readOnlyWhenRevoked;
+  h.webview.postMessage = message => { if (message.type === "exam_close_capture_failed") readOnlyWhenRevoked = editor.readOnly; post(message); };
+  editor.value = "new post-ack bytes before debounce\r\n"; editor.dispatchEvent({ type: "input" });
+  const revocation = closeReplies(h).at(-1);
+  assert.equal(revocation.type, "exam_close_capture_failed", "JS invalidation revokes completed capture before allowing newer editing");
+  assert.equal(readOnlyWhenRevoked, true); assert.equal(editor.readOnly, false);
+  assert.equal(revocation.nonce, "12".repeat(32)); assert.deepEqual(revocation.context, closeIdentity(identity)); assert.deepEqual(revocation.documents, []);
+  assert.equal(revocation.localSaved, false, "revocation does not claim the invalidated visible capture was locally saved");
+  assert.equal(editor.value, "new post-ack bytes before debounce\r\n");
+  h.webview.emit(closeRequest(identity, "56".repeat(32))); await settleClose();
+  const newer = closeReplies(h).at(-1); assert.equal(newer.type, "exam_close_capture_complete");
+  assert.equal(h.webview.messages.find(message => message.requestId === newer.documents[0].requestId).source, editor.value);
+}
+async function testFailedRevocationAndReplyPostingRemainReadOnly() {
+  const identity = contextFor("completed-capture-failed-post", HEX16, HEX16_B, true);
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const editor = h.document.nodes.find(node => node.className === "cs-source"); editor.value = "captured source"; editor.dispatchEvent({ type: "input" });
+  h.webview.emit(closeRequest(identity)); await settleClose();
+  const post = h.webview.postMessage.bind(h.webview);
+  h.webview.postMessage = message => { if (message.type === "exam_close_capture_failed") throw new Error("revocation post failed"); post(message); };
+  editor.value = "retained bytes after failed revocation"; editor.dispatchEvent({ type: "input" });
+  assert.equal(editor.readOnly, true, "failed revocation posting cannot release old complete evidence");
+  h.webview.emit(closeRequest(identity, "78".repeat(32))); await settleClose();
+  assert.equal(closeReplies(h).length, 1, "a live completed nonce cannot be implicitly replaced by a new request");
+  assert.equal(editor.value, "retained bytes after failed revocation");
+  h.webview.emit(closeCancel(identity, "ff".repeat(32))); assert.equal(editor.readOnly, true);
+  h.webview.emit(closeCancel(identity)); assert.equal(editor.readOnly, false, "native consumes the outstanding nonce before explicit cancellation releases editing");
+  h.webview.postMessage = post; h.webview.emit(closeRequest(identity, "78".repeat(32))); await settleClose();
+  const latest = closeReplies(h).at(-1); assert.equal(latest.nonce, "78".repeat(32)); assert.equal(latest.type, "exam_close_capture_complete");
+  assert.equal(h.webview.messages.find(message => message.requestId === latest.documents[0].requestId).source, "retained bytes after failed revocation");
+  const storage = new FakeStorage(), write = storage.setItem.bind(storage); let fail = false;
+  storage.setItem = (key, value) => { if (fail && key.endsWith(":programming-v1")) throw new Error("quota"); write(key, value); };
+  const failed = createHarness(identity, null, storage, { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const area = failed.document.nodes.find(node => node.className === "cs-source"); area.value = "failure retained source"; area.dispatchEvent({ type: "input" }); fail = true;
+  failed.webview.postMessage = message => { if (message.type === "exam_close_capture_failed") throw new Error("failed reply not posted"); };
+  failed.webview.emit(closeRequest(identity)); await settleClose();
+  assert.equal(area.readOnly, true, "failed capture report posting retains nonce and read-only state");
+  failed.webview.emit(closeCancel(identity)); assert.equal(area.readOnly, false);
+}
+async function testOrdinaryNativeLifecycleClockAndClosed() {
+  const identity = contextFor("ordinary-native-clock", HEX16, HEX16_B, true);
+  const h = createHarness(identity, null, new FakeStorage(), { programming: true, ordinary: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  const start = h.now(), tick = h.intervalCallbacks.find(timer => timer.delay === 1000).callback;
+  const submit = h.document.querySelector('[data-action="submit"]');
+  h.webview.emit({ type: "exam_begin", begin: { ...identity, serverStartUnixMilliseconds: start, durationSeconds: 600 } });
+  assert.equal(submit.disabled, true, "ordinary legacy Begin has no current clock authority");
+  h.setNow(start + 86400000);
+  h.webview.emit(contestLifecycle(identity, "Running", start, start + 30000));
+  assert.equal(h.document.getElementById("timer").textContent, "09:30", "native server time ignores laptop wall-clock skew");
+  h.setPerfNow(11000); tick();
+  assert.equal(h.document.getElementById("timer").textContent, "09:20");
+  h.setNow(0); tick(); assert.equal(h.document.getElementById("timer").textContent, "09:20");
+  for (const change of [message => { message.context.candidateId = "foreign"; },
+    message => { message.context.private = "canary"; }, message => { message.private = "canary"; },
+    message => { message.revision = 2; }, message => { message.serverTime = Number.MAX_SAFE_INTEGER + 1; }]) {
+    const invalid = contestLifecycle(identity, "Running", start, start + 90000, 4); change(invalid); h.webview.emit(invalid);
+    assert.equal(h.document.getElementById("timer").textContent, "09:20", "foreign/stale/private/oversize lifecycle is ignored");
+  }
+  h.webview.emit(contestLifecycle(identity, "Running", start + 1000, start + 42000, 4));
+  assert.equal(h.document.getElementById("timer").textContent, "09:20", "established clock is immutable");
+  const editor = h.document.nodes.find(node => node.className === "cs-source");
+  editor.value = "older source"; editor.dispatchEvent({ type: "input" });
+  editor.dispatchEvent({ type: "compositionstart" }); editor.value = "latest composed source";
+  h.webview.emit(contestLifecycle(identity, "Closed", start, start + 40000, 4));
+  assert.equal(editor.readOnly, false, "early close retains ongoing composition before capture");
+  assert.equal(h.webview.messages.some(message => message.operation === "submit"), false);
+  editor.dispatchEvent({ type: "compositionend" }); tick();
+  assert.ok(h.webview.messages.some(message => message.operation === "draft" && message.source === "latest composed source"), "Closed preserves exact latest source before freezing");
+  assert.equal(editor.readOnly, true);
+  assert.equal(h.document.getElementById("timer").textContent, "00:00");
+  h.webview.emit(contestLifecycle(identity, "Running", start, start + 45000, 5));
+  assert.equal(h.document.getElementById("timer").textContent, "00:00", "Closed cannot reopen");
+  const restored = createHarness(identity, null, h.localStorage, { programming: true, ordinary: true, captureInspection: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  restored.webview.emit(contestLifecycle(identity, "Closed", start, start + 50000, 5));
+  assert.equal(restored.document.getElementById("exam-shell").hidden, false, "a previously started Closed round can show its recovery editor after restart");
+  const restoredEditor = restored.document.nodes.find(node => node.className === "cs-source");
+  assert.equal(restoredEditor.value, "latest composed source"); assert.equal(restoredEditor.disabled, true, "recovered frozen sources cannot be edited");
+  const manualIdentity = contextFor("ordinary-manual-finish-ime", HEX16, HEX16_B, true);
+  const manual = createHarness(manualIdentity, null, new FakeStorage(), { programming: true, ordinary: true, captureInspection: true, manifest: PROGRAMMING_RETRY_MANIFEST });
+  manual.webview.emit(contestLifecycle(manualIdentity, "Running", manual.now(), manual.now()));
+  const manualEditor = manual.document.nodes.find(node => node.className === "cs-source");
+  manualEditor.value = "before composition"; manualEditor.dispatchEvent({ type: "input" });
+  manualEditor.dispatchEvent({ type: "compositionstart" }); manualEditor.value = "latest manual finish source";
+  manual.window.captureInspection.submitResponse();
+  assert.equal(manualEditor.readOnly, false);
+  assert.equal(manual.webview.messages.some(message => message.operation === "submit"), false);
+  manualEditor.dispatchEvent({ type: "compositionend" }); manual.intervalCallbacks.find(timer => timer.delay === 1000).callback();
+  assert.ok(manual.webview.messages.some(message => message.operation === "draft" && message.source === "latest manual finish source"));
+  assert.equal(manualEditor.readOnly, true);
+}
+
+(async () => {
+  const failures = [];
+  for (const test of [testCloseCaptureUsesOneGlobalCompositionBarrier, testOrdinaryRunClickRequiresBegin, testCompletedCaptureSurvivesUnrelatedReadyFailure,
+    testCompletedCapturePostsRevocationBeforeRelease, testFailedRevocationAndReplyPostingRemainReadOnly, testOrdinaryNativeLifecycleClockAndClosed]) {
+    try { await test(); } catch (error) { failures.push(`${test.name}: ${error.stack}`); }
+  }
+  assert.equal(failures.length, 0, failures.join("\n"));
+  await testCloseCaptureRejectsNewViewsAndPreservationEdits();
+  await testOrdinaryPreparationAndCloseCapture();
+  await testCloseCaptureCancellationAndFailures();
+  console.log("ordinary editor preparation and bounded close-capture recovery: 2 passed");
+  console.log("ordinary global composition barrier, pending read-only preservation, invalidation and Run click guards: 3 passed");
+  console.log("ordinary completed nonce retention, explicit cancellation and ordered revocation: 3 passed");
+})().catch(error => { console.error(error); process.exitCode = 1; });

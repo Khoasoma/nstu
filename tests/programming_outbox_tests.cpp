@@ -109,6 +109,47 @@ int main() {
         for (const auto& retained : pending) assert(outbox.acknowledge(receipt(retained, "received")));
         assert(outbox.pending_for_client(request.context.client_id).empty());
     }
+    const auto student_root = root / "student-session";
+    const auto other_root = root / "other-session";
+    std::filesystem::create_directory(student_root);
+    std::filesystem::create_directory(other_root);
+    const auto user_path = student_root / "programming-outbox";
+    {
+        nstu::client::ProgrammingOutbox user;
+        assert(!user.open_user(user_path, {}));
+        assert(!user.open_user(user_path, other_root));
+        assert(!user.open_user(path, root)); // Existing managed directory cannot become user storage.
+        assert(user.open_user(user_path, student_root));
+        const auto original = draft();
+        assert(user.enqueue(original));
+        auto conflict = original;
+        conflict.source += "changed";
+        assert(!user.enqueue(conflict));
+        assert(user.pending_for_client(original.context.client_id).size() == 1);
+        auto other_client = original.context.client_id;
+        other_client[0] ^= std::byte{1};
+        assert(user.pending_for_client(other_client).empty());
+        for (const auto& entry : std::filesystem::directory_iterator(user_path)) {
+            if (entry.path().extension() != ".csb") continue;
+            std::ifstream input(entry.path(), std::ios::binary);
+            const std::string encrypted{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+            assert(encrypted.find("PRIVATE_SOURCE_CANARY") == std::string::npos);
+        }
+    }
+    {
+        nstu::client::ProgrammingOutbox managed;
+        assert(!managed.open(user_path));
+        nstu::client::ProgrammingOutbox user;
+        assert(user.open_user(user_path, student_root));
+        const auto original = draft();
+        const auto pending = user.pending_for_client(original.context.client_id);
+        assert(pending.size() == 1 && pending.front().source == original.source);
+        auto unavailable = parse_response_json(unavailable_response_json(original, "offline"), &original);
+        assert(unavailable && !user.acknowledge(*unavailable));
+        assert(user.pending_for_client(original.context.client_id).size() == 1);
+        assert(user.acknowledge(receipt(original, "saved")));
+        assert(user.pending_for_client(original.context.client_id).empty());
+    }
     assert(std::filesystem::canonical(root).parent_path() == parent);
     assert(root.filename().string().starts_with("nstu-cs-outbox-test-"));
     std::ifstream owner(root / "test-owner"); std::string token; owner >> token; owner.close(); assert(token == hex(nonce));

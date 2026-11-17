@@ -4,6 +4,7 @@ add_library(nstu_client_platform STATIC
     src/client_control.cpp
     src/client_freeze.cpp
     src/client_pairing.cpp
+    src/contest_student_session.cpp
     src/client_uwf_request.cpp
     src/exam_app_suppression.cpp
     src/exam_bridge.cpp
@@ -27,6 +28,9 @@ target_include_directories(nstu_client_platform PUBLIC "${CMAKE_CURRENT_SOURCE_D
 target_compile_features(nstu_client_platform PUBLIC cxx_std_20)
 target_link_libraries(nstu_client_platform PUBLIC nstu_common advapi32 ole32 shlwapi userenv wtsapi32)
 nstu_enable_warnings(nstu_client_platform)
+if(MSVC)
+    target_compile_options(nstu_client_platform PUBLIC /utf-8)
+endif()
 
 # WebView2 is an optional native host dependency.  Keeping the SDK opt-in
 # preserves clean/offline CI builds; production packaging must provide the
@@ -90,4 +94,11 @@ nstu_enable_warnings(nstu-agent)
 
 if(MINGW)
     target_link_options(nstu-agent PRIVATE -municode)
+endif()
+
+add_executable(nstu-student WIN32 student/main.cpp)
+target_link_libraries(nstu-student PRIVATE nstu_client_platform shell32 user32 gdi32 comctl32)
+nstu_enable_warnings(nstu-student)
+if(MINGW)
+    target_link_options(nstu-student PRIVATE -municode)
 endif()

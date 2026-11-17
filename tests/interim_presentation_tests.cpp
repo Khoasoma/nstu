@@ -5,6 +5,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <windows.h>
 
 namespace {
 
@@ -204,6 +205,118 @@ void normal_text_and_primary_actions_keep_readable_contrast() {
 
 } // namespace
 
+void teacher_reading_sizes_fit_real_vietnamese_fonts() {
+    char directory[MAX_PATH]{};
+    const auto length = GetWindowsDirectoryA(directory, MAX_PATH);
+    assert(length > 0 && length < MAX_PATH);
+    const auto fonts = std::string(directory) + "\\Fonts\\";
+    for (const float dpi : {1.0f, 1.25f, 1.5f, 2.0f}) {
+        for (int preset = 0; preset < 4; ++preset) {
+            const float zoom = std::array{1.0f, 1.25f, 1.5f, 2.0f}[static_cast<std::size_t>(preset)];
+            assert(std::abs(nstu::ui::reading::font_size(14.0f, dpi, preset) - 18.2f * dpi * zoom) < 0.001f);
+            assert(std::abs(nstu::ui::reading::font_size(12.0f, dpi, preset) - 15.6f * dpi * zoom) < 0.001f);
+            ImGui::CreateContext();
+            auto& io = ImGui::GetIO();
+            io.IniFilename = nullptr;
+            io.DisplaySize = {500.0f * dpi, 400.0f * dpi};
+            io.DeltaTime = 1.0f / 60.0f;
+            const auto body = nstu::ui::reading::load_font(*io.Fonts, fonts, false,
+                nstu::ui::reading::font_size(14.0f, dpi, preset));
+            assert(body.system_font && body.font);
+            io.FontDefault = body.font;
+            const auto caption = nstu::ui::reading::load_font(*io.Fonts, fonts, false,
+                nstu::ui::reading::font_size(12.0f, dpi, preset));
+            const auto heading = nstu::ui::reading::load_font(*io.Fonts, fonts, true,
+                nstu::ui::reading::font_size(16.0f, dpi, preset));
+            const auto title = nstu::ui::reading::load_font(*io.Fonts, fonts, true,
+                nstu::ui::reading::font_size(20.0f, dpi, preset));
+            assert(caption.system_font && heading.system_font && title.system_font);
+            assert(io.Fonts->Build());
+            nstu::ui::apply_teacher_style(ImGui::GetStyle(), false, dpi, preset);
+            ImGui::NewFrame();
+            ImGui::SetNextWindowPos({0, 0}); ImGui::SetNextWindowSize(io.DisplaySize);
+            ImGui::Begin("Actual teacher font", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoSavedSettings);
+            assert(std::abs(body.font->LegacySize - 18.2f * dpi * zoom) < 0.001f);
+            assert(ImGui::GetFontSize() == std::round(body.font->LegacySize));
+            assert(ImGui::GetFrameHeight() + 0.01f >= 44.2f * dpi * zoom);
+            const auto text = ImGui::CalcTextSize("Giáo viên kiểm tra đề thi: ế ể ợ Đ");
+            assert(text.x > 0 && text.y > 0 && text.y < ImGui::GetFrameHeight());
+            for (const ImWchar codepoint : {0x1EBF, 0x1EC3, 0x1EE3, 0x0110}) {
+                const auto* glyph = ImGui::GetFontBaked()->FindGlyphNoFallback(codepoint);
+                assert(glyph && glyph->Visible);
+                assert(glyph->Y0 >= -ImGui::GetStyle().FramePadding.y);
+                assert(glyph->Y1 <= ImGui::GetFontSize() + ImGui::GetStyle().FramePadding.y);
+            }
+            for (const auto& [font, logical] : {std::pair{caption.font, 15.6f},
+                    std::pair{heading.font, 20.8f}, std::pair{title.font, 26.0f}}) {
+                assert(std::abs(font->LegacySize - logical * dpi * zoom) < 0.001f);
+                ImGui::PushFont(font);
+                assert(ImGui::GetFontSize() == std::round(font->LegacySize));
+                assert(ImGui::GetFontBaked()->FindGlyphNoFallback(0x1EE3));
+                ImGui::PopFont();
+            }
+            bool checked = false;
+            for (const auto* label : {"Monitor every computer automatically",
+                    "Thu thập chẩn đoán đã lọc riêng tư trên máy"}) {
+                const float left = ImGui::GetCursorScreenPos().x;
+                nstu::ui::wrapped_checkbox(label, label, &checked);
+                assert(ImGui::GetItemRectMax().x <= left + ImGui::GetContentRegionAvail().x + 1.0f);
+            }
+            const float available = ImGui::GetContentRegionAvail().x;
+            if (nstu::ui::begin_workspace_combo("dev-workspace", "Cuộc thi", true,
+                    "DEV · Không bảo vệ", "DEV: exams run without UWF", caption.font, dpi, preset)) ImGui::EndCombo();
+            assert(ImGui::GetItemRectSize().y + 0.01f >=
+                nstu::ui::layout::navigation_frame(dpi, preset, ImGui::GetFrameHeight(), true));
+            assert(ImGui::CalcTextSize("Cuộc thi").x < available - ImGui::GetItemRectSize().y);
+            ImGui::End(); ImGui::Render(); ImGui::DestroyContext();
+        }
+    }
+    assert(std::abs(nstu::ui::reading::font_size(14.0f, 1.0f, 1) - 22.75f) < 0.001f);
+    assert(nstu::ui::reading::zoom(-1) == 1.0f && nstu::ui::reading::zoom(4) == 1.0f);
+}
+
+void installed_bold_fallback_retains_vietnamese_coverage() {
+    char windows[MAX_PATH]{}, temporary[MAX_PATH]{}, sentinel[MAX_PATH]{};
+    assert(GetWindowsDirectoryA(windows, MAX_PATH));
+    assert(GetTempPathA(MAX_PATH, temporary));
+    assert(GetTempFileNameA(temporary, "nfr", 0, sentinel));
+    const auto fixture = std::filesystem::path(std::string(sentinel) + ".fonts");
+    assert(std::filesystem::create_directory(fixture));
+    assert(std::filesystem::copy_file(std::filesystem::path(windows) / "Fonts" / "segoeuib.ttf",
+                                     fixture / "segoeuib.ttf"));
+    ImGui::CreateContext();
+    auto& atlas = *ImGui::GetIO().Fonts;
+    const auto directory = fixture.string() + "\\";
+    for (const bool heading : {false, true}) {
+        const auto loaded = nstu::ui::reading::load_font(atlas, directory, heading, 26.0f);
+        assert(loaded.system_font && loaded.font);
+        assert(atlas.Build());
+        assert(std::string_view(loaded.font->GetDebugName()).find("segoeuib.ttf") != std::string_view::npos);
+        assert(loaded.font->GetFontBaked(26.0f)->FindGlyphNoFallback(0x1EE3));
+    }
+    const auto exhausted = nstu::ui::reading::load_font(atlas, "", false, 22.75f);
+    assert(!exhausted.system_font && exhausted.font && exhausted.font->LegacySize == 22.75f);
+    ImGui::DestroyContext();
+    assert(std::filesystem::remove(fixture / "segoeuib.ttf"));
+    assert(std::filesystem::remove(fixture));
+    assert(std::filesystem::remove(sentinel));
+}
+
+void compact_shell_preserves_content_at_largest_reading_size() {
+    for (const float dpi : {1.0f, 1.25f, 1.5f, 2.0f}) for (int preset = 0; preset < 4; ++preset) {
+        const float frame = nstu::ui::reading::font_size(34.0f, dpi, preset);
+        assert(nstu::ui::layout::compact(500.0f * dpi, 400.0f * dpi, dpi));
+        assert(nstu::ui::layout::content_height(400.0f * dpi, dpi, preset, frame) >= 160.0f * dpi);
+        assert(nstu::ui::layout::content_height(400.0f * dpi, dpi, preset, frame, true) >= 160.0f * dpi);
+        assert(nstu::ui::layout::minimum_client_width * dpi == 500.0f * dpi);
+        assert(nstu::ui::layout::minimum_client_height * dpi == 400.0f * dpi);
+    }
+    assert(!nstu::ui::layout::compact(1280, 820, 1));
+    assert(nstu::ui::layout::compact(1280, 600, 1));
+    assert(nstu::ui::layout::minimum_scale(1, 2) == 2);
+    assert(nstu::ui::layout::minimum_scale(2, 1) == 2);
+}
+
 int main() {
     approved_native_metrics_replace_the_interim_values();
     every_native_role_projects_the_approved_palette();
@@ -211,5 +324,8 @@ int main() {
     monitor_scale_changes_do_not_reuse_scaled_metrics();
     theme_restores_defaults_and_applies_the_absolute_scale_once();
     normal_text_and_primary_actions_keep_readable_contrast();
+    teacher_reading_sizes_fit_real_vietnamese_fonts();
+    installed_bold_fallback_retains_vietnamese_coverage();
+    compact_shell_preserves_content_at_largest_reading_size();
     std::cout << "interim presentation tests passed\n";
 }

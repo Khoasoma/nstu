@@ -121,7 +121,7 @@ if(NSTU_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt
 endif()
 
 foreach(nstu_signable_target
-        nstu-server nstu-service nstu-agent nstu-provision nstu-diagnostics
+        nstu-server nstu-service nstu-agent nstu-student nstu-provision nstu-diagnostics
         nstu_video_probe)
     nstu_sign_target(${nstu_signable_target})
 endforeach()

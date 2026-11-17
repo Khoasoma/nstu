@@ -44,6 +44,8 @@
 #include "exam_fleet_presentation.hpp"
 #include "exam_digest.hpp"
 #include "exam_operator_action.hpp"
+#include "contest_room_panel.hpp"
+#include "ui_accessibility_provider.hpp"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
@@ -89,13 +91,57 @@ nstu::ui::BrandImage g_brand_image;
 ImFont* g_heading_font = nullptr;
 ImFont* g_page_title_font = nullptr;
 ImFont* g_caption_font = nullptr;
+ImFont* g_sas_font = nullptr;
 bool g_dark_mode = false;
 // Display-DPI scale factor (1.0 == 96 DPI). All style metrics and font sizes
 // are authored at 96 DPI and multiplied by this so the UI stays crisp and
 // correctly sized on high-DPI screens instead of being bitmap-scaled by Windows.
 float g_ui_scale = 1.0f;
 bool g_ui_scale_overridden = false;
+int g_reading_preset = 0;
+bool g_fonts_reload_requested = false;
+bool g_system_fonts_available = true;
+#if NSTU_DEV_UNPROTECTED_EXAM
+constexpr bool k_unprotected_build = true;
+#else
+constexpr bool k_unprotected_build = false;
+#endif
 bool g_imgui_ready = false;
+namespace accessibility = nstu::ui::accessibility;
+std::unique_ptr<accessibility::Bridge> g_settings_bridge;
+std::vector<accessibility::Node> g_settings_nodes;
+std::vector<accessibility::Command> g_settings_commands;
+bool g_settings_pointer_invoked = false;
+struct SettingsItem { accessibility::Key key; ImGuiID id; ImGuiID window; };
+std::vector<SettingsItem> g_settings_items;
+std::vector<std::pair<accessibility::Command, HRESULT>> g_settings_completed;
+std::vector<accessibility::Command> g_contest_waiting;
+std::vector<accessibility::Key> g_contest_pointer_invoked;
+std::map<std::string, accessibility::Key, std::less<>> g_contest_keys;
+accessibility::Key g_next_contest_key = 1000;
+bool g_contest_workspace_open = false;
+std::uint64_t g_contest_workspace_generation = 0;
+bool g_operator_role_open = false;
+std::uint64_t g_operator_role_generation = 0;
+ImGuiID g_operator_role_popup = 0;
+ImGuiID g_contest_workspace_popup = 0;
+std::map<std::uint64_t, unsigned> g_contest_request_frames;
+struct ContestTextState { std::string value; std::uint64_t revision = 1; };
+std::map<accessibility::Key, ContestTextState> g_contest_text;
+nstu::ui::ContestSemantics g_contest_semantics;
+std::uint64_t g_reading_list_generation = 0;
+bool g_reading_list_open = false;
+bool g_settings_pane_open = false;
+std::uint64_t g_settings_pane_generation = 0;
+ImGuiID g_settings_popup_id = 0;
+ImGuiID g_settings_reading_popup_id = 0;
+HRESULT g_settings_publication_error = S_OK;
+enum SettingsKey : accessibility::Key {
+    settings_launcher = 1, settings_pane, settings_title, settings_reading,
+    settings_reading_list, settings_reading_first, settings_reading_last = settings_reading_first + 3,
+    settings_sample, settings_language, settings_english, settings_vietnamese,
+    settings_appearance, settings_light, settings_dark
+};
 
 // Maps a length authored at 96 DPI to the current display scale. Container
 // sizes, fixed panel widths and popup dimensions below are hand-authored in
@@ -420,6 +466,7 @@ enum class DashboardView : int {
     selected_client,
     exam,
     fleet_health,
+    contests,
 };
 
 using nstu::server::ClassDisplayMode;
@@ -448,6 +495,8 @@ enum class Language : int {
     vietnamese,
 };
 
+enum class UtilityPopup { none, settings, role, pairing, diagnostics, actions, view_options };
+
 enum class AnnotationTool : int {
     pen,
     ruler,
@@ -460,8 +509,11 @@ enum class AnnotationTool : int {
 Language g_language = Language::english;
 
 struct DashboardState {
+    UtilityPopup utility_popup_request = UtilityPopup::none;
     DashboardView view = DashboardView::room_screens;
     OperatorRole current_role = OperatorRole::teacher;
+    bool contest_only = false;
+    std::unique_ptr<nstu::ui::ContestRoomPanel> contests;
     ClassDisplayMode display_mode = ClassDisplayMode::grid;
     RoomFilter room_filter = RoomFilter::all;
     std::unordered_set<std::uint64_t> checked_client_ids;
@@ -1257,13 +1309,34 @@ bool open_remote_window(nstu::server::ServerControlPlane& control_plane,
 
 LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
                              LPARAM lparam) {
+    LRESULT accessibility_result = 0;
+    if (g_settings_bridge && g_settings_bridge->handle_getobject(window, message, wparam, lparam, accessibility_result))
+        return accessibility_result;
+    if (message == accessibility::Bridge::command_message) return 0;
+    if (g_settings_bridge && message == WM_SHOWWINDOW)
+        g_settings_bridge->set_visible(wparam != 0 && !IsIconic(window));
+    if (g_settings_bridge && message == WM_SIZE)
+        g_settings_bridge->set_visible(IsWindowVisible(window) && wparam != SIZE_MINIMIZED);
     if (ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam)) {
         return 1;
     }
     if (message == WM_GETMINMAXINFO) {
         auto* minimum = reinterpret_cast<MINMAXINFO*>(lparam);
-        LONG minimum_width = static_cast<LONG>(960.0f * g_ui_scale);
-        LONG minimum_height = static_cast<LONG>(640.0f * g_ui_scale);
+        const float native_scale = ImGui_ImplWin32_GetDpiScaleForHwnd(window);
+        const float minimum_scale = nstu::ui::layout::minimum_scale(g_ui_scale, native_scale);
+        RECT frame{0, 0, static_cast<LONG>(std::ceil(nstu::ui::layout::minimum_client_width * minimum_scale)),
+                          static_cast<LONG>(std::ceil(nstu::ui::layout::minimum_client_height * minimum_scale))};
+        const auto style = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_STYLE));
+        const auto extended = static_cast<DWORD>(GetWindowLongPtrW(window, GWL_EXSTYLE));
+        using AdjustForDpi = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+        const auto address = GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi");
+        AdjustForDpi adjust{};
+        static_assert(sizeof(adjust) == sizeof(address));
+        std::memcpy(&adjust, &address, sizeof(adjust));
+        if (!adjust || !adjust(&frame, style, FALSE, extended, static_cast<UINT>(96.0f * native_scale)))
+            (void)AdjustWindowRectEx(&frame, style, FALSE, extended);
+        LONG minimum_width = frame.right - frame.left;
+        LONG minimum_height = frame.bottom - frame.top;
         if (HMONITOR monitor =
                 MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST)) {
             MONITORINFO monitor_info{};
@@ -1281,24 +1354,13 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         minimum->ptMinTrackSize.y = minimum_height;
         return 0;
     }
-    if (message == WM_DPICHANGED && !g_ui_scale_overridden) {
-        g_ui_scale = static_cast<float>(HIWORD(wparam)) / 96.0f;
-        if (!(g_ui_scale > 0.0f)) {
-            g_ui_scale = 1.0f;
+    if (message == WM_DPICHANGED) {
+        if (!g_ui_scale_overridden) {
+            g_ui_scale = static_cast<float>(HIWORD(wparam)) / 96.0f;
+            if (!(g_ui_scale > 0.0f)) g_ui_scale = 1.0f;
+            if (g_imgui_ready) g_fonts_reload_requested = true;
         }
         apply_suggested_dpi_rect(window, lparam);
-        if (g_imgui_ready) {
-            apply_dashboard_style(g_dark_mode);
-            auto& atlas = ImGui::GetIO().Fonts;
-            ImGui::GetIO().FontDefault = nullptr;
-            atlas->Clear();
-            g_heading_font = nullptr;
-            g_page_title_font = nullptr;
-            g_caption_font = nullptr;
-            load_dashboard_fonts();
-            ImGui_ImplDX11_InvalidateDeviceObjects();
-            (void)ImGui_ImplDX11_CreateDeviceObjects();
-        }
         return 0;
     }
     if (message == g_taskbar_created_message &&
@@ -1348,6 +1410,7 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
         return 0;
     }
     if (message == WM_DESTROY) {
+        if (g_settings_bridge) (void)g_settings_bridge->detach();
         PostQuitMessage(0);
         return 0;
     }
@@ -1356,46 +1419,36 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam,
 
 void apply_dashboard_style(bool dark_mode) {
     g_dark_mode = dark_mode;
-    nstu::ui::apply_interim_style(ImGui::GetStyle(), dark_mode, g_ui_scale);
+    nstu::ui::apply_teacher_style(ImGui::GetStyle(), dark_mode, g_ui_scale, g_reading_preset);
 }
 
 void load_dashboard_fonts() {
     g_heading_font = nullptr;
     g_page_title_font = nullptr;
     g_caption_font = nullptr;
+    g_sas_font = nullptr;
     ImGui::GetIO().FontDefault = nullptr;
     std::array<char, MAX_PATH> windows_directory{};
     const UINT length = GetWindowsDirectoryA(
         windows_directory.data(), static_cast<UINT>(windows_directory.size()));
-    if (length == 0 || length >= windows_directory.size()) {
-        return;
-    }
     const std::string fonts_directory =
-        std::string(windows_directory.data()) + "\\Fonts\\";
-    const auto regular = fonts_directory + "segoeui.ttf";
-    const auto semibold = fonts_directory + "seguisb.ttf";
-    const auto bold = fonts_directory + "segoeuib.ttf";
+        length != 0 && length < windows_directory.size()
+            ? std::string(windows_directory.data()) + "\\Fonts\\" : std::string{};
     auto& atlas = ImGui::GetIO().Fonts;
-    const ImWchar* glyph_ranges = atlas->GetGlyphRangesVietnamese();
-    if (GetFileAttributesA(regular.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        ImGui::GetIO().FontDefault = atlas->AddFontFromFileTTF(
-            regular.c_str(), nstu::ui::typography::body * g_ui_scale,
-            nullptr, glyph_ranges);
-        g_caption_font = atlas->AddFontFromFileTTF(
-            regular.c_str(), nstu::ui::typography::caption * g_ui_scale,
-            nullptr, glyph_ranges);
-    }
-    const auto& heading_file =
-        GetFileAttributesA(semibold.c_str()) != INVALID_FILE_ATTRIBUTES
-            ? semibold : bold;
-    if (GetFileAttributesA(heading_file.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        g_heading_font = atlas->AddFontFromFileTTF(
-            heading_file.c_str(), nstu::ui::typography::section_title * g_ui_scale,
-            nullptr, glyph_ranges);
-        g_page_title_font = atlas->AddFontFromFileTTF(
-            heading_file.c_str(), nstu::ui::typography::page_title * g_ui_scale,
-            nullptr, glyph_ranges);
-    }
+    g_system_fonts_available = true;
+    const auto load = [&](bool semibold, float size) {
+        const auto loaded = nstu::ui::reading::load_font(*atlas, fonts_directory, semibold, size);
+        g_system_fonts_available = g_system_fonts_available && loaded.system_font;
+        return loaded.font;
+    };
+    const auto size = [](float token) {
+        return nstu::ui::reading::font_size(token, g_ui_scale, g_reading_preset);
+    };
+    ImGui::GetIO().FontDefault = load(false, size(nstu::ui::typography::body));
+    g_caption_font = load(false, size(nstu::ui::typography::caption));
+    g_heading_font = load(true, size(nstu::ui::typography::section_title));
+    g_page_title_font = load(true, size(nstu::ui::typography::page_title));
+    g_sas_font = load(true, nstu::ui::reading::sas_size(g_ui_scale, g_reading_preset));
 }
 
 ImVec4 status_text_color(nstu::server::ClientStatus status) {
@@ -3153,94 +3206,532 @@ bool draw_segment_option(const char* label, bool selected, float width) {
     if (selected) {
         ImGui::PushStyleColor(
             ImGuiCol_Button,
-            g_dark_mode ? ImVec4{0.800f, 0.820f, 0.850f, 1.0f}
-                        : ImVec4{0.150f, 0.165f, 0.185f, 1.0f});
+            nstu::ui::interim_color(nstu::ui::ColorRole::selected, g_dark_mode));
         ImGui::PushStyleColor(
             ImGuiCol_Text,
-            g_dark_mode ? ImVec4{0.090f, 0.100f, 0.120f, 1.0f}
-                        : ImVec4{1.0f, 1.0f, 1.0f, 1.0f});
+            nstu::ui::interim_color(nstu::ui::ColorRole::selected_text, g_dark_mode));
     }
-    const bool pressed = ImGui::Button(label, {width, scaled(28.0f)});
+    width = std::min(ImGui::GetContentRegionAvail().x,
+        std::max(width, ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f));
+    const bool pressed = ImGui::Button(label, {width, 0.0f});
     if (selected) {
         ImGui::PopStyleColor(2);
     }
     return pressed;
 }
 
-void draw_preferences(DashboardState& state, float pos_x, float settings_width,
-                      bool inline_button = true) {
-    if (inline_button) ImGui::SameLine(pos_x);
-    if (ImGui::Button(tr(state, "Settings###settings-trigger", "Cài đặt###settings-trigger"),
-                      {settings_width, 0.0f})) {
-        ImGui::OpenPopup("settings-popup");
+UiaRect settings_screen_rectangle(const ImRect& rectangle) {
+    POINT origin{};
+    if (!ClientToScreen(g_main_window, &origin)) return {};
+    return {rectangle.Min.x + static_cast<double>(origin.x), rectangle.Min.y + static_cast<double>(origin.y),
+            std::max(0.0f, rectangle.GetWidth()), std::max(0.0f, rectangle.GetHeight())};
+}
+
+accessibility::Node& capture_settings_node(accessibility::Key key, accessibility::Key parent,
+        const char* name, accessibility::Kind kind, ImGuiWindow* window, const ImRect& rectangle, ImGuiID id = 0,
+        bool allow_own_popup = false) {
+    accessibility::Node node;
+    node.key = key;
+    node.parent = parent;
+    const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, nullptr, 0);
+    if (length > 0) {
+        node.name.resize(static_cast<std::size_t>(length));
+        (void)MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, node.name.data(), length);
+        node.name.pop_back();
     }
-    ImGui::SetNextWindowSize({scaled(410.0f), 0.0f}, ImGuiCond_Appearing);
-    if (!ImGui::BeginPopup("settings-popup")) {
+    node.kind = kind;
+    node.bounds = settings_screen_rectangle(rectangle);
+    ImRect visible = rectangle;
+    visible.ClipWith(window->ClipRect);
+    visible.ClipWith(ImRect({0, 0}, ImGui::GetIO().DisplaySize));
+    node.offscreen = window->Hidden || window->SkipItems || visible.IsInverted() || visible.GetWidth() <= 0 || visible.GetHeight() <= 0;
+    node.hit_bounds = node.offscreen ? UiaRect{} : settings_screen_rectangle(visible);
+    if (!allow_own_popup && !ImGui::IsWindowContentHoverable(window, ImGuiHoveredFlags_None)) node.hit_bounds = UiaRect{};
+    node.layer = static_cast<int>(ImGui::GetCurrentContext()->BeginPopupStack.Size);
+    // Containers have no submitted item; the preceding widget may have been disabled independently.
+    const auto flags = id ? ImGui::GetCurrentContext()->LastItemData.ItemFlags : ImGui::GetCurrentContext()->CurrentItemFlags;
+    node.enabled = (flags & ImGuiItemFlags_Disabled) == 0;
+    if (accessibility::detail::focusable(kind)) {
+        auto ancestor = parent;
+        while (ancestor) {
+            const auto owner = std::find_if(g_settings_nodes.begin(), g_settings_nodes.end(), [ancestor](const auto& value) { return value.key == ancestor; });
+            if (owner == g_settings_nodes.end()) break;
+            if (owner->scrollable) { node.scroll_owner = owner->key; break; }
+            ancestor = owner->parent;
+        }
+    }
+    g_settings_items.push_back({key, id, window->ID});
+    g_settings_nodes.push_back(std::move(node));
+    return g_settings_nodes.back();
+}
+
+accessibility::Node& capture_settings_item(accessibility::Key key, accessibility::Key parent,
+        const char* name, accessibility::Kind kind, ImGuiWindow* window = nullptr) {
+    const auto& item = ImGui::GetCurrentContext()->LastItemData;
+    return capture_settings_node(key, parent, name, kind, window ? window : ImGui::GetCurrentWindow(), item.Rect, item.ID);
+}
+
+bool settings_command(const accessibility::Node& node, accessibility::Action action) {
+    if (!g_settings_bridge || !g_contest_waiting.empty() || !g_settings_completed.empty() || !node.enabled || node.offscreen || !node.hit_bounds ||
+        node.hit_bounds->width <= 0 || node.hit_bounds->height <= 0) return false;
+    if (node.parent == settings_reading_list &&
+        !ImGui::IsPopupOpen(g_settings_reading_popup_id, ImGuiPopupFlags_AnyPopupLevel)) return false;
+    if (g_settings_commands.empty() || g_settings_commands.front().key != node.key ||
+        g_settings_commands.front().action != action) return false;
+    const auto command = g_settings_commands.front();
+    g_settings_commands.erase(g_settings_commands.begin());
+    if (FAILED(g_settings_bridge->begin_command(command, node, g_settings_nodes))) return false;
+    g_settings_completed.emplace_back(command, S_OK);
+    return true;
+}
+
+void contest_semantic_focus(const accessibility::Node& node);
+
+bool settings_item_fully_visible(const accessibility::Node& node) {
+    return !node.offscreen && node.bounds.width > 0 && node.bounds.height > 0 && node.hit_bounds &&
+        accessibility::detail::rectangle_equal(node.bounds, *node.hit_bounds);
+}
+
+void settings_item_focus(const accessibility::Node& node, ImGuiWindow* window = nullptr, ImGuiID focus_scope = 0,
+                         const ImGuiLastItemData* submitted_item = nullptr) {
+    const bool scroll_request = node.scroll_owner && !g_settings_commands.empty() && g_settings_commands.front().key == node.key &&
+        (g_settings_commands.front().action == accessibility::Action::scroll ||
+         (g_settings_commands.front().action == accessibility::Action::focus && !settings_item_fully_visible(node)));
+    const bool pending_scroll = std::any_of(g_contest_waiting.begin(), g_contest_waiting.end(), [&](const auto& command) { return command.key == node.key && command.action == accessibility::Action::scroll; });
+    if (scroll_request || pending_scroll) {
+        contest_semantic_focus(node);
+        if (focus_scope && !g_contest_waiting.empty() && g_contest_waiting.front().action == accessibility::Action::focus) ImGui::SetNavFocusScope(focus_scope);
         return;
     }
+    if (!settings_command(node, accessibility::Action::focus)) return;
+    auto& context = *ImGui::GetCurrentContext();
+    const auto item = submitted_item ? *submitted_item : context.LastItemData;
+    if (context.DragDropActive || context.MovingWindow || item.ID == 0) {
+        g_settings_completed.back().second = static_cast<HRESULT>(UIA_E_INVALIDOPERATION);
+        return;
+    }
+    (void)SetFocus(g_main_window);
+    const auto previous_item = context.LastItemData;
+    context.LastItemData = item;
+    if (context.ActiveId && context.ActiveId != item.ID) ImGui::ClearActiveID();
+    ImGui::SetFocusID(item.ID, window ? window : ImGui::GetCurrentWindow());
+    context.LastItemData = previous_item;
+    if (focus_scope) ImGui::SetNavFocusScope(focus_scope);
+    context.NavCursorVisible = true;
+}
+
+accessibility::Key contest_semantic_key(std::string_view identity) {
+    const auto found = g_contest_keys.find(identity);
+    if (found != g_contest_keys.end()) return found->second;
+    if (g_next_contest_key == std::numeric_limits<accessibility::Key>::max()) throw std::bad_alloc();
+    const auto key = g_next_contest_key++;
+    return g_contest_keys.emplace(std::string(identity), key).first->second;
+}
+
+std::optional<accessibility::Command> contest_semantic_request(const accessibility::Node& node, accessibility::Action action) {
+    if (!g_settings_bridge || !g_settings_completed.empty() || !g_contest_waiting.empty() || !node.enabled || node.hidden || node.covered ||
+        g_settings_commands.empty() || g_settings_commands.front().key != node.key || g_settings_commands.front().action != action) return {};
+    if (node.offscreen && !(node.scroll_owner && (action == accessibility::Action::scroll || action == accessibility::Action::focus))) return {};
+    const auto command = g_settings_commands.front();
+    g_settings_commands.erase(g_settings_commands.begin());
+    if (FAILED(g_settings_bridge->begin_command(command, node, g_settings_nodes))) return {};
+    if (command.text_revision && (!node.text || node.text->revision != command.text_revision)) {
+        g_settings_completed.emplace_back(command, static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE)); return {};
+    }
+    if (action == accessibility::Action::focus || action == accessibility::Action::scroll ||
+        action == accessibility::Action::set_value || action == accessibility::Action::text_select) g_contest_waiting.push_back(command);
+    else g_settings_completed.emplace_back(command, S_OK);
+    return command;
+}
+
+void contest_semantic_focus(const accessibility::Node& node) {
+    const auto binding = std::find_if(g_settings_items.begin(), g_settings_items.end(), [&](const auto& item) { return item.key == node.key; });
+    if (binding == g_settings_items.end()) return;
+    auto* widget = ImGui::FindWindowByID(binding->window);
+    if (!widget) return;
+    const auto scroll = [&](const accessibility::Command& command) {
+        const auto owner = std::find_if(g_settings_items.begin(), g_settings_items.end(), [&](const auto& item) { return item.key == node.scroll_owner; });
+        if (owner != g_settings_items.end()) if (auto* scroller = ImGui::FindWindowByID(owner->window)) {
+            POINT origin{}; if (ClientToScreen(g_main_window, &origin)) {
+                const float y = static_cast<float>(node.bounds.top - origin.y) - scroller->Pos.y;
+                if (command.action == accessibility::Action::focus) {
+                    const ImRect rectangle({static_cast<float>(node.bounds.left - origin.x), static_cast<float>(node.bounds.top - origin.y)},
+                        {static_cast<float>(node.bounds.left + node.bounds.width - origin.x), static_cast<float>(node.bounds.top + node.bounds.height - origin.y)});
+                    ImGui::ScrollToRect(scroller, rectangle, ImGuiScrollFlags_KeepVisibleEdgeY | ImGuiScrollFlags_NoScrollParent);
+                } else ImGui::SetScrollFromPosY(scroller, y + (command.align_to_top ? 0.0f : static_cast<float>(node.bounds.height)), command.align_to_top ? 0.0f : 1.0f);
+            }
+        }
+        if (node.text && ImGui::GetActiveID() != binding->id && binding->id) {
+            ImGui::ActivateItemByID(binding->id); ImGui::GetCurrentContext()->NavNextActivateFlags = ImGuiActivateFlags_PreferInput;
+        }
+        if (node.text) if (auto* editor = ImGui::GetInputTextState(binding->id); editor && ImGui::GetActiveID() == binding->id) {
+            const LONG target = command.align_to_top ? command.range_start : command.range_end;
+            const auto caret = std::find_if(node.text->carets.begin(), node.text->carets.end(), [target](const auto& value) { return value.offset == target; });
+            if (caret != node.text->carets.end()) {
+                editor->Scroll.x = std::max(0.0f, editor->Scroll.x + static_cast<float>(caret->bounds.left - node.text->clip.left) -
+                    (command.align_to_top ? 0.0f : static_cast<float>(node.text->clip.width) - 1.0f));
+            }
+        }
+    };
+    if (const auto command = contest_semantic_request(node, accessibility::Action::scroll)) scroll(*command);
+    else for (const auto& command : g_contest_waiting) if (command.key == node.key && command.action == accessibility::Action::scroll &&
+        (!command.text_revision || (node.text && node.text->revision == command.text_revision))) scroll(command);
+    if (const auto command = contest_semantic_request(node, accessibility::Action::focus)) {
+        if (node.scroll_owner && !settings_item_fully_visible(node)) scroll(*command);
+        if (binding->id && !ImGui::GetCurrentContext()->DragDropActive && !ImGui::GetCurrentContext()->MovingWindow) {
+            (void)SetFocus(g_main_window);
+            if (ImGui::GetActiveID() && ImGui::GetActiveID() != binding->id) ImGui::ClearActiveID();
+            ImGui::SetFocusID(binding->id, widget);
+            if (node.kind == accessibility::Kind::edit) {
+                ImGui::ActivateItemByID(binding->id);
+                ImGui::GetCurrentContext()->NavNextActivateFlags = ImGuiActivateFlags_PreferInput;
+            }
+            ImGui::GetCurrentContext()->NavCursorVisible = true;
+        }
+    }
+}
+
+void contest_semantic_edit(accessibility::Node& node, char* buffer, std::size_t capacity, accessibility::TextInput input, bool edited) {
+    const auto& submitted = ImGui::GetCurrentContext()->LastItemData;
+    auto* editor = ImGui::GetInputTextState(submitted.ID);
+    if (editor && (editor->Flags & ImGuiInputTextFlags_Password)) {
+        node.protected_value = true; node.text.reset(); g_contest_text.erase(node.key); return;
+    }
+    const bool active = editor && ImGui::GetActiveID() == submitted.ID;
+    std::string visible = active ? std::string(editor->TextA.Data, static_cast<std::size_t>(editor->TextLen)) : std::string(buffer);
+    auto& tracked = g_contest_text[node.key];
+    if (tracked.value != visible || edited || (active && editor->Edited)) { ++tracked.revision; tracked.value = visible; }
+    accessibility::TextData text;
+    text.utf8_capacity = capacity; text.input = input; text.revision = tracked.revision;
+    const int wide_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, visible.data(), static_cast<int>(visible.size()), nullptr, 0);
+    if (!visible.empty() && wide_length <= 0) { node.enabled = false; node.hidden = true; return; }
+    text.value.resize(static_cast<std::size_t>(std::max(0, wide_length)));
+    if (wide_length) (void)MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, visible.data(), static_cast<int>(visible.size()), text.value.data(), wide_length);
+    ImRect clip = submitted.Rect;
+    // Pinned single-line InputTextEx clips to its frame; padding offsets text, not the clip rectangle.
+    clip.ClipWith(ImGui::GetCurrentWindow()->ClipRect); clip.ClipWith(ImRect({0, 0}, ImGui::GetIO().DisplaySize));
+    text.clip = settings_screen_rectangle(clip);
+    float x = std::trunc(submitted.Rect.Min.x + ImGui::GetStyle().FramePadding.x - (active ? editor->Scroll.x : 0.0f));
+    const float y = std::trunc(submitted.Rect.Min.y + ImGui::GetStyle().FramePadding.y);
+    auto* baked = ImGui::GetFontBaked(); const float font_scale = ImGui::GetFontSize() / baked->Size;
+    std::vector<std::pair<LONG, int>> boundaries{{0, 0}};
+    LONG offset = 0; int byte = 0;
+    text.carets.push_back({0, settings_screen_rectangle(ImRect({x, y}, {x + 1, y + ImGui::GetFontSize()}))});
+    while (byte < static_cast<int>(visible.size())) {
+        unsigned int code = 0;
+        const int count = ImTextCharFromUtf8(&code, visible.data() + byte, visible.data() + visible.size());
+        if (count <= 0) break;
+        const auto glyph = *baked->FindGlyph(static_cast<ImWchar>(code));
+        // ImGui may render four-byte UTF-8 as a fallback glyph; its UTF-16 range still spans two units.
+        const LONG end = offset + (count == 4 ? 2 : 1);
+        ImRect bounds({x + glyph.X0 * font_scale, y + glyph.Y0 * font_scale}, {x + glyph.X1 * font_scale, y + glyph.Y1 * font_scale});
+        const float advance = glyph.AdvanceX * font_scale;
+        if (bounds.GetWidth() <= 0 || bounds.GetHeight() <= 0) bounds = ImRect({x, y}, {x + std::max(0.0f, advance), y + ImGui::GetFontSize()});
+        text.glyphs.push_back({offset, end, settings_screen_rectangle(bounds)});
+        x += advance; byte += count; offset = end; boundaries.push_back({offset, byte});
+        text.carets.push_back({offset, settings_screen_rectangle(ImRect({x, y}, {x + 1, y + ImGui::GetFontSize()}))});
+    }
+    const auto wide_offset = [&](int value) {
+        LONG result = 0; for (const auto& boundary : boundaries) { if (boundary.second > value) break; result = boundary.first; } return result;
+    };
+    const auto byte_offset = [&](LONG value) {
+        int result = 0; for (const auto& boundary : boundaries) { if (boundary.first > value) break; result = boundary.second; } return result;
+    };
+    if (active) { text.selection_start = wide_offset(editor->GetSelectionStart()); text.selection_end = wide_offset(editor->GetSelectionEnd()); text.caret = wide_offset(editor->GetCursorPos()); }
+    node.text = std::move(text); node.read_only = editor && (editor->Flags & ImGuiInputTextFlags_ReadOnly);
+    contest_semantic_focus(node);
+    if (const auto command = contest_semantic_request(node, accessibility::Action::set_value)) {
+        const auto value = nstu::ui::contest_utf8_path(command->value);
+        if ((command->value.empty() || !value.empty()) && value.size() < capacity && command->text_revision == tracked.revision && !node.read_only) {
+            std::copy(value.begin(), value.end(), buffer); buffer[value.size()] = 0;
+            ++tracked.revision;
+            if (active) editor->ReloadUserBufAndMoveToEnd();
+        } else { g_settings_completed.emplace_back(*command, E_INVALIDARG); g_contest_waiting.clear(); }
+    }
+    (void)contest_semantic_request(node, accessibility::Action::text_select);
+    for (const auto& command : g_contest_waiting) if (command.key == node.key && command.action == accessibility::Action::text_select) {
+        if (command.text_revision != tracked.revision) { g_settings_completed.emplace_back(command, static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE)); break; }
+        if (!active) { ImGui::ActivateItemByID(submitted.ID); ImGui::GetCurrentContext()->NavNextActivateFlags = ImGuiActivateFlags_PreferInput; }
+        else if (editor->GetSelectionStart() != byte_offset(command.range_start) || editor->GetSelectionEnd() != byte_offset(command.range_end)) {
+            editor->ReloadUserBufAndKeepSelection(); editor->ReloadSelectionStart = byte_offset(command.range_start); editor->ReloadSelectionEnd = byte_offset(command.range_end);
+        }
+    }
+}
+
+void initialize_contest_semantics() {
+    g_contest_semantics.peers.reserve(nstu::server::kMaximumRoomMembers);
+    g_contest_semantics.key = contest_semantic_key;
+    g_contest_semantics.capture = [](auto key, auto parent, const char* name, auto kind, auto* window, const ImRect& rectangle, ImGuiID id) -> accessibility::Node& {
+        auto& node = capture_settings_node(key, parent, name, kind, window, rectangle, id);
+        node.covered = !ImGui::IsWindowContentHoverable(window, ImGuiHoveredFlags_None);
+        return node;
+    };
+    g_contest_semantics.request = contest_semantic_request;
+    g_contest_semantics.focus = contest_semantic_focus;
+    g_contest_semantics.edit = contest_semantic_edit;
+    g_contest_semantics.select = [](auto parent, auto selected) {
+        for (auto& node : g_settings_nodes) if (node.parent == parent && node.kind == accessibility::Kind::tab_item) node.selected = node.key == selected;
+    };
+    g_contest_semantics.invoked = [](auto key) { g_contest_pointer_invoked.push_back(key); };
+    g_contest_semantics.suspend = [] {
+        if (!g_settings_bridge) return;
+        for (const auto& command : g_contest_waiting) (void)g_settings_bridge->complete_command(command, static_cast<HRESULT>(UIA_E_INVALIDOPERATION));
+        g_contest_waiting.clear(); g_contest_request_frames.clear();
+        (void)g_settings_bridge->publish(g_settings_nodes, false);
+    };
+}
+
+void finish_contest_semantics() {
+    for (auto waiting = g_contest_waiting.begin(); waiting != g_contest_waiting.end();) {
+        const auto& command = *waiting;
+        const auto already = std::find_if(g_settings_completed.begin(), g_settings_completed.end(), [&](const auto& value) { return value.first.request == command.request; });
+        const auto node = std::find_if(g_settings_nodes.begin(), g_settings_nodes.end(), [&](const auto& value) { return value.key == command.key; });
+        HRESULT result = E_PENDING;
+        if (already != g_settings_completed.end()) result = already->second;
+        else if (node == g_settings_nodes.end()) result = static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE);
+        else if (command.text_revision && command.action != accessibility::Action::set_value && (!node->text || node->text->revision != command.text_revision)) result = static_cast<HRESULT>(UIA_E_ELEMENTNOTAVAILABLE);
+        else if (node->hidden || node->covered || !node->enabled) result = static_cast<HRESULT>(UIA_E_INVALIDOPERATION);
+        else {
+            if (command.action == accessibility::Action::focus && node->focused && settings_item_fully_visible(*node)) result = S_OK;
+            if (command.action == accessibility::Action::set_value && node->text && node->text->value == command.value && node->text->revision > command.text_revision) result = S_OK;
+            if (command.action == accessibility::Action::text_select && node->text && node->text->revision == command.text_revision &&
+                node->text->selection_start == command.range_start && node->text->selection_end == command.range_end && node->text->caret == command.range_end) result = S_OK;
+            if (command.action == accessibility::Action::scroll && (!command.text_revision || (node->text && node->text->revision == command.text_revision)) &&
+                !node->offscreen && node->hit_bounds && node->hit_bounds->height > 0) {
+                if (!node->text) result = S_OK;
+                else {
+                    const LONG target = command.align_to_top ? command.range_start : command.range_end;
+                    const auto caret = std::find_if(node->text->carets.begin(), node->text->carets.end(), [target](const auto& value) { return value.offset == target; });
+                    if (caret != node->text->carets.end() && caret->bounds.left >= node->text->clip.left && caret->bounds.left < node->text->clip.left + node->text->clip.width) result = S_OK;
+                }
+            }
+        }
+        if (result == E_PENDING && ++g_contest_request_frames[command.request] >= 8) result = static_cast<HRESULT>(UIA_E_INVALIDOPERATION);
+        if (result == E_PENDING) { ++waiting; continue; }
+        if (already == g_settings_completed.end()) g_settings_completed.emplace_back(command, result);
+        g_contest_request_frames.erase(command.request); waiting = g_contest_waiting.erase(waiting);
+    }
+}
+
+void apply_settings_reading(int preset) {
+    IM_ASSERT(preset >= 0 && preset < 4);
+    g_reading_preset = preset;
+    g_fonts_reload_requested = true;
+}
+
+void apply_settings_language(DashboardState& state, Language language) {
+    state.language = language;
+    g_language = language;
+    state.control_status.clear();
+}
+
+void apply_settings_appearance(DashboardState& state, bool dark) {
+    state.dark_mode = dark;
+    apply_dashboard_style(dark);
+}
+
+void draw_preferences(DashboardState& state, float pos_x, float settings_width,
+                      bool inline_button = true, bool show_trigger = true) {
+    g_settings_popup_id = ImGui::GetID("settings-popup");
+    const std::array<const char*, 4> reading_labels{
+        tr(state, "Comfortable (100%)", "Dễ đọc (100%)"),
+        tr(state, "Large (125%)", "Chữ lớn (125%)"),
+        tr(state, "Extra large (150%)", "Chữ rất lớn (150%)"),
+        tr(state, "Largest (200%)", "Lớn nhất (200%)")};
+    if (show_trigger && inline_button) ImGui::SameLine(pos_x);
+    const bool requested = state.utility_popup_request == UtilityPopup::settings;
+    if (requested) state.utility_popup_request = UtilityPopup::none;
+    bool pressed = false;
+    if (show_trigger) {
+        pressed = ImGui::Button(tr(state, "Settings###settings-trigger", "Cài đặt###settings-trigger"), {settings_width, 0.0f});
+        const auto& launcher = capture_settings_item(settings_launcher, 0, tr(state, "Settings", "Cài đặt"), accessibility::Kind::button);
+        settings_item_focus(launcher);
+        const bool invoked = settings_command(launcher, accessibility::Action::invoke);
+        g_settings_pointer_invoked = pressed && !invoked;
+        pressed = invoked || pressed;
+    }
+    if (requested || pressed) {
+        ImGui::OpenPopup("settings-popup");
+    }
+    const auto display = ImGui::GetIO().DisplaySize;
+    const float margin = scaled(nstu::ui::spacing::lg * 2.0f);
+    const ImVec2 maximum{display.x - margin, display.y - margin};
+    ImGui::SetNextWindowSizeConstraints({0, 0}, {std::max(1.0f, maximum.x), std::max(1.0f, maximum.y)});
+    float widest = 0.0f;
+    for (const auto* label : reading_labels) widest = std::max(widest, ImGui::CalcTextSize(label).x);
+    for (const auto role : {OperatorRole::teacher, OperatorRole::technician, OperatorRole::developer})
+        widest = std::max(widest, ImGui::CalcTextSize(role_label(role, state.language == Language::vietnamese)).x);
+    const float measured_width = widest + ImGui::GetFrameHeight() + ImGui::GetStyle().ScrollbarSize +
+        ImGui::GetStyle().FramePadding.x * 2.0f + ImGui::GetStyle().WindowPadding.x * 2.0f;
+    const float popup_width = std::min(std::max(scaled(410.0f), measured_width), std::max(1.0f, maximum.x));
+    const auto& popups = ImGui::GetCurrentContext()->OpenPopupStack;
+    const auto open = std::find_if(popups.begin(), popups.end(), [](const auto& popup) { return popup.PopupId == g_settings_popup_id; });
+    if (open != popups.end() && open->Window) {
+        const ImVec2 size{popup_width, std::min(open->Window->Size.y, std::max(1.0f, maximum.y))};
+        const float inset = margin * 0.5f;
+        ImGui::SetNextWindowPos({std::clamp(open->Window->Pos.x, inset, std::max(inset, display.x - size.x - inset)),
+                                std::clamp(open->Window->Pos.y, inset, std::max(inset, display.y - size.y - inset))}, ImGuiCond_Always);
+    }
+    ImGui::SetNextWindowSize({popup_width, 0.0f}, ImGuiCond_Always);
+    if (!ImGui::BeginPopup("settings-popup")) {
+        g_reading_list_open = false;
+        g_settings_pane_open = false;
+        return;
+    }
+    if (!g_settings_pane_open) ++g_settings_pane_generation;
+    g_settings_pane_open = true;
+    auto* preferences_window = ImGui::GetCurrentWindow();
+    auto& settings = capture_settings_node(settings_pane, 0, tr(state, "Settings", "Cài đặt"), accessibility::Kind::pane,
+        preferences_window, preferences_window->Rect());
+    settings.generation = g_settings_pane_generation; settings.scrollable = true;
     ImGui::TextUnformatted(tr(state, "Settings", "Cài đặt"));
+    capture_settings_item(settings_title, settings_pane, tr(state, "Settings", "Cài đặt"), accessibility::Kind::text);
     ImGui::Separator();
     ImGui::TextDisabled("%s", tr(state, "Operator surface", "Giao diện vận hành"));
     const bool is_vi = (state.language == Language::vietnamese);
-    if (draw_segment_option(role_label(OperatorRole::teacher, is_vi),
-                            state.current_role == OperatorRole::teacher, scaled(88.0f))) {
-        state.current_role = OperatorRole::teacher;
-        if (!is_action_permitted(state.current_role, OperatorAction::view_fleet_health) &&
-            state.view == DashboardView::fleet_health) {
-            state.view = DashboardView::room_screens;
+    ImGui::TextWrapped("%s", role_label(state.current_role, is_vi));
+    ImGui::SetNextItemWidth(-1);
+    g_operator_role_popup = ImHashStr("##ComboPopup", 0, ImGui::GetID("##settings-role"));
+    bool role_open = ImGui::BeginCombo("##settings-role", role_label(state.current_role, is_vi));
+    const auto role_item = role_open ? ImGui::GetCurrentContext()->CurrentWindowStack.back().ParentLastItemDataBackup : ImGui::GetCurrentContext()->LastItemData;
+    auto& role_combo = capture_settings_node(contest_semantic_key("contest/operator-role"), settings_pane, tr(state, "Operator surface", "Giao diện vận hành"),
+        accessibility::Kind::combo, preferences_window, role_item.Rect, role_item.ID, role_open);
+    role_combo.expanded = role_open; role_combo.layer -= static_cast<int>(role_open); contest_semantic_focus(role_combo);
+    if (contest_semantic_request(role_combo, accessibility::Action::collapse) && role_open) { ImGui::CloseCurrentPopup(); ImGui::EndCombo(); role_open = false; }
+    if (contest_semantic_request(role_combo, accessibility::Action::expand) && !role_open) {
+        ImGui::OpenPopupEx(g_operator_role_popup, ImGuiPopupFlags_None);
+        role_open = ImGui::BeginComboPopup(g_operator_role_popup, role_item.Rect, ImGuiComboFlags_None);
+    }
+    if (role_open != g_operator_role_open) ++g_operator_role_generation;
+    g_operator_role_open = role_open; role_combo.expanded = role_open;
+    const auto role_list_key = contest_semantic_key("contest/operator-role/list");
+    auto& role_list = capture_settings_node(role_list_key, role_combo.key, tr(state, "Operator surfaces", "Các giao diện vận hành"), accessibility::Kind::list,
+        ImGui::GetCurrentWindow(), role_open ? ImGui::GetCurrentWindow()->InnerRect : ImRect{});
+    role_list.offscreen = !role_open || role_list.offscreen; role_list.generation = g_operator_role_generation;
+    role_list.scrollable = true;
+    if (role_open) {
+        for (const auto role : {OperatorRole::teacher, OperatorRole::technician, OperatorRole::developer}) {
+            bool selected = ImGui::Selectable(role_label(role, is_vi), role == state.current_role);
+            if (role == state.current_role) ImGui::SetItemDefaultFocus();
+            auto& option = capture_settings_item(contest_semantic_key("contest/operator-role/" + std::to_string(static_cast<int>(role))), role_list_key,
+                role_label(role, is_vi), accessibility::Kind::list_item);
+            option.selected = role == state.current_role; contest_semantic_focus(option);
+            if (contest_semantic_request(option, accessibility::Action::select)) { selected = true; ImGui::CloseCurrentPopup(); }
+            if (selected) state.current_role = role;
+        }
+        ImGui::EndCombo();
+    } else {
+        for (const auto role : {OperatorRole::teacher, OperatorRole::technician, OperatorRole::developer}) {
+            auto& option = capture_settings_node(contest_semantic_key("contest/operator-role/" + std::to_string(static_cast<int>(role))), role_list_key,
+                role_label(role, is_vi), accessibility::Kind::list_item, preferences_window, ImRect{});
+            option.selected = role == state.current_role; option.offscreen = true;
         }
     }
-    ImGui::SameLine();
-    if (draw_segment_option(role_label(OperatorRole::technician, is_vi),
-                            state.current_role == OperatorRole::technician, scaled(100.0f))) {
-        state.current_role = OperatorRole::technician;
+    if (!is_action_permitted(state.current_role, OperatorAction::view_fleet_health) &&
+        state.view == DashboardView::fleet_health) {
+        state.view = DashboardView::room_screens;
     }
-    ImGui::SameLine();
-    if (draw_segment_option(role_label(OperatorRole::developer, is_vi),
-                            state.current_role == OperatorRole::developer, scaled(156.0f))) {
-        state.current_role = OperatorRole::developer;
+    ImGui::Spacing();
+    ImGui::TextUnformatted(tr(state, "Reading size", "Cỡ chữ dễ đọc"));
+    ImGui::TextWrapped("%s", reading_labels[static_cast<std::size_t>(g_reading_preset)]);
+    ImGui::SetNextItemWidth(-1);
+    const ImGuiID reading_focus_scope = ImGui::GetCurrentFocusScope();
+    const ImGuiID reading_popup = ImHashStr("##ComboPopup", 0, ImGui::GetID("##settings-reading"));
+    g_settings_reading_popup_id = reading_popup;
+    bool reading_open = ImGui::BeginCombo("##settings-reading", reading_labels[static_cast<std::size_t>(g_reading_preset)]);
+    const auto reading_item = reading_open ? ImGui::GetCurrentContext()->CurrentWindowStack.back().ParentLastItemDataBackup :
+                                            ImGui::GetCurrentContext()->LastItemData;
+    auto& reading = capture_settings_node(settings_reading, settings_pane, tr(state, "Reading size", "Cỡ chữ dễ đọc"),
+        accessibility::Kind::combo, preferences_window, reading_item.Rect, reading_item.ID, reading_open);
+    reading.enabled = (reading_item.ItemFlags & ImGuiItemFlags_Disabled) == 0;
+    reading.layer -= static_cast<int>(reading_open);
+    reading.expanded = reading_open;
+    settings_item_focus(reading, preferences_window, reading_focus_scope, &reading_item);
+    if (settings_command(reading, accessibility::Action::collapse) && reading_open) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndCombo();
+        reading_open = false;
     }
+    if (settings_command(reading, accessibility::Action::expand) && !reading_open) {
+        ImGui::OpenPopupEx(reading_popup, ImGuiPopupFlags_None);
+        reading_open = ImGui::BeginComboPopup(reading_popup, reading_item.Rect, ImGuiComboFlags_None);
+    }
+    if (reading_open != g_reading_list_open) ++g_reading_list_generation;
+    reading.expanded = reading_open;
+    auto* list_window = ImGui::GetCurrentWindow();
+    auto& list = capture_settings_node(settings_reading_list, settings_reading, tr(state, "Reading sizes", "Các cỡ chữ"),
+        accessibility::Kind::list, list_window, reading_open ? list_window->Rect() : ImRect{});
+    list.offscreen = !reading_open || list.offscreen;
+    list.generation = g_reading_list_generation;
+    list.scrollable = true;
+    if (reading_open) {
+        for (int preset = 0; preset < static_cast<int>(reading_labels.size()); ++preset) {
+            const bool selected = ImGui::Selectable(reading_labels[static_cast<std::size_t>(preset)], preset == g_reading_preset);
+            if (preset == g_reading_preset) ImGui::SetItemDefaultFocus();
+            const auto& option = capture_settings_item(settings_reading_first + static_cast<accessibility::Key>(preset),
+                settings_reading_list, reading_labels[static_cast<std::size_t>(preset)], accessibility::Kind::list_item);
+            settings_item_focus(option);
+            if (settings_command(option, accessibility::Action::select) || selected) {
+                apply_settings_reading(preset);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::EndCombo();
+    } else {
+        for (int preset = 0; preset < static_cast<int>(reading_labels.size()); ++preset) {
+            auto& option = capture_settings_node(settings_reading_first + static_cast<accessibility::Key>(preset), settings_reading_list,
+                reading_labels[static_cast<std::size_t>(preset)], accessibility::Kind::list_item, preferences_window, ImRect{});
+            option.offscreen = true;
+        }
+    }
+    g_reading_list_open = ImGui::IsPopupOpen(reading_popup, ImGuiPopupFlags_None);
+    if (reading_open != g_reading_list_open) ++g_reading_list_generation;
+    for (auto& node : g_settings_nodes) {
+        if (node.key == settings_reading) node.expanded = g_reading_list_open;
+        if (node.key == settings_reading_list) node.generation = g_reading_list_generation;
+        if (node.parent == settings_reading || node.parent == settings_reading_list) node.offscreen = !g_reading_list_open || node.offscreen;
+    }
+    ImGui::TextWrapped("%s", tr(state, "Reading sample: prepare the room, then compare each student's code.",
+        "Chữ mẫu: chuẩn bị phòng, rồi so sánh mã của từng thí sinh."));
+    capture_settings_item(settings_sample, settings_pane, tr(state,
+        "Reading sample: prepare the room, then compare each student's code.",
+        "Chữ mẫu: chuẩn bị phòng, rồi so sánh mã của từng thí sinh."), accessibility::Kind::text);
+    if (!g_system_fonts_available) ImGui::TextWrapped("System fonts unavailable; Vietnamese glyph coverage cannot be assured.");
     ImGui::Spacing();
     ImGui::TextDisabled("%s", tr(state, "Language", "Ngôn ngữ"));
-    if (draw_segment_option("EN", state.language == Language::english,
-                            scaled(42.0f))) {
-        state.language = Language::english;
-        g_language = state.language;
-        state.control_status.clear();
-    }
+    capture_settings_item(settings_language, settings_pane, tr(state, "Language", "Ngôn ngữ"), accessibility::Kind::group);
+    const bool english_pressed = draw_segment_option("EN", state.language == Language::english, scaled(42.0f));
+    const auto& english = capture_settings_item(settings_english, settings_language, tr(state, "English", "Tiếng Anh"), accessibility::Kind::radio);
+    settings_item_focus(english);
+    if (settings_command(english, accessibility::Action::select) || english_pressed) apply_settings_language(state, Language::english);
     ImGui::SameLine();
-    if (draw_segment_option("VI", state.language == Language::vietnamese,
-                            scaled(42.0f))) {
-        state.language = Language::vietnamese;
-        g_language = state.language;
-        state.control_status.clear();
-    }
+    const bool vietnamese_pressed = draw_segment_option("VI", state.language == Language::vietnamese, scaled(42.0f));
+    const auto& vietnamese = capture_settings_item(settings_vietnamese, settings_language, tr(state, "Vietnamese", "Tiếng Việt"), accessibility::Kind::radio);
+    settings_item_focus(vietnamese);
+    if (settings_command(vietnamese, accessibility::Action::select) || vietnamese_pressed) apply_settings_language(state, Language::vietnamese);
     ImGui::Spacing();
     ImGui::TextDisabled("%s", tr(state, "Appearance", "Giao diện"));
-    if (draw_segment_option(tr(state, "Light", "Sáng"), !state.dark_mode,
-                            scaled(68.0f))) {
-        state.dark_mode = false;
-        apply_dashboard_style(false);
-    }
+    capture_settings_item(settings_appearance, settings_pane, tr(state, "Appearance", "Giao diện"), accessibility::Kind::group);
+    const bool light_pressed = draw_segment_option(tr(state, "Light", "Sáng"), !state.dark_mode, scaled(68.0f));
+    const auto& light = capture_settings_item(settings_light, settings_appearance, tr(state, "Light", "Sáng"), accessibility::Kind::radio);
+    settings_item_focus(light);
+    if (settings_command(light, accessibility::Action::select) || light_pressed) apply_settings_appearance(state, false);
     ImGui::SameLine();
-    if (draw_segment_option(tr(state, "Dark", "Tối"), state.dark_mode,
-                            scaled(68.0f))) {
-        state.dark_mode = true;
-        apply_dashboard_style(true);
-    }
+    const bool dark_pressed = draw_segment_option(tr(state, "Dark", "Tối"), state.dark_mode, scaled(68.0f));
+    const auto& dark = capture_settings_item(settings_dark, settings_appearance, tr(state, "Dark", "Tối"), accessibility::Kind::radio);
+    settings_item_focus(dark);
+    if (settings_command(dark, accessibility::Action::select) || dark_pressed) apply_settings_appearance(state, true);
     ImGui::Spacing();
     ImGui::TextDisabled("%s", tr(state, "Screen refresh", "Chu kỳ làm mới"));
-    ImGui::SetNextItemWidth(scaled(184.0f));
+    ImGui::SetNextItemWidth(-1);
     ImGui::SliderInt("##settings-refresh", &state.snapshot_interval_seconds,
                      kMinimumSnapshotInterval, kMaximumSnapshotInterval,
                      tr(state, "%d seconds", "%d giây"));
     ImGui::TextWrapped("%s", tr(state,
         "Snapshot commands use this interval for room monitoring and teacher broadcast.",
         "Chu kỳ này được dùng cho snapshot phòng máy và phát màn hình giáo viên."));
-    ImGui::Checkbox(
-        tr(state, "Monitor every computer automatically",
-           "Tự động theo dõi mọi máy"),
-        &state.auto_monitor);
+    nstu::ui::wrapped_checkbox("settings-auto-monitor", tr(state, "Monitor every computer automatically",
+        "Tự động theo dõi mọi máy"), &state.auto_monitor);
     ImGui::TextWrapped("%s", tr(state,
         "When on, every online computer streams snapshots continuously; turn it off to start and stop snapshots per computer.",
         "Khi bật, mọi máy trực tuyến sẽ gửi snapshot liên tục; tắt để bật/tắt snapshot theo từng máy."));
@@ -3249,9 +3740,8 @@ void draw_preferences(DashboardState& state, float pos_x, float settings_width,
     ImGui::TextDisabled("%s", tr(state, "Optional diagnostics",
                                   "Chẩn đoán tùy chọn"));
     bool collection_enabled = g_telemetry_policy.collect_in_background;
-    if (ImGui::Checkbox(
-            tr(state, "Collect privacy-filtered diagnostics locally",
-               "Thu thập chẩn đoán đã lọc riêng tư trên máy"),
+    if (nstu::ui::wrapped_checkbox("settings-diagnostics",
+            tr(state, "Collect privacy-filtered diagnostics locally", "Thu thập chẩn đoán đã lọc riêng tư trên máy"),
             &collection_enabled)) {
         auto policy = g_telemetry_policy;
         policy.collect_in_background = collection_enabled;
@@ -3259,10 +3749,9 @@ void draw_preferences(DashboardState& state, float pos_x, float settings_width,
     }
     ImGui::BeginDisabled(!g_telemetry_policy.collect_in_background);
     bool prompt_on_error = g_telemetry_policy.prompt_on_error;
-    if (ImGui::Checkbox(
-            tr(state, "Prompt when an error report is ready",
-               "Nhắc khi báo cáo lỗi đã sẵn sàng"),
-            &prompt_on_error)) {
+    if (nstu::ui::wrapped_checkbox("settings-prompt",
+            tr(state, "Prompt when an error report is ready", "Nhắc khi báo cáo lỗi đã sẵn sàng"),
+            &prompt_on_error, g_telemetry_policy.collect_in_background)) {
         auto policy = g_telemetry_policy;
         policy.prompt_on_error = prompt_on_error;
         (void)update_telemetry_policy(state, policy);
@@ -3319,8 +3808,8 @@ void draw_preferences(DashboardState& state, float pos_x, float settings_width,
 }
 
 void draw_role_switcher(DashboardState& state, float pos_x, float width,
-                        bool inline_button = true) {
-    if (inline_button) ImGui::SameLine(pos_x);
+                        bool inline_button = true, bool show_trigger = true) {
+    if (show_trigger && inline_button) ImGui::SameLine(pos_x);
     const bool is_vietnamese = (state.language == Language::vietnamese);
     char role_btn_text[128]{};
     sprintf_s(role_btn_text, "%s: %s##role-btn",
@@ -3330,7 +3819,9 @@ void draw_role_switcher(DashboardState& state, float pos_x, float width,
         sprintf_s(role_btn_text, "%s###role-btn",
                   tr(state, "Operator role", "Vai trò"));
     }
-    if (ImGui::Button(role_btn_text, {width, 0.0f})) {
+    const bool requested = state.utility_popup_request == UtilityPopup::role;
+    if (requested) state.utility_popup_request = UtilityPopup::none;
+    if (requested || (show_trigger && ImGui::Button(role_btn_text, {width, 0.0f}))) {
         ImGui::OpenPopup("role-selector-popup");
     }
     if (ImGui::BeginPopup("role-selector-popup")) {
@@ -3423,10 +3914,12 @@ void update_teacher_broadcast_mode(DashboardState& state,
 }
 
 void draw_diagnostics_popup(DashboardState& state, float pos_x, float button_width,
-                            bool inline_button = true) {
-    if (inline_button) ImGui::SameLine(pos_x);
-    if (ImGui::Button(tr(state, "Diagnostics###diagnostics-trigger", "Chẩn đoán###diagnostics-trigger"),
-                      {button_width, 0.0f})) {
+                            bool inline_button = true, bool show_trigger = true) {
+    if (show_trigger && inline_button) ImGui::SameLine(pos_x);
+    const bool requested = state.utility_popup_request == UtilityPopup::diagnostics;
+    if (requested) state.utility_popup_request = UtilityPopup::none;
+    if (requested || (show_trigger && ImGui::Button(tr(state, "Diagnostics###diagnostics-trigger", "Chẩn đoán###diagnostics-trigger"),
+                      {button_width, 0.0f}))) {
         refresh_graphics_report();
         ImGui::OpenPopup("diagnostics-popup");
     }
@@ -4181,14 +4674,16 @@ void draw_pairing_requests(DashboardState& state,
 void draw_pairing_popup(DashboardState& state,
                         nstu::server::ServerControlPlane& control_plane,
                         float pos_x, float button_width,
-                        bool inline_button = true) {
-    if (inline_button) ImGui::SameLine(pos_x);
+                        bool inline_button = true, bool show_trigger = true) {
+    if (show_trigger && inline_button) ImGui::SameLine(pos_x);
     bool focus_panel = false;
-    if (ImGui::Button(
+    const bool requested = state.utility_popup_request == UtilityPopup::pairing;
+    if (requested) state.utility_popup_request = UtilityPopup::none;
+    if (requested || (show_trigger && ImGui::Button(
             tr(state,
                state.pairing_panel_open ? "Pairing active###pairing-trigger" : "Add computers###pairing-trigger",
                state.pairing_panel_open ? "Đang ghép nối###pairing-trigger" : "Thêm máy###pairing-trigger"),
-            {button_width, 0.0f})) {
+            {button_width, 0.0f}))) {
         if (!state.pairing_panel_open) {
             state.pairing_status.clear();
             state.pairing_panel_open = true;
@@ -4791,8 +5286,46 @@ const char* shell_view_title(const DashboardState& state) {
         return tr(state, "Exams", "Bài thi");
     case DashboardView::fleet_health:
         return tr(state, "Fleet Health", "Hệ thống");
+    case DashboardView::contests:
+        return tr(state, "Contests", "Cuộc thi");
     }
     return "NSTU";
+}
+
+bool compact_shell(const DashboardState& state) {
+    const auto display = ImGui::GetIO().DisplaySize;
+    if (nstu::ui::layout::compact(display.x, display.y, g_ui_scale)) return true;
+    const bool diagnostics = is_action_permitted(state.current_role, OperatorAction::view_diagnostics_raw);
+    const int navigation = state.contest_only ? 1 : 4 +
+        static_cast<int>(is_action_permitted(state.current_role, OperatorAction::view_fleet_health));
+    const int utilities = (state.contest_only ? 3 : 4) + static_cast<int>(diagnostics);
+    const float required = (ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y) *
+        static_cast<float>(navigation + utilities + 2) + ImGui::GetTextLineHeight() * 2.0f +
+        scaled(nstu::ui::spacing::xxl * 2.0f + nstu::ui::spacing::lg * 3.0f);
+    return required > display.y - nstu::ui::layout::footer_height(g_ui_scale, g_reading_preset);
+}
+
+float measured_sidebar_width(const DashboardState& state) {
+    float width = scaled(nstu::ui::geometry::sidebar);
+    const auto measure = [&](const char* label, bool icon) {
+        const std::string caption = std::string(icon ? "      " : "") + label;
+        width = std::max(width, ImGui::CalcTextSize(caption.c_str()).x +
+            ImGui::GetStyle().FramePadding.x * 2.0f + scaled(nstu::ui::spacing::lg * 2.0f));
+    };
+    if (!state.contest_only) {
+        measure(tr(state, "Classroom", "Lớp học"), true);
+        measure(tr(state, "Focus Viewer", "Xem máy"), true);
+        measure(tr(state, "Exams", "Bài thi"), true);
+        measure(tr(state, "Add computers", "Thêm máy"), false);
+    }
+    measure(tr(state, "Contests", "Cuộc thi"), true);
+    measure(tr(state, "Settings", "Cài đặt"), false);
+    measure(tr(state, "Operator role", "Vai trò"), false);
+    if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health))
+        measure(tr(state, "Fleet Health", "Hệ thống"), true);
+    if (is_action_permitted(state.current_role, OperatorAction::view_diagnostics_raw))
+        measure(tr(state, "Diagnostics", "Chẩn đoán"), false);
+    return width;
 }
 
 void draw_shell_navigation_button(const char* id, const char* label,
@@ -4808,10 +5341,15 @@ void draw_shell_navigation_button(const char* id, const char* label,
     }
     ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, {0.0f, 0.5f});
     ImGui::BeginDisabled(!enabled);
-    if (ImGui::Button(caption.c_str(),
+    const bool pressed = ImGui::Button(caption.c_str(),
                      {ImGui::GetContentRegionAvail().x,
                       std::max(scaled(nstu::ui::geometry::table_row_min),
-                               ImGui::GetFrameHeight())})) {
+                                ImGui::GetFrameHeight())});
+    auto& node = capture_settings_item(contest_semantic_key(std::string("contest/shell/") + id), 0, label, accessibility::Kind::button);
+    node.enabled = enabled; contest_semantic_focus(node);
+    const bool invoked = contest_semantic_request(node, accessibility::Action::invoke).has_value();
+    if (pressed && !invoked) g_contest_pointer_invoked.push_back(node.key);
+    if (pressed || invoked) {
         state.view = destination;
     }
     const ImVec2 minimum = ImGui::GetItemRectMin();
@@ -4892,6 +5430,7 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
                  const nstu::server::ClientRecord* selected_client,
                  DashboardState& state,
                  nstu::server::ServerControlPlane& control_plane) {
+    if (state.view == DashboardView::contests) return;
     const bool has_clients = !clients.empty();
     const bool checked = has_clients && !state.checked_client_ids.empty();
     const bool focus = state.view == DashboardView::selected_client;
@@ -5069,25 +5608,29 @@ void draw_ribbon(const std::vector<nstu::server::ClientRecord>& clients,
 void draw_workspace_toolbar(
     const std::vector<nstu::server::ClientRecord>& clients,
     DashboardState& state) {
+    if (state.view == DashboardView::contests) return;
     const float available = ImGui::GetContentRegionAvail().x;
     float used = 0.0f;
     bool first = true;
-    const float filter_width = scaled(nstu::ui::geometry::classroom_filter);
-    const float search_width = std::max(scaled(nstu::ui::geometry::classroom_search_min),
+    const std::array<const char*, 6> filters{
+        tr(state, "All computers", "Tất cả máy"), tr(state, "Online", "Trực tuyến"),
+        tr(state, "Attention", "Chú ý"), tr(state, "Locked", "Đã khóa"),
+        tr(state, "Offline", "Ngoại tuyến"), tr(state, "Help", "Trợ giúp")};
+    float filter_width = scaled(nstu::ui::geometry::classroom_filter);
+    for (const auto* label : filters) filter_width = std::max(filter_width,
+        ImGui::CalcTextSize(label).x + ImGui::GetFrameHeight() + ImGui::GetStyle().FramePadding.x * 2.0f);
+    filter_width = std::min(filter_width, available);
+    const float search_width = std::min(available, std::max(scaled(nstu::ui::geometry::classroom_search_min),
         available - filter_width - shell_action_width(tr(state, "Grid", "Lưới")) -
         shell_action_width(tr(state, "List", "Danh sách")) -
         shell_action_width(tr(state, "Show offline", "Hiện ngoại tuyến")) -
-        ImGui::GetStyle().ItemSpacing.x * 4.0f);
+        ImGui::GetStyle().ItemSpacing.x * 4.0f));
     shell_next_item(search_width, used, first, available);
     ImGui::SetNextItemWidth(search_width);
     ImGui::InputTextWithHint("##client-filter", tr(state, "Find client by name or address", "Tìm tên hoặc địa chỉ máy"),
                              state.client_filter.data(), state.client_filter.size());
     shell_next_item(filter_width, used, first, available);
     ImGui::SetNextItemWidth(filter_width);
-    const std::array<const char*, 6> filters{
-        tr(state, "All computers", "Tất cả máy"), tr(state, "Online", "Trực tuyến"),
-        tr(state, "Attention", "Chú ý"), tr(state, "Locked", "Đã khóa"),
-        tr(state, "Offline", "Ngoại tuyến"), tr(state, "Help", "Trợ giúp")};
     if (ImGui::BeginCombo("##room-filter", filters[static_cast<std::size_t>(state.room_filter)])) {
         for (std::size_t index = 0; index < filters.size(); ++index) {
             const auto filter = static_cast<RoomFilter>(index);
@@ -5120,9 +5663,11 @@ void draw_workspace_toolbar(
             if (state.checked_client_ids.contains(client.id)) ++visible_checked;
         }
     }
-    ImGui::TextDisabled("%zu %s · %zu %s", state.checked_client_ids.size(),
+    ImGui::PushStyleColor(ImGuiCol_Text, nstu::ui::interim_color(nstu::ui::ColorRole::muted, g_dark_mode));
+    ImGui::TextWrapped("%zu %s · %zu %s", state.checked_client_ids.size(),
         tr(state, "selected", "đã chọn"), state.checked_client_ids.size() - visible_checked,
         tr(state, "hidden or unavailable", "ẩn hoặc không khả dụng"));
+    ImGui::PopStyleColor();
     used = 0.0f; first = true;
     if (action("select-matching", tr(state, "Select matching", "Chọn máy khớp")))
         state.checked_client_ids = nstu::server::select_all_matching(visible_clients);
@@ -5132,23 +5677,117 @@ void draw_workspace_toolbar(
 }
 
 void draw_navigation_rail(
-    const std::vector<nstu::server::ClientRecord>&,
+    const std::vector<nstu::server::ClientRecord>& clients,
     const nstu::server::ClientRecord* selected_client, DashboardState& state,
     nstu::server::ServerControlPlane& control_plane) {
-    const float width = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
-                                   nstu::ui::geometry::shell_compact_breakpoint
-                               ? nstu::ui::geometry::sidebar_compact
-                               : nstu::ui::geometry::sidebar);
+    const bool compact = compact_shell(state);
+    const float navigation_frame = nstu::ui::layout::navigation_frame(
+        g_ui_scale, g_reading_preset, ImGui::GetFrameHeight(), k_unprotected_build);
+    const float width = compact ? 0.0f : measured_sidebar_width(state);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
-                       {scaled(nstu::ui::spacing::lg), scaled(nstu::ui::spacing::lg)});
+                       {scaled(nstu::ui::spacing::lg), scaled(compact ? nstu::ui::spacing::sm : nstu::ui::spacing::lg)});
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
         nstu::ui::interim_color(nstu::ui::ColorRole::window, g_dark_mode));
-    const bool sidebar_visible = ImGui::BeginChild("shell-sidebar", {width, 0},
+    const bool sidebar_visible = ImGui::BeginChild("shell-sidebar", {width,
+        compact ? nstu::ui::layout::navigation_height(g_ui_scale, navigation_frame) : 0.0f},
                                                  ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleColor();
     if (sidebar_visible) {
+        const bool diagnostics = is_action_permitted(state.current_role, OperatorAction::view_diagnostics_raw);
+        const bool is_vi = state.language == Language::vietnamese;
+        const char* role = role_label(state.current_role, is_vi);
+        if (compact) {
+            ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, {0, 0});
+            const bool selector_row = ImGui::BeginTable("workspace-settings", 2, ImGuiTableFlags_SizingFixedFit);
+            if (selector_row) {
+                ImGui::TableSetupColumn("workspace", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("settings", ImGuiTableColumnFlags_WidthFixed,
+                    ImGui::CalcTextSize(tr(state, "Settings", "Cài đặt")).x + ImGui::GetStyle().FramePadding.x * 2.0f);
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+            }
+            const char* location = state.view == DashboardView::contests && state.contests
+                ? state.contests->active_tab_label(is_vi) : shell_view_title(state);
+             auto* workspace_window = ImGui::GetCurrentWindow();
+             const ImGuiID workspace_popup = ImHashStr("##ComboPopup", 0, ImGui::GetID("##workspace"));
+             g_contest_workspace_popup = workspace_popup;
+             bool workspace_open = nstu::ui::begin_workspace_combo("##workspace", location, k_unprotected_build,
+                    tr(state, "DEV · Unprotected", "DEV · Không bảo vệ"),
+                    tr(state, "DEV (UNPROTECTED) - exams run without UWF", "DEV (KHÔNG BẢO VỆ) - thi không cần UWF"),
+                     g_caption_font, g_ui_scale, g_reading_preset);
+             const auto workspace_item = workspace_open ? ImGui::GetCurrentContext()->CurrentWindowStack.back().ParentLastItemDataBackup : ImGui::GetCurrentContext()->LastItemData;
+             auto& workspace = capture_settings_node(contest_semantic_key("contest/workspace"), 0, tr(state, "Workspace", "Không gian làm việc"), accessibility::Kind::disclosure,
+                 workspace_window, workspace_item.Rect, workspace_item.ID, workspace_open);
+             workspace.enabled = (workspace_item.ItemFlags & ImGuiItemFlags_Disabled) == 0;
+             workspace.covered = !ImGui::IsWindowContentHoverable(workspace_window, ImGuiHoveredFlags_None) && !workspace_open;
+             workspace.layer -= static_cast<int>(workspace_open); workspace.expanded = workspace_open;
+             contest_semantic_focus(workspace);
+             if (contest_semantic_request(workspace, accessibility::Action::collapse) && workspace_open) {
+                 ImGui::CloseCurrentPopup(); ImGui::EndCombo(); workspace_open = false;
+             }
+             if (contest_semantic_request(workspace, accessibility::Action::expand) && !workspace_open) {
+                 ImGui::OpenPopupEx(workspace_popup, ImGuiPopupFlags_None);
+                 workspace_open = ImGui::BeginComboPopup(workspace_popup, workspace_item.Rect, ImGuiComboFlags_None);
+             }
+             if (workspace_open != g_contest_workspace_open) ++g_contest_workspace_generation;
+             g_contest_workspace_open = workspace_open; workspace.expanded = workspace_open;
+             if (workspace_open) {
+                 nstu::ui::ContestSemanticScope navigation_scope(&g_contest_semantics);
+                 g_contest_semantics.prefix = "contest/navigation"; g_contest_semantics.parent = workspace.key; g_contest_semantics.scroll_owner = 0;
+                 g_contest_semantics.generation = g_contest_workspace_generation;
+                 auto& navigation = g_contest_semantics.pane("pane", tr(state, "Workspace choices", "Các không gian làm việc"), accessibility::Kind::pane, ImGui::GetCurrentWindow()->InnerRect);
+                 g_contest_semantics.parent = navigation.key;
+                const auto destination = [&](const char* label, DashboardView view, bool enabled = true) {
+                    ImGui::BeginDisabled(!enabled);
+                     bool pressed = ImGui::Selectable(label, state.view == view);
+                     auto& node = g_contest_semantics.item("destination-" + std::to_string(static_cast<int>(view)), label, accessibility::Kind::button);
+                     node.enabled = enabled; contest_semantic_focus(node);
+                     if (contest_semantic_request(node, accessibility::Action::invoke)) { pressed = true; ImGui::CloseCurrentPopup(); }
+                     if (pressed) state.view = view;
+                    ImGui::EndDisabled();
+                };
+                if (!state.contest_only) {
+                    destination(tr(state, "Classroom", "Lớp học"), DashboardView::room_screens);
+                    destination(tr(state, "Focus Viewer", "Xem máy"), DashboardView::selected_client, selected_client != nullptr);
+                    destination(tr(state, "Exams", "Bài thi"), DashboardView::exam);
+                }
+                destination(tr(state, "Contests", "Cuộc thi"), DashboardView::contests);
+                if (state.view == DashboardView::contests && state.contests) {
+                    ImGui::SeparatorText(tr(state, "Contests", "Cuộc thi"));
+                     state.contests->draw_navigation(state.current_role, is_vi, &g_contest_semantics);
+                }
+                if (!state.contest_only && is_action_permitted(state.current_role, OperatorAction::view_fleet_health))
+                    destination(tr(state, "Fleet Health", "Hệ thống"), DashboardView::fleet_health);
+                ImGui::Separator();
+                const auto utility = [&](const char* label, UtilityPopup popup) {
+                    if (ImGui::Selectable(label)) state.utility_popup_request = popup;
+                };
+                if (state.view != DashboardView::contests) {
+                    utility(tr(state, "Actions", "Thao tác"), UtilityPopup::actions);
+                    utility(tr(state, "View options", "Tùy chọn hiển thị"), UtilityPopup::view_options);
+                }
+                if (!state.contest_only) utility(tr(state, "Add computers", "Thêm máy"), UtilityPopup::pairing);
+                utility(tr(state, "Settings", "Cài đặt"), UtilityPopup::settings);
+                utility(tr(state, "Operator role", "Vai trò"), UtilityPopup::role);
+                if (diagnostics) utility(tr(state, "Diagnostics", "Chẩn đoán"), UtilityPopup::diagnostics);
+                ImGui::Checkbox(tr(state, "Show offline", "Hiện ngoại tuyến"), &state.show_offline);
+                ImGui::EndCombo();
+            }
+            if (selector_row) {
+                ImGui::TableSetColumnIndex(1);
+                const bool pressed = ImGui::Button(tr(state, "Settings###settings-trigger", "Cài đặt###settings-trigger"));
+                const auto& launcher = capture_settings_item(settings_launcher, 0, tr(state, "Settings", "Cài đặt"), accessibility::Kind::button);
+                settings_item_focus(launcher);
+                const bool invoked = settings_command(launcher, accessibility::Action::invoke);
+                g_settings_pointer_invoked = pressed && !invoked;
+                if (invoked || pressed)
+                    state.utility_popup_request = UtilityPopup::settings;
+                ImGui::EndTable();
+            }
+            ImGui::PopStyleVar();
+        } else {
         if (g_brand_image.view() != nullptr && !g_graphics_device_lost) {
-            const float brand_width = ImGui::GetContentRegionAvail().x;
+            const float brand_width = std::min(ImGui::GetContentRegionAvail().x, scaled(nstu::ui::spacing::xxl * 2.0f));
             const float aspect = static_cast<float>(g_brand_image.width()) /
                                  static_cast<float>(g_brand_image.height());
             ImGui::Image(reinterpret_cast<ImTextureID>(g_brand_image.view()),
@@ -5161,6 +5800,7 @@ void draw_navigation_rail(
         }
         ImGui::TextDisabled("%s", tr(state, "Classroom tools", "Công cụ lớp học"));
         ImGui::Spacing();
+        if (!state.contest_only) {
         draw_shell_navigation_button("nav-room", tr(state, "Classroom", "Lớp học"),
                                      IconKind::grid, DashboardView::room_screens, state);
         draw_shell_navigation_button("nav-focus", tr(state, "Focus Viewer", "Xem máy"),
@@ -5168,32 +5808,55 @@ void draw_navigation_rail(
                                      state, selected_client != nullptr);
         draw_shell_navigation_button("nav-exam", tr(state, "Exams", "Bài thi"),
                                      IconKind::lock, DashboardView::exam, state);
-        const bool diagnostics = is_action_permitted(
-            state.current_role, OperatorAction::view_diagnostics_raw);
-        if (is_action_permitted(state.current_role, OperatorAction::view_fleet_health))
+        }
+        draw_shell_navigation_button("nav-contests", tr(state, "Contests", "Cuộc thi"),
+                                     IconKind::grid, DashboardView::contests, state);
+        if (!state.contest_only && is_action_permitted(state.current_role, OperatorAction::view_fleet_health))
             draw_shell_navigation_button("nav-fleet", tr(state, "Fleet Health", "Hệ thống"),
                                          IconKind::monitor, DashboardView::fleet_health, state);
-        const bool is_vi = state.language == Language::vietnamese;
-        const char* role = role_label(state.current_role, is_vi);
         const float role_height = ImGui::CalcTextSize(
             role, nullptr, false, ImGui::GetContentRegionAvail().x).y;
         const float utility_height =
             (ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.y) *
-                static_cast<float>(diagnostics ? 4 : 3) +
+                static_cast<float>((state.contest_only ? 3 : 4) + static_cast<int>(diagnostics)) +
             role_height + scaled(nstu::ui::spacing::lg + nstu::ui::spacing::sm);
         ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(),
             ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - utility_height));
         ImGui::Separator();
+        }
         const float utility_width = ImGui::GetContentRegionAvail().x;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                            {scaled(nstu::ui::spacing::xl), scaled(nstu::ui::spacing::xl)});
-        draw_pairing_popup(state, control_plane, 0, utility_width, false);
-        draw_preferences(state, 0, utility_width, false);
-        draw_role_switcher(state, 0, utility_width, false);
+        if (!state.contest_only) draw_pairing_popup(state, control_plane, 0, utility_width, false, !compact);
+        draw_preferences(state, 0, utility_width, false, !compact);
+        draw_role_switcher(state, 0, utility_width, false, !compact);
+        if (!compact) {
+        nstu::ui::wrapped_checkbox("sidebar-offline", tr(state, "Show offline", "Hiện ngoại tuyến"), &state.show_offline);
         ImGui::PushTextWrapPos(0.0f);
         ImGui::TextDisabled("%s", role);
         ImGui::PopTextWrapPos();
-        if (diagnostics) draw_diagnostics_popup(state, 0, utility_width, false);
+        }
+        if (is_action_permitted(state.current_role, OperatorAction::view_diagnostics_raw))
+            draw_diagnostics_popup(state, 0, utility_width, false, !compact);
+        if (state.utility_popup_request == UtilityPopup::actions || state.utility_popup_request == UtilityPopup::view_options) {
+            ImGui::OpenPopup(state.utility_popup_request == UtilityPopup::actions ? "compact-actions" : "compact-view-options");
+            state.utility_popup_request = UtilityPopup::none;
+        }
+        const auto popup_size = ImGui::GetIO().DisplaySize;
+        const ImVec2 maximum{std::max(1.0f, popup_size.x - scaled(nstu::ui::spacing::xxl)),
+                             std::max(1.0f, popup_size.y - scaled(nstu::ui::spacing::xxl))};
+        ImGui::SetNextWindowSizeConstraints({0, 0}, maximum);
+        ImGui::SetNextWindowSize({maximum.x, 0}, ImGuiCond_Appearing);
+        if (ImGui::BeginPopup("compact-actions")) {
+            draw_ribbon(clients, selected_client, state, control_plane);
+            ImGui::EndPopup();
+        }
+        ImGui::SetNextWindowSizeConstraints({0, 0}, maximum);
+        ImGui::SetNextWindowSize({maximum.x, 0}, ImGuiCond_Appearing);
+        if (ImGui::BeginPopup("compact-view-options")) {
+            draw_workspace_toolbar(clients, state);
+            ImGui::EndPopup();
+        }
         ImGui::PopStyleVar();
     }
     ImGui::EndChild();
@@ -5210,17 +5873,15 @@ void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
     ImGui::PushStyleColor(ImGuiCol_ChildBg,
         nstu::ui::interim_color(nstu::ui::ColorRole::window, g_dark_mode));
     if (g_caption_font != nullptr) ImGui::PushFont(g_caption_font);
-    if (ImGui::BeginChild("shell-status", {0, scaled(nstu::ui::geometry::statusbar)},
+    const float height = nstu::ui::layout::footer_height(g_ui_scale, g_reading_preset);
+    if (ImGui::BeginChild("shell-status", {0, height},
                          ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoScrollbar)) {
         ImGui::SetCursorPosY(std::max(0.0f,
-            (scaled(nstu::ui::geometry::statusbar) - ImGui::GetFrameHeight()) * 0.5f));
+            (height - ImGui::GetFrameHeight()) * 0.5f));
         ImGui::AlignTextToFramePadding();
         ImGui::TextColored(status_text_color(nstu::server::ClientStatus::online),
                            "● %zu %s", counts.online, tr(state, "online", "trực tuyến"));
-        const char* offline = tr(state, "Show offline###show-offline", "Hiện ngoại tuyến###show-offline");
-        const float checkbox_width = ImGui::GetFrameHeight() +
-            ImGui::GetStyle().ItemInnerSpacing.x + ImGui::CalcTextSize(offline, nullptr, true).x;
-        const float right = ImGui::GetWindowContentRegionMax().x - checkbox_width;
+        const float right = ImGui::GetWindowContentRegionMax().x;
         if (!state.control_status.empty()) {
             ImGui::SameLine();
             const float remaining = right - ImGui::GetCursorPosX() -
@@ -5233,8 +5894,6 @@ void draw_status_bar(const std::vector<nstu::server::ClientRecord>& clients,
                     ImGui::SetTooltip("%s", state.control_status.c_str());
             }
         }
-        ImGui::SameLine(right);
-        ImGui::Checkbox(offline, &state.show_offline);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                            {scaled(nstu::ui::spacing::xl), scaled(nstu::ui::spacing::xl)});
         ImGui::SetNextWindowSize(
@@ -5890,8 +6549,9 @@ void draw_dashboard_shell(
     draw_room_profile_modal(state, control_plane);
     draw_bulk_action_confirmation_popup(clients, state, control_plane);
     ImGui::PopStyleVar(2);
+    const bool compact = compact_shell(state);
     const float height = std::max(1.0f, ImGui::GetContentRegionAvail().y -
-                                  scaled(nstu::ui::geometry::statusbar));
+        nstu::ui::layout::footer_height(g_ui_scale, g_reading_preset));
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {0.0f, 0.0f});
     if (ImGui::BeginChild("shell-body", {0, height}, false,
@@ -5901,23 +6561,23 @@ void draw_dashboard_shell(
                            {scaled(nstu::ui::spacing::md), scaled(nstu::ui::spacing::sm)});
         draw_navigation_rail(clients, selected_client, state, control_plane);
         ImGui::PopStyleVar();
-        ImGui::SameLine();
+        if (!compact) ImGui::SameLine();
         if (ImGui::BeginChild("shell-workbench", {0, 0}, false,
                              ImGuiWindowFlags_NoScrollbar)) {
             ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
                                {scaled(nstu::ui::spacing::md), scaled(nstu::ui::spacing::sm)});
-            draw_menu_strip(state, !clients.empty(), control_plane);
-            draw_ribbon(clients, selected_client, state, control_plane);
-            const float inset = scaled(ImGui::GetIO().DisplaySize.x / g_ui_scale <
-                                           nstu::ui::geometry::shell_compact_breakpoint
-                                       ? nstu::ui::geometry::content_inset_compact
-                                       : nstu::ui::geometry::content_inset);
+            if (!compact) {
+                draw_menu_strip(state, !clients.empty(), control_plane);
+                draw_ribbon(clients, selected_client, state, control_plane);
+            }
+            const float inset = scaled(compact ? nstu::ui::geometry::content_inset_compact
+                                              : nstu::ui::geometry::content_inset);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {inset, inset});
             ImGui::PushStyleColor(ImGuiCol_ChildBg,
                 nstu::ui::interim_color(nstu::ui::ColorRole::canvas, g_dark_mode));
             if (ImGui::BeginChild("workspace-content", {0, 0}, ImGuiChildFlags_AlwaysUseWindowPadding,
                                  ImGuiWindowFlags_NoScrollbar)) {
-                draw_workspace_toolbar(clients, state);
+                if (!compact) draw_workspace_toolbar(clients, state);
                 // Owning renderers keep their established padding and callbacks.
                 ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,
                     {scaled(nstu::ui::spacing::xl), scaled(nstu::ui::spacing::xl)});
@@ -5930,6 +6590,9 @@ void draw_dashboard_shell(
                     draw_selected_client(clients, selected_client, state, control_plane);
                 } else if (state.view == DashboardView::fleet_health) {
                     draw_technician_fleet_health(clients, state, control_plane);
+                } else if (state.view == DashboardView::contests && state.contests) {
+                    state.contests->draw(state.current_role, state.language == Language::vietnamese,
+                                         state.dark_mode, g_ui_scale, g_page_title_font, g_sas_font, compact, &g_contest_semantics);
                 } else {
                     draw_exam_panel(clients, selected_client, state, control_plane);
                 }
@@ -5950,6 +6613,7 @@ void draw_dashboard_shell(
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
+    const HRESULT com_result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     g_telemetry_policy = load_telemetry_policy();
     g_telemetry_events.clear();
     g_telemetry_error_prompt_requested.store(false);
@@ -5983,6 +6647,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     if (window == nullptr || !create_device(window)) {
         MessageBoxW(window, diagnostics_text().c_str(), L"NSTU graphics diagnostics",
                     MB_OK | MB_ICONERROR);
+        if (SUCCEEDED(com_result)) CoUninitialize();
         return 1;
     }
     g_main_window = window;
@@ -6006,7 +6671,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             g_ui_scale_overridden = true;
         }
     }
-    if (g_ui_scale != 1.0f) {
+    {
         int target_width = static_cast<int>(1280.0f * g_ui_scale);
         int target_height = static_cast<int>(820.0f * g_ui_scale);
         // Never grow past the monitor work area, or the window spills off-screen
@@ -6042,6 +6707,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     ShowWindow(window, SW_SHOWDEFAULT);
 
     DashboardState dashboard;
+    initialize_contest_semantics();
+    dashboard.contest_only = arguments.find(L"--contests") != std::wstring_view::npos;
+    if (dashboard.contest_only) dashboard.view = DashboardView::contests;
+    dashboard.contests = std::make_unique<nstu::ui::ContestRoomPanel>();
     if (PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_VIETNAMESE) {
         dashboard.language = Language::vietnamese;
     }
@@ -6068,6 +6737,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     ImGui_ImplWin32_Init(window);
     ImGui_ImplDX11_Init(g_device.Get(), g_context.Get());
     g_imgui_ready = true;
+    if (SUCCEEDED(com_result)) {
+        try {
+            g_settings_nodes.reserve(accessibility::detail::kNodeLimit);
+            g_settings_items.reserve(accessibility::detail::kNodeLimit);
+            g_settings_commands.reserve(32);
+            g_settings_completed.reserve(1);
+            g_settings_bridge = std::make_unique<accessibility::Bridge>(window);
+        } catch (const std::exception&) {
+            record_diagnostic("error", "Accessibility", "Settings provider initialization failed");
+        }
+    } else {
+        record_diagnostic("error", "Accessibility", "COM initialization failed " + hresult_text(com_result));
+    }
 
     nstu::server::ClientRegistry registry;
     nstu::security::KeyStore key_store;
@@ -6079,6 +6761,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
     remote_session_config.host_port = 47984;
     g_remote_session = std::make_unique<nstu::server::RemoteSessionProcess>(
         std::move(remote_session_config));
+    if (!dashboard.contest_only) {
     std::string deployment_error;
     const auto data_directory = nstu::deployment::data_root(&deployment_error);
     if (!data_directory.empty() &&
@@ -6120,6 +6803,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             : std::move(deployment_error);
         record_diagnostic("error", "Deployment", dashboard.startup_error);
     }
+    }
     bool running = true;
     while (running) {
         MSG message{};
@@ -6133,6 +6817,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         if (!running) {
             break;
         }
+        if (g_settings_bridge) (void)g_settings_bridge->disconnect_retired();
         if (g_telemetry_error_prompt_requested.load()) {
             show_main_window(window);
         }
@@ -6140,9 +6825,43 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             Sleep(50);
         }
 
+        if (g_fonts_reload_requested) {
+            g_fonts_reload_requested = false;
+            apply_dashboard_style(g_dark_mode);
+            ImGui::GetIO().FontDefault = nullptr;
+            ImGui::GetIO().Fonts->Clear();
+            load_dashboard_fonts();
+            ImGui_ImplDX11_InvalidateDeviceObjects();
+            (void)ImGui_ImplDX11_CreateDeviceObjects();
+        }
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
         ImGui::NewFrame();
+        g_settings_nodes.clear();
+        g_settings_items.clear();
+        g_settings_completed.clear();
+        g_settings_pointer_invoked = false;
+        g_contest_pointer_invoked.clear();
+        if (g_settings_bridge) {
+            for (auto command = g_settings_commands.begin(); command != g_settings_commands.end();) {
+                const HRESULT valid = g_settings_bridge->validate_command(*command);
+                if (SUCCEEDED(valid)) { ++command; continue; }
+                (void)g_settings_bridge->complete_command(*command, valid);
+                command = g_settings_commands.erase(command);
+            }
+            std::vector<accessibility::Command> commands;
+            const auto held = g_settings_commands.size() + g_contest_waiting.size();
+            if (held < accessibility::detail::kQueueLimit &&
+                SUCCEEDED(g_settings_bridge->take_commands(commands, accessibility::detail::kQueueLimit - held))) {
+                if (commands.size() <= accessibility::detail::kQueueLimit - held)
+                    g_settings_commands.insert(g_settings_commands.end(), commands.begin(), commands.end());
+                else {
+                    for (const auto& command : commands) (void)g_settings_bridge->complete_command(command, E_FAIL);
+                    record_diagnostic("error", "Accessibility", "Provider exceeded command admission budget");
+                }
+            }
+            IM_ASSERT(g_settings_commands.size() + g_contest_waiting.size() <= accessibility::detail::kQueueLimit);
+        }
         ImGui::SetNextWindowPos({0, 0});
         ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {0.0f, 0.0f});
@@ -6153,6 +6872,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         ImGui::PopStyleVar();
 
         const auto clients = registry.snapshot();
+        dashboard.contests->poll();
         if (auto result = dashboard.exam_action.poll()) dashboard.control_status = std::move(*result);
         // Chat notifications: refresh per-client inbound (student) counts, flash
         // the taskbar once when a new student line arrives while the manager is
@@ -6258,7 +6978,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             dashboard.next_host_snapshot = now + std::chrono::seconds(
                 dashboard.snapshot_interval_seconds);
         }
-        if (clients.empty()) {
+        if (clients.empty() && dashboard.view != DashboardView::contests) {
             dashboard.view = DashboardView::room_screens;
             dashboard.selected_client_id = 0;
         }
@@ -6345,6 +7065,83 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
             .outcome = stream_outcome,
             .now = now});
         draw_dashboard_shell(clients, selected, dashboard, control_plane);
+        if (g_settings_bridge) {
+            if (!ImGui::IsPopupOpen(g_settings_popup_id, ImGuiPopupFlags_AnyPopupLevel)) {
+                std::unordered_set<accessibility::Key> settings_keys;
+                for (const auto& node : g_settings_nodes) if (node.key < 1000 && node.key != settings_launcher) settings_keys.insert(node.key);
+                for (int depth = 0; depth != 3; ++depth) for (const auto& node : g_settings_nodes)
+                    if (settings_keys.contains(node.parent)) settings_keys.insert(node.key);
+                std::erase_if(g_settings_nodes, [&](const auto& node) { return settings_keys.contains(node.key); });
+                g_settings_pane_open = false;
+                g_reading_list_open = false;
+            }
+            const auto& context = *ImGui::GetCurrentContext();
+            if (!ImGui::IsPopupOpen(g_contest_workspace_popup, ImGuiPopupFlags_AnyPopupLevel)) {
+                g_contest_workspace_open = false;
+                std::unordered_set<accessibility::Key> hidden{contest_semantic_key("contest/navigation/pane")};
+                for (int depth = 0; depth != 4; ++depth) for (const auto& node : g_settings_nodes) if (hidden.contains(node.parent)) hidden.insert(node.key);
+                for (auto& node : g_settings_nodes) {
+                    if (node.key == contest_semantic_key("contest/workspace")) node.expanded = false;
+                    if (hidden.contains(node.key)) { node.hidden = true; node.offscreen = true; node.hit_bounds = UiaRect{}; }
+                }
+            }
+            g_operator_role_open = ImGui::IsPopupOpen(g_operator_role_popup, ImGuiPopupFlags_AnyPopupLevel);
+            const bool editing = context.ActiveId && ImGui::GetInputTextState(context.ActiveId);
+            for (auto& node : g_settings_nodes) {
+                if (node.parent == settings_reading_list) node.selected = node.key == settings_reading_first + static_cast<accessibility::Key>(g_reading_preset);
+                if (node.key == settings_english) node.selected = dashboard.language == Language::english;
+                if (node.key == settings_vietnamese) node.selected = dashboard.language == Language::vietnamese;
+                if (node.key == settings_light) node.selected = !dashboard.dark_mode;
+                if (node.key == settings_dark) node.selected = dashboard.dark_mode;
+                if (node.key == contest_semantic_key("contest/operator-role")) node.expanded = g_operator_role_open;
+                if (node.parent == contest_semantic_key("contest/operator-role/list")) {
+                    node.selected = node.key == contest_semantic_key("contest/operator-role/" + std::to_string(static_cast<int>(dashboard.current_role)));
+                    if (!g_operator_role_open) { node.offscreen = true; node.hit_bounds = UiaRect{}; }
+                }
+                if (node.key == contest_semantic_key("contest/operator-role/list") && !g_operator_role_open) { node.offscreen = true; node.hit_bounds = UiaRect{}; }
+                const auto binding = std::find_if(g_settings_items.begin(), g_settings_items.end(), [&](const auto& item) { return item.key == node.key; });
+                if (binding != g_settings_items.end()) {
+                    node.focused = binding->id && GetFocus() == window && (editing ? node.kind == accessibility::Kind::edit && context.ActiveId == binding->id :
+                        context.NavId == binding->id && context.NavWindow && context.NavWindow->ID == binding->window);
+                    auto* widget_window = ImGui::FindWindowByID(binding->window);
+                    const bool own_popup = (node.key == settings_reading && g_reading_list_open) ||
+                        (node.key == contest_semantic_key("contest/workspace") && g_contest_workspace_open) ||
+                        (node.key == contest_semantic_key("contest/operator-role") && g_operator_role_open);
+                    if (!own_popup && widget_window && !ImGui::IsWindowContentHoverable(widget_window, ImGuiHoveredFlags_None)) {
+                        node.hit_bounds = UiaRect{}; if (node.key >= 1000) node.covered = true;
+                    }
+                    node.focused = node.focused && !node.offscreen && !node.covered && node.hit_bounds && node.hit_bounds->width > 0 && node.hit_bounds->height > 0;
+                }
+                if (node.kind == accessibility::Kind::group || node.kind == accessibility::Kind::row ||
+                    node.kind == accessibility::Kind::tab || node.kind == accessibility::Kind::disclosure) {
+                    for (const auto& child : g_settings_nodes) if (child.parent == node.key) {
+                        const double right = std::max(node.bounds.left + node.bounds.width, child.bounds.left + child.bounds.width);
+                        const double bottom = std::max(node.bounds.top + node.bounds.height, child.bounds.top + child.bounds.height);
+                        node.bounds.left = std::min(node.bounds.left, child.bounds.left);
+                        node.bounds.top = std::min(node.bounds.top, child.bounds.top);
+                        node.bounds.width = right - node.bounds.left;
+                        node.bounds.height = bottom - node.bounds.top;
+                        node.offscreen = node.offscreen && child.offscreen;
+                    }
+                }
+            }
+            finish_contest_semantics();
+            IM_ASSERT(accessibility::detail::validate_nodes(g_settings_nodes));
+            const HRESULT publication = g_settings_bridge->publish(g_settings_nodes, IsWindowVisible(window) && !IsIconic(window));
+            if (FAILED(publication) && publication != g_settings_publication_error)
+                record_diagnostic("error", "Accessibility", "Settings provider publication failed " + hresult_text(publication));
+            g_settings_publication_error = publication;
+            if (g_settings_pointer_invoked && SUCCEEDED(publication))
+                (void)g_settings_bridge->notify_invoked(settings_launcher);
+            if (SUCCEEDED(publication)) for (const auto key : g_contest_pointer_invoked) (void)g_settings_bridge->notify_invoked(key);
+            for (const auto& [command, result] : g_settings_completed)
+                (void)g_settings_bridge->complete_command(command, FAILED(publication) ? publication : result);
+            if (SUCCEEDED(publication)) {
+                std::erase_if(g_contest_text, [&](const auto& value) { return std::none_of(g_settings_nodes.begin(), g_settings_nodes.end(), [&](const auto& node) { return node.key == value.first && node.text.has_value(); }); });
+                std::erase_if(g_contest_keys, [&](const auto& value) { return (value.first.find("/peer/") != std::string::npos || value.first.find("/member/") != std::string::npos || value.first.find("/score/") != std::string::npos) &&
+                    std::none_of(g_settings_nodes.begin(), g_settings_nodes.end(), [&](const auto& node) { return node.key == value.second; }); });
+            }
+        }
         ImGui::End();
 
         ImGui::Render();
@@ -6458,6 +7255,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         }
     }
 
+    if (g_settings_bridge) {
+        (void)g_settings_bridge->detach();
+        const HRESULT disconnected = g_settings_bridge->disconnect_retired();
+        if (FAILED(disconnected)) record_diagnostic("error", "Accessibility", "Settings provider disconnect failed " + hresult_text(disconnected));
+        g_settings_bridge.reset();
+    }
+    g_contest_waiting.clear(); g_contest_request_frames.clear(); g_contest_text.clear(); g_contest_keys.clear();
+    g_contest_semantics.standings_identity.reset();
+    g_contest_semantics.prune_peers({});
     if (g_remote_session) {
         g_remote_session->stop(nstu::server::RemoteSessionStopReason::teacher_shutdown);
         g_remote_session.reset();
@@ -6468,6 +7274,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
                                           0, nullptr);
     }
     dashboard.exam_action.wait();
+    dashboard.contests->shutdown();
     control_plane.stop();
     Shell_NotifyIconW(NIM_DELETE, &g_tray_icon);
     g_snapshot_textures.clear();
@@ -6484,5 +7291,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, wchar_t*, int) {
         DestroyWindow(window);
     }
     UnregisterClassW(window_class.lpszClassName, instance);
+    if (SUCCEEDED(com_result)) CoUninitialize();
     return 0;
 }

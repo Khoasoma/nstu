@@ -87,11 +87,11 @@
   function createSession(manifest, options) {
     const context = { ...options.context }, contextText = JSON.stringify(context);
     const problems = new Map(manifest.questions.map(problem => [problem.id, problem]));
-    const key = options.key, pending = new Map(), runs = new Map(), sentRequests = new Set(), recoveryConflicts = new Set();
-    let data = { context: contextText, documents: {}, selected: {}, samples: {}, receipts: {}, finishRequested: false, finished: false }, saved = false, ready = false, error = "", finalRequest = null;
+    const key = options.key, pending = new Map(), runs = new Map(), sentRequests = new Set(), recoveryConflicts = new Set(), knownDocuments = new Set();
+    let data = { context: contextText, documents: {}, selected: {}, samples: {}, receipts: {}, finishRequested: false, finished: false }, saved = false, ready = false, error = "", finalRequest = null, closeSnapshot = false;
     const documentKey = (id, language) => `${id}:${language}`;
     const validDocument = (id, language) => problems.has(id) && LANGUAGES.includes(language);
-    const changed = () => { if (options.onChange) options.onChange(); };
+    const changed = () => { if (!closeSnapshot && options.onChange) options.onChange(); };
     function persist() {
       try {
         const histories = Object.values(data.documents);
@@ -103,7 +103,7 @@
           const removed = doc.undo.length ? doc.undo.shift() : doc.redo.shift();
           historyBytes -= bytes(JSON.stringify(removed));
         }
-        const value = JSON.stringify({ ...data, pending: Array.from(pending.values()), recoveryConflicts: Array.from(recoveryConflicts) });
+        const value = JSON.stringify({ ...data, pending: Array.from(pending.values()), recoveryConflicts: Array.from(recoveryConflicts), knownDocuments: Array.from(knownDocuments) });
         if (bytes(value) > MAX_STORE) throw new Error("Programming recovery storage is full.");
         if (!options.storage || !key) throw new Error("Programming recovery storage is unavailable.");
         options.storage.setItem(key, value); saved = true;
@@ -122,6 +122,7 @@
       if (source !== doc.source) {
         if (history) { doc.undo.push({ source: doc.source, start: doc.start, end: doc.end }); doc.redo = []; }
         doc.source = source; ++doc.revision;
+        knownDocuments.add(documentKey(id, language));
         recoveryConflicts.delete(documentKey(id, language));
       }
       doc.start = selection.start ?? doc.start; doc.end = selection.end ?? doc.end;
@@ -134,6 +135,7 @@
       if (data.finishRequested || !from.length) return null;
       to.push({ source: doc.source, start: doc.start, end: doc.end });
       const value = from.pop(); doc.source = value.source; doc.start = value.start; doc.end = value.end; ++doc.revision;
+      knownDocuments.add(documentKey(id, language));
       recoveryConflicts.delete(documentKey(id, language));
       persist(); changed(); return doc;
     }
@@ -268,6 +270,7 @@
           recoveryConflicts.add(name); error = "Programming recovery source conflict. Local source is retained; edit this draft before sending it.";
           persist(); changed(); return false;
         } else if (!data.finishRequested && message.draftRevision === doc.revision && doc.source === source) recoveryConflicts.delete(name);
+        knownDocuments.add(name);
         if (receiptId) {
           data.receipts[name] = { sourceDigest: message.receiptDigest, receiptId, verified: true, serverTime: message.serverTime };
         }
@@ -275,7 +278,7 @@
       }
       if (intent.operation === "submit" && ["received", "late"].includes(message.status)) {
         if (!safeId(message.receiptId) || !integer(message.serverTime, 1, Number.MAX_SAFE_INTEGER)) return false;
-        data.receipts[documentKey(intent.problemId, intent.language)] = { sourceDigest: options.hash(intent.source), receiptId: message.receiptId, serverTime: message.serverTime, verified: true, late: message.status === "late" };
+        data.receipts[documentKey(intent.problemId, intent.language)] = { requestId: intent.requestId, draftRevision: intent.draftRevision, sourceDigest: options.hash(intent.source), receiptId: message.receiptId, serverTime: message.serverTime, verified: true, late: message.status === "late" };
       }
       if (intent.operation === "ready") { ready = message.status === "ready" && message.runnerReady !== false; }
       if (intent.operation === "cancel" && message.status === "cancelled") {
@@ -297,6 +300,43 @@
       data.finishRequested = true;
       maybeFinalize(); changed(); return data.finished;
     }
+    function flush_for_close(captures = []) {
+      const inventory = { type: "exam_programming_close_inventory", complete: false, localSaved: false, documents: [], reason: "" };
+      const fail = reason => { inventory.localSaved = saved; inventory.reason = reason; return inventory; };
+      if (!Array.isArray(captures) || captures.length > 128 || captures.some(item => !object(item) || !validDocument(item.problemId, item.language) || typeof item.source !== "string")) return fail("document_unavailable");
+      let captured = true;
+      closeSnapshot = true;
+      try {
+        for (const item of captures) {
+          if (data.finishRequested || data.finished) { if (document(item.problemId, item.language).source !== item.source) captured = false; }
+          else if (!update(item.problemId, item.language, item.source, { start: item.start, end: item.end })) captured = false;
+        }
+      } finally { closeSnapshot = false; }
+      if (!captured) { changed(); return fail("local_storage_unavailable"); }
+      if (!persist()) return fail("local_storage_unavailable");
+      if (recoveryConflicts.size || knownDocuments.size > 128) return fail("document_unavailable");
+      for (const name of knownDocuments) {
+        const [id, language] = name.split(":"), doc = data.documents[name];
+        if (!validDocument(id, language) || !doc || sourceError(doc.source) || !integer(doc.revision, 1, Number.MAX_SAFE_INTEGER) || recoveryConflicts.has(name)) return fail("document_unavailable");
+        const sourceDigest = options.hash(doc.source);
+        if (!/^[0-9a-f]{64}$/.test(sourceDigest)) return fail("document_unavailable");
+        const receipt = data.receipts[name];
+        let intent = Array.from(pending.values()).find(item => ["draft", "submit"].includes(item.operation) && item.problemId === id && item.language === language && item.draftRevision === doc.revision && item.source === doc.source);
+        const received = receipt && receipt.verified && safeId(receipt.requestId) && receipt.draftRevision === doc.revision && receipt.sourceDigest === sourceDigest;
+        const needsRequest = !intent && !received;
+        if (needsRequest) intent = request("draft", id, language);
+        if (!intent && !received) return fail("local_storage_unavailable");
+        if (intent && !needsRequest && !sentRequests.has(intent.requestId)) transmit(intent);
+        const requestId = intent ? intent.requestId : receipt.requestId;
+        if (!safeId(requestId)) return fail("document_unavailable");
+        inventory.documents.push({ problemId: id, problemRevision: problems.get(id).revision ?? 1, language, draftRevision: doc.revision, sourceDigest, requestId,
+          status: intent ? sentRequests.has(intent.requestId) ? "forwarded" : "queued" : "received" });
+      }
+      inventory.localSaved = saved;
+      inventory.complete = saved && inventory.documents.every(item => item.status !== "queued");
+      if (!inventory.complete) inventory.reason = "native_enqueue_unavailable";
+      changed(); return inventory;
+    }
     try {
       const stored = options.storage && key ? JSON.parse(options.storage.getItem(key) || "null") : null;
       if (stored && stored.context === contextText && bytes(JSON.stringify(stored)) <= MAX_STORE) {
@@ -305,6 +345,7 @@
           if (object(doc) && !sourceError(doc.source) && integer(doc.revision, 1, Number.MAX_SAFE_INTEGER)) data.documents[name] = { source: doc.source, revision: doc.revision, start: doc.start || 0, end: doc.end || 0,
             undo: Array.isArray(doc.undo) ? doc.undo.filter(item => object(item) && !sourceError(item.source)).slice(-64) : [],
             redo: Array.isArray(doc.redo) ? doc.redo.filter(item => object(item) && !sourceError(item.source)).slice(-64) : [] };
+          if (Object.hasOwn(data.documents, name) && (doc.source || doc.revision > 1)) knownDocuments.add(name);
           if (stored.selected && LANGUAGES.includes(stored.selected[id])) data.selected[id] = stored.selected[id];
           if (stored.samples && problems.get(id).samples.some(sample => sample.id === stored.samples[id])) data.samples[id] = stored.samples[id];
         }
@@ -315,6 +356,11 @@
               (!Object.hasOwn(intent, "source") || !sourceError(intent.source))) pending.set(intent.requestId, intent);
         }
         data.finishRequested = stored.finishRequested === true;
+        if (Object.hasOwn(stored, "knownDocuments")) {
+          if (!Array.isArray(stored.knownDocuments) || stored.knownDocuments.length > problems.size * LANGUAGES.length || new Set(stored.knownDocuments).size !== stored.knownDocuments.length ||
+              stored.knownDocuments.some(name => typeof name !== "string" || !Object.hasOwn(data.documents, name))) throw new Error("Invalid known documents.");
+          stored.knownDocuments.forEach(name => knownDocuments.add(name));
+        }
         if (Object.hasOwn(stored, "recoveryConflicts")) {
           if (!Array.isArray(stored.recoveryConflicts) || stored.recoveryConflicts.length > problems.size * LANGUAGES.length ||
               stored.recoveryConflicts.some(name => typeof name !== "string" || !Object.hasOwn(data.documents, name)) ||
@@ -329,7 +375,7 @@
       for (const id of problems.keys()) for (const language of LANGUAGES) recoveryConflicts.add(documentKey(id, language));
       error = "Programming recovery needs teacher assistance.";
     }
-    return { document, update, undo, request, receive, finish, delivery,
+    return { document, update, undo, request, receive, finish, delivery, flush_for_close,
       select(id, language) { if (!validDocument(id, language) || data.finishRequested) return false; data.selected[id] = language; persist(); changed(); return true; },
       selectSample(id, sample) { if (!problems.get(id).samples.some(item => item.id === sample)) return false; data.samples[id] = sample; persist(); changed(); return true; },
       selectedLanguage, selectedSample, runResult(id) { const run = runs.get(id); return run ? { ...run, stale: document(id, run.language).source !== run.source || selectedLanguage(id) !== run.language || selectedSample(id) !== run.sampleId } : null; },
@@ -365,6 +411,8 @@
   }
   function mountWorkspace(parent, session, problem, options) {
     const doc = parent.ownerDocument, nodes = [], editors = new Map();
+    const closeLocked = () => options.closeLocked && options.closeLocked();
+    const closeEdit = () => { if (closeLocked() && options.onCloseEdit) options.onCloseEdit(); };
     const make = (tag, className, text = "") => { const node = doc.createElement(tag); node.className = className || ""; node.textContent = text; return node; };
     const labelled = (node, key) => { nodes.push([node, key]); return node; };
     const root = make("section", "cs-problem"), statement = make("article", "cs-statement"), workspace = make("section", "cs-source-workspace");
@@ -383,21 +431,35 @@
       const area = make("textarea", "cs-source"); area.spellcheck = false; area.autocapitalize = "off"; area.autocomplete = "off"; area.wrap = "off";
       area.setAttribute("aria-describedby", help.id); area.value = session.document(problem.id, codeLanguage).source;
       let composing = false, escapeTab = false, timer = 0;
+      const compositionWaiters = new Set();
       const capture = () => session.update(problem.id, codeLanguage, area.value, { start: area.selectionStart, end: area.selectionEnd });
-      area.addEventListener("compositionstart", () => { composing = true; });
-      area.addEventListener("beforeinput", () => { if (!composing) { const model = session.document(problem.id, codeLanguage); model.start = area.selectionStart; model.end = area.selectionEnd; } });
-      area.addEventListener("compositionend", () => { composing = false; if (!session.frozen()) { capture(); session.request("draft", problem.id, codeLanguage); } });
-      area.addEventListener("input", () => { if (composing || session.frozen()) return; capture(); clearTimeout(timer); timer = setTimeout(() => session.request("draft", problem.id, codeLanguage), 400); });
+      area.addEventListener("compositionstart", () => { closeEdit(); composing = true; });
+      area.addEventListener("beforeinput", event => { if (closeLocked()) { event.preventDefault(); return; } if (!composing) { const model = session.document(problem.id, codeLanguage); model.start = area.selectionStart; model.end = area.selectionEnd; } });
+      area.addEventListener("compositionend", () => { composing = false; if (!session.frozen()) { capture(); session.request("draft", problem.id, codeLanguage); } compositionWaiters.forEach(complete => complete(true)); });
+      area.addEventListener("input", () => { closeEdit(); if (composing || session.frozen()) return; capture(); clearTimeout(timer); timer = setTimeout(() => session.request("draft", problem.id, codeLanguage), 400); });
       area.addEventListener("keydown", event => {
-        if (composing || event.isComposing || session.frozen()) return;
+        if (composing || event.isComposing || session.frozen() || closeLocked()) return;
         if (event.key === "Escape") { escapeTab = true; return; }
         if (event.key === "Tab" && !event.shiftKey && !escapeTab) { event.preventDefault(); const start = area.selectionStart, end = area.selectionEnd; area.setRangeText("\t", start, end, "end"); capture(); return; }
         escapeTab = false;
         if (event.ctrlKey && event.key.toLowerCase() === "s") { event.preventDefault(); capture(); session.request("draft", problem.id, codeLanguage); }
         if (event.ctrlKey && ["z", "y"].includes(event.key.toLowerCase())) { event.preventDefault(); const value = session.undo(problem.id, codeLanguage, event.key.toLowerCase() === "y" || event.shiftKey); if (value) { area.value = value.source; area.setSelectionRange(value.start, value.end); } }
-        if (event.ctrlKey && event.key === "Enter" && !event.shiftKey && session.runnerReady()) { event.preventDefault(); capture(); session.request("run", problem.id, codeLanguage, session.selectedSample(problem.id)); }
+        if (event.ctrlKey && event.key === "Enter" && !event.shiftKey && session.runnerReady() && (!options.ordinary || options.started() === true)) { event.preventDefault(); capture(); session.request("run", problem.id, codeLanguage, session.selectedSample(problem.id)); }
       });
-      editors.set(codeLanguage, { area, capture, composing: () => composing }); buffers.appendChild(area);
+      editors.set(codeLanguage, { area, capture, composing: () => composing,
+        waitForComposition(token) {
+          if (!composing) return Promise.resolve(true);
+          return new Promise(resolve => {
+            let timeout = 0;
+            const complete = ended => { clearTimeout(timeout); compositionWaiters.delete(complete); token.cancelers.delete(cancel); resolve(ended); };
+            const cancel = () => complete(false);
+            compositionWaiters.add(complete); token.cancelers.add(cancel);
+            timeout = setTimeout(() => complete(false), 250);
+            if (typeof area.blur === "function") area.blur();
+            if (!composing) complete(true);
+          });
+        }, clearDraftTimer() { clearTimeout(timer); }
+      }); buffers.appendChild(area);
     }
     workspace.append(buffers, help);
     const searchRow = make("div", "cs-search"), searchLabel = labelled(make("label"), "search"), search = make("input"), find = labelled(make("button", "quiet-button"), "find");
@@ -410,15 +472,15 @@
     const fields = {};
     for (const key of ["input", "expected", "output", "diagnostics"]) { const block = make("section", "cs-console-section"); block.appendChild(labelled(make("h3"), key)); const pre = make("pre"); block.appendChild(pre); fields[key] = pre; consoleBox.appendChild(block); }
     const status = make("p", "cs-status"); status.setAttribute("role", "status"); status.setAttribute("aria-live", "polite"); workspace.append(consoleBox, status); root.append(statement, workspace); parent.appendChild(root);
-    language.addEventListener("change", () => { const selected = language.value, current = editors.get(session.selectedLanguage(problem.id)); if (current.composing()) { language.value = session.selectedLanguage(problem.id); return; } current.capture(); session.select(problem.id, selected); refresh(); });
-    samples.addEventListener("change", () => { session.selectSample(problem.id, samples.value); refresh(); });
-    run.addEventListener("click", () => { const current = editors.get(session.selectedLanguage(problem.id)), active = session.runResult(problem.id); if (active && active.status === "running") { session.request("cancel", problem.id, active.language); return; } if (!current.composing() && session.runnerReady()) { current.capture(); session.request("run", problem.id, session.selectedLanguage(problem.id), session.selectedSample(problem.id)); } });
-    submit.addEventListener("click", () => { const current = editors.get(session.selectedLanguage(problem.id)); if (!current.composing()) { current.capture(); session.request("submit", problem.id, session.selectedLanguage(problem.id)); } });
+    language.addEventListener("change", () => { const selected = language.value, current = editors.get(session.selectedLanguage(problem.id)); if (current.composing() || closeLocked()) { language.value = session.selectedLanguage(problem.id); return; } current.capture(); session.select(problem.id, selected); refresh(); });
+    samples.addEventListener("change", () => { if (!closeLocked()) { session.selectSample(problem.id, samples.value); refresh(); } });
+    run.addEventListener("click", () => { if (closeLocked() || options.ordinary && (options.started() !== true || !session.runnerReady() || session.frozen())) return; const current = editors.get(session.selectedLanguage(problem.id)), active = session.runResult(problem.id); if (active && active.status === "running") { session.request("cancel", problem.id, active.language); return; } if (!current.composing() && session.runnerReady()) { current.capture(); session.request("run", problem.id, session.selectedLanguage(problem.id), session.selectedSample(problem.id)); } });
+    submit.addEventListener("click", () => { const current = editors.get(session.selectedLanguage(problem.id)); if (!closeLocked() && !current.composing() && (!options.ordinary || options.started() === true && session.runnerReady() && !session.frozen())) { current.capture(); session.request("submit", problem.id, session.selectedLanguage(problem.id)); } });
     function refresh() {
       const ui = options.language(), selected = session.selectedLanguage(problem.id), sample = problem.samples.find(item => item.id === session.selectedSample(problem.id)) || problem.samples[0];
       nodes.forEach(([node, key]) => { node.textContent = copy(ui, key); }); language.value = selected; samples.value = sample.id; filename.textContent = selected === "cpp20" ? "main.cpp" : "main.py";
-      for (const [codeLanguage, editor] of editors) { editor.area.hidden = codeLanguage !== selected; editor.area.disabled = options.started() !== true || session.frozen(); editor.area.setAttribute("aria-label", `${copy(ui, "source")} · ${codeLanguage === "cpp20" ? "main.cpp" : "main.py"}`); const model = session.document(problem.id, codeLanguage); if (!editor.composing() && editor.area.value !== model.source) editor.area.value = model.source; }
-      run.disabled = options.preview || !session.runnerReady() || options.started() !== true || session.frozen(); submit.disabled = options.preview || options.started() !== true || session.frozen(); language.disabled = session.frozen();
+      for (const [codeLanguage, editor] of editors) { editor.area.hidden = codeLanguage !== selected; editor.area.readOnly = Boolean(closeLocked()); editor.area.disabled = !options.ordinary && options.started() !== true || session.frozen(); editor.area.setAttribute("aria-label", `${copy(ui, "source")} · ${codeLanguage === "cpp20" ? "main.cpp" : "main.py"}`); const model = session.document(problem.id, codeLanguage); if (!editor.composing() && !(options.closeCapturing && options.closeCapturing()) && editor.area.value !== model.source) editor.area.value = model.source; }
+      run.disabled = closeLocked() || options.preview || !session.runnerReady() || options.started() !== true || session.frozen(); submit.disabled = closeLocked() || options.preview || options.started() !== true || options.ordinary && !session.runnerReady() || session.frozen(); language.disabled = closeLocked() || session.frozen(); samples.disabled = Boolean(closeLocked());
       fields.input.textContent = sample.input; fields.expected.textContent = sample.output;
       const result = session.runResult(problem.id); fields.output.textContent = result ? result.stdout || "" : ""; fields.diagnostics.textContent = result ? [result.stderr, result.diagnostics].filter(Boolean).join("\n") : "";
       if (result && result.status === "running") run.textContent = ui === "vi" ? "Dừng chạy" : "Stop run";
@@ -428,11 +490,23 @@
       const staleText = result && result.stale ? (ui === "vi" ? "Kết quả của bản nháp hoặc ví dụ trước." : "Result from an earlier draft or sample.") : "";
       const message = [options.preview ? copy(ui, "preview") : session.finished() ? copy(ui, "finished") : session.frozen() ? copy(ui, "stopped") : copy(ui, session.localSaved() ? "saved" : "unsaved"),
         copy(ui, session.delivery(problem.id, selected)), receipt && receipt.verified ? new Date(receipt.serverTime).toLocaleTimeString(ui === "vi" ? "vi-VN" : "en-US") : "",
-        copy(ui, "hidden"), !session.runnerReady() ? copy(ui, "unavailable") : "", publicRunDescription(ui, result), staleText, session.error()].filter(Boolean).join(" · ");
+        options.ordinary && options.started() !== true ? (ui === "vi" ? "Đang chờ giáo viên bắt đầu. Đồng hồ chưa bắt đầu." : "Waiting for the teacher to begin. The timer has not started.") : "",
+        options.closeStatus ? options.closeStatus() : "", copy(ui, "hidden"), !session.runnerReady() ? copy(ui, "unavailable") : "", publicRunDescription(ui, result), staleText, session.error()].filter(Boolean).join(" · ");
       if (status.textContent !== message) status.textContent = message;
     }
     refresh();
-    return { root, refresh, capture() { return editors.get(session.selectedLanguage(problem.id)).capture(); }, composing() { return editors.get(session.selectedLanguage(problem.id)).composing(); } };
+    return { root, refresh, capture() { return editors.get(session.selectedLanguage(problem.id)).capture(); }, composing() { return editors.get(session.selectedLanguage(problem.id)).composing(); },
+      async wait_for_close(token) {
+        const ended = await Promise.all(Array.from(editors.values(), editor => editor.waitForComposition(token)));
+        return token.current() && ended.every(Boolean);
+      }, close_composing() { return Array.from(editors.values()).some(editor => editor.composing()); },
+      capture_for_close(token) {
+        if (!token.current() || Array.from(editors.values()).some(editor => editor.composing())) return null;
+        return Array.from(editors, ([codeLanguage, editor]) => {
+          editor.clearDraftTimer();
+          return { problemId: problem.id, language: codeLanguage, source: editor.area.value, start: editor.area.selectionStart, end: editor.area.selectionEnd };
+        });
+      }, matches_close_capture(captures) { return captures.every(item => editors.get(item.language).area.value === item.source) && !Array.from(editors.values()).some(editor => editor.composing()); } };
   }
   window.NstuProgramming = { LANGUAGES, MAX_SOURCE, sourceError, validatePublicManifest, projectPublicManifest, createSession, mountWorkspace, copy };
 }());

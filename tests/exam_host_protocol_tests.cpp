@@ -12,10 +12,36 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <new>
 #include <string>
 #include <vector>
+
+namespace capture_allocation_test {
+thread_local bool active = false;
+thread_local std::size_t count = 0;
+thread_local std::size_t fail_at = 0;
+}
+
+void* operator new(std::size_t size) {
+    if (capture_allocation_test::active &&
+        ++capture_allocation_test::count == capture_allocation_test::fail_at) throw std::bad_alloc();
+    if (void* value = std::malloc(size == 0 ? 1 : size)) return value;
+    throw std::bad_alloc();
+}
+void* operator new[](std::size_t size) { return ::operator new(size); }
+// Keep replacement deallocation opaque to optimizer allocation-pair diagnostics.
+#if defined(_MSC_VER)
+__declspec(noinline)
+#else
+[[gnu::noinline]]
+#endif
+void operator delete(void* value) noexcept { std::free(value); }
+void operator delete[](void* value) noexcept { ::operator delete(value); }
+void operator delete(void* value, std::size_t) noexcept { ::operator delete(value); }
+void operator delete[](void* value, std::size_t) noexcept { ::operator delete(value); }
 
 namespace {
 
@@ -203,6 +229,496 @@ void exercise_exam_profile_isolation() {
     zero_digest.fill(std::byte{0});
     assert(!nstu::client::derive_exam_profile_path(
         root, zero_digest, client_id, session_id));
+}
+
+void exercise_ordinary_host_policy() {
+    using namespace nstu::client;
+    const auto managed = exam_host_window_policy(ExamHostPolicy::managed);
+    const auto ordinary = exam_host_window_policy(ExamHostPolicy::ordinary_user);
+    assert(ExamHostOptions{}.policy == ExamHostPolicy::managed);
+    assert(managed && managed->style == WS_POPUP);
+    assert(managed->extended_style == (WS_EX_TOPMOST | WS_EX_TOOLWINDOW));
+    assert(managed->managed_lockdown);
+    assert(ordinary && ordinary->style == WS_OVERLAPPEDWINDOW);
+    assert(ordinary->extended_style == 0 && !ordinary->managed_lockdown);
+    assert(!exam_host_window_policy(static_cast<ExamHostPolicy>(255)));
+
+    const auto root = std::filesystem::current_path() /
+        ("nstu-ordinary-host-policy-" + std::to_string(GetCurrentProcessId()));
+    std::error_code fs_error;
+    const auto package_area = root / "student" / "packages";
+    const auto package = package_area / "verified-package";
+    const auto web = package / "exam" / "web";
+    const auto profiles = root / "student" / "profiles";
+    assert(std::filesystem::create_directories(web, fs_error));
+    assert(!fs_error);
+    assert(std::filesystem::create_directories(profiles, fs_error));
+    assert(!fs_error);
+    const std::string manifest = R"({"id":"cs-package","title":"Programming","durationSeconds":3600,"contentMode":"computer_science","programmingVersion":1,"sessionMode":"contest","languages":["cpp20","python3"],"questions":[{"id":"sum","type":"programming","revision":2,"prompt":"Add integers","samples":[{"id":"sample-1","input":"1 2\n","output":"3\n"}],"timeLimitMs":1000,"memoryLimitMiB":64}]})";
+    auto write = [](const auto& path, std::string_view text) {
+        std::ofstream stream(path, std::ios::binary);
+        stream << text;
+        stream.close();
+        assert(stream.good());
+    };
+    write(package / "manifest.json", manifest);
+    write(web / "index.html", "<!doctype html><title>Public contest</title>");
+    assert(std::filesystem::create_directories(package / "exam" / "shared", fs_error));
+    assert(!fs_error);
+    write(package / "exam" / "shared" / "programming.js", "// public fixture asset");
+    ExamPackageReport report;
+    std::string error;
+    assert(inspect_exam_package(package, web, {}, false, report, &error));
+    ExamHostOptions options;
+    options.policy = ExamHostPolicy::ordinary_user;
+    options.allowed_package_root = package_area;
+    options.package_root = package;
+    options.allowed_user_data_root = profiles;
+    options.user_data_root = profiles / "bound-session";
+    options.expected_digest_hex = report.digest_hex;
+    options.context_json = "{\"packageId\":\"cs-package\",\"packageDigestHex\":\"" +
+        report.digest_hex + "\",\"clientIdHex\":\"" + std::string(32, '1') +
+        "\",\"sessionIdHex\":\"" + std::string(32, '2') +
+        "\",\"candidateId\":\"candidate-01\",\"synchronizedStart\":true}";
+    assert(validate_exam_host_options(options, report, &error));
+    assert(report.package_root == package);
+    ExamHost callbacks_rejected;
+    error.clear();
+    assert(!callbacks_rejected.start(nullptr, options, {}, &error));
+    assert(error.find("typed room callbacks") != std::string::npos);
+    ExamHostCallbacks mixed_callbacks;
+    mixed_callbacks.enqueue_programming_request = [](const auto&) { return true; };
+    mixed_callbacks.report_ready = [](const auto&) { return true; };
+    mixed_callbacks.before_close = [](const auto&) { return true; };
+    mixed_callbacks.send_to_service = [](AgentMessage) {};
+    error.clear();
+    assert(!callbacks_rejected.start(nullptr, options, mixed_callbacks, &error));
+    assert(error.find("typed room callbacks") != std::string::npos);
+    auto rejects = [&](ExamHostOptions invalid) {
+        error.clear();
+        assert(!validate_exam_host_options(invalid, report, &error));
+        assert(!error.empty());
+    };
+    auto invalid = options; invalid.allowed_package_root.clear(); rejects(invalid);
+    invalid = options; invalid.allowed_user_data_root.clear(); rejects(invalid);
+    invalid = options; invalid.allowed_package_root = "relative"; rejects(invalid);
+    invalid = options; invalid.package_root = package_area; rejects(invalid);
+    invalid = options; invalid.package_root = package_area / ".." / "outside"; rejects(invalid);
+    invalid = options; invalid.allowed_package_root = root / "student" / "packages-prefix"; rejects(invalid);
+    invalid = options; invalid.web_root = profiles; rejects(invalid);
+    invalid = options; invalid.user_data_root = profiles; rejects(invalid);
+    invalid = options; invalid.user_data_root = profiles / ".." / "outside"; rejects(invalid);
+    invalid = options; invalid.user_data_root.clear(); rejects(invalid);
+    invalid = options; invalid.allowed_user_data_root = package_area;
+    invalid.user_data_root = package / "browser-profile"; rejects(invalid);
+    invalid = options; invalid.allowed_data_root = root; rejects(invalid);
+    invalid = options; invalid.allowed_user_data_root = package_area;
+    invalid.user_data_root = package_area / "other-profile"; rejects(invalid);
+    invalid = options; invalid.require_digest = false; rejects(invalid);
+    invalid = options; invalid.expected_digest_hex.clear(); rejects(invalid);
+    invalid = options; invalid.expected_digest_hex = std::string(64, '0'); rejects(invalid);
+    invalid = options; invalid.policy = static_cast<ExamHostPolicy>(255); rejects(invalid);
+    invalid = options; invalid.context_json.insert(invalid.context_json.size() - 1,
+        ",\"operatorToken\":\"private\""); rejects(invalid);
+    invalid = options; invalid.context_json.insert(invalid.context_json.size() - 1,
+        ",\"candidateId\":\"other\""); rejects(invalid);
+    invalid = options; invalid.context_json.replace(invalid.context_json.find("candidate-01"),
+        12, ""); rejects(invalid);
+    invalid = options; invalid.context_json.replace(invalid.context_json.find(std::string(32, '1')),
+        32, std::string(32, '0')); rejects(invalid);
+    invalid = options; invalid.context_json.replace(invalid.context_json.find(report.digest_hex),
+        64, std::string(64, '3')); rejects(invalid);
+    invalid = options; invalid.context_json.replace(invalid.context_json.find("synchronizedStart\":true"),
+        23, "synchronizedStart\":false"); rejects(invalid);
+    invalid = options;
+    auto uppercase_digest = options.expected_digest_hex;
+    for (auto& digit : uppercase_digest) if (digit >= 'a' && digit <= 'f') digit = static_cast<char>(digit - 'a' + 'A');
+    assert(uppercase_digest != options.expected_digest_hex);
+    invalid.context_json.replace(invalid.context_json.find(options.expected_digest_hex), 64, uppercase_digest);
+    rejects(invalid);
+
+    // Managed inspection retains its existing unrooted diagnostics contract.
+    auto diagnostics = options; diagnostics.policy = ExamHostPolicy::managed;
+    diagnostics.allowed_package_root.clear(); diagnostics.allowed_user_data_root.clear();
+    assert(validate_exam_host_options(diagnostics, report, &error));
+    auto exam_manifest = manifest;
+    exam_manifest.replace(exam_manifest.find("contest"), 7, "exam");
+    write(package / "manifest.json", exam_manifest);
+    assert(inspect_exam_package(package, web, {}, false, report, &error));
+    invalid = options;
+    invalid.context_json.replace(invalid.context_json.find(invalid.expected_digest_hex), 64, report.digest_hex);
+    invalid.expected_digest_hex = report.digest_hex;
+    rejects(invalid);
+    write(package / "manifest.json", manifest);
+
+    nstu::exam::StateRequest trusted;
+    trusted.package_id = "cs-package"; trusted.candidate_id = "candidate-01";
+    fill_bytes(trusted.package_digest, 0x10);
+    fill_bytes(trusted.client_id, 0x30);
+    fill_bytes(trusted.session_id, 0x50);
+    const auto request_json = "{\"type\":\"exam_programming_request\",\"context\":" +
+        nstu::exam::programming::context_json(trusted) +
+        R"(,"operation":"draft","requestId":"draft-01","problemId":"sum","problemRevision":2,"language":"cpp20","draftRevision":1,"source":"int main() {}"})";
+    const auto parsed = parse_browser_programming_request(request_json, manifest, trusted);
+    assert(parsed && parsed->source == "int main() {}" && parsed->context.candidate_id == trusted.candidate_id);
+    auto hostile = request_json;
+    hostile.replace(hostile.find("candidate-01"), 12, "another-candidate");
+    assert(!parse_browser_programming_request(hostile, manifest, trusted));
+    for (std::string_view extra : {",\"operatorToken\":\"private\"", ",\"score\":100",
+                                   ",\"workstationPolicyReady\":true"}) {
+        hostile = request_json; hostile.insert(hostile.size() - 1, extra);
+        assert(!parse_browser_programming_request(hostile, manifest, trusted));
+    }
+    hostile = request_json; hostile.replace(hostile.find("exam_programming_request"), 24, "remote_input");
+    assert(!parse_browser_programming_request(hostile, manifest, trusted));
+    write(package / "private-cases.json", "[]");
+    rejects(options);
+    assert(std::filesystem::remove(package / "private-cases.json", fs_error));
+    assert(!fs_error);
+    write(web / "index.html", "changed public entry point");
+    rejects(options);
+    ExamHost managed_host;
+    assert(!managed_host.request_close());
+    ExamHost ordinary_host;
+    std::string latest_source = "// current editor source";
+    std::string preserved_source;
+    bool capture_complete = false;
+    ExamHostCallbacks callbacks;
+    callbacks.enqueue_programming_request = [](const auto&) { return true; };
+    callbacks.report_ready = [](const auto&) { return true; };
+    callbacks.before_close = [&](const auto& pending) {
+        assert(pending.empty());
+        if (!capture_complete) return false;
+        preserved_source = latest_source;
+        return true;
+    };
+    // A failed preparation has no physical window. Its close gate still
+    // preserves the same owner contract, without simulating browser capture.
+    assert(!ordinary_host.start(nullptr, options, callbacks, &error));
+    assert(ordinary_host.state() == ExamHostState::failed);
+    assert(!ordinary_host.request_close());
+    assert(preserved_source.empty());
+    assert(ordinary_host.state() == ExamHostState::failed);
+    auto replacement_callbacks = callbacks;
+    replacement_callbacks.before_close = [](const auto&) { return true; };
+    assert(!ordinary_host.start(nullptr, options, replacement_callbacks, &error));
+    // A replacement cannot waive the old owner's unfinished preservation.
+    assert(!ordinary_host.request_close());
+    assert(preserved_source.empty());
+    assert(!ordinary_host.apply_telemetry_enable(nstu::exam::TelemetryEnable{}));
+    assert(!ordinary_host.telemetry_enabled() && ordinary_host.telemetry_collector_id() == 0);
+    latest_source += "\n// newer edit remains recoverable";
+    capture_complete = true;
+    assert(ordinary_host.request_close());
+    assert(preserved_source == latest_source);
+    assert(ordinary_host.state() == ExamHostState::idle);
+    callbacks.before_close = [](const auto&) -> bool { throw 1; };
+    assert(!ordinary_host.start(nullptr, options, callbacks, &error));
+    assert(!ordinary_host.request_close());
+    assert(ordinary_host.state() == ExamHostState::failed);
+    ordinary_host.stop();
+    callbacks.before_close = [&](const auto&) {
+        assert(!ordinary_host.request_close());
+        return true;
+    };
+    assert(!ordinary_host.start(nullptr, options, callbacks, &error));
+    assert(ordinary_host.request_close());
+    callbacks.before_close = [&](const auto&) {
+        ordinary_host.stop();
+        return true;
+    };
+    assert(!ordinary_host.start(nullptr, options, callbacks, &error));
+    assert(!ordinary_host.request_close());
+    assert(ordinary_host.state() == ExamHostState::idle);
+    std::filesystem::remove_all(root, fs_error);
+    assert(!fs_error);
+}
+
+void exercise_contest_lifecycle_clock() {
+    using namespace nstu::client;
+    ExamHostContestLifecycle value;
+    value.context.package_id = "cs-package"; value.context.candidate_id = "candidate-01";
+    fill_bytes(value.context.package_digest, 0x10); fill_bytes(value.context.client_id, 0x30);
+    fill_bytes(value.context.session_id, 0x50);
+    value.phase = ExamHostContestPhase::running; value.revision = 3;
+    value.server_start = 100000; value.deadline = 700000; value.server_time = 130000;
+    ExamHostContestLifecycleState clock;
+    assert(clock.accept(value));
+    assert(clock.json().find("\"serverTime\":130000") != std::string::npos);
+    auto stale = value; stale.revision = 2; assert(!clock.accept(stale));
+    stale = value; stale.server_time--; assert(!clock.accept(stale));
+    stale = value; stale.deadline++; stale.revision++; assert(!clock.accept(stale));
+    stale = value; stale.context.candidate_id = "foreign"; assert(!clock.accept(stale));
+    stale = value; stale.phase = ExamHostContestPhase::joining; assert(!clock.accept(stale));
+    value.phase = ExamHostContestPhase::closed; value.revision++;
+    assert(clock.accept(value));
+    assert(clock.json().find("\"phase\":\"Closed\"") != std::string::npos);
+    stale = value; stale.phase = ExamHostContestPhase::running; stale.revision++; assert(!clock.accept(stale));
+    clock.reset();
+    value.server_time = 9007199254740992ULL; assert(!clock.accept(value));
+    value.server_time = 130000; value.server_start = 0; assert(!clock.accept(value));
+    value.deadline = 0; assert(clock.accept(value));
+    stale = value; stale.revision++; stale.server_start = 100000; stale.deadline = 700000;
+    assert(!clock.accept(stale));
+    assert(clock.json().find("private") == std::string::npos);
+    ExamHostContestLifecycleState publication;
+    value.phase = ExamHostContestPhase::running; value.server_start = 100000; value.deadline = 700000;
+    assert(publication.accept(value));
+    assert(!publication.publish([&](std::string_view message) {
+        assert(message.find("Running") != std::string::npos);
+        value.phase = ExamHostContestPhase::closed; ++value.revision;
+        assert(publication.accept(value));
+        return true;
+    }));
+    assert(publication.publish([](std::string_view message) { return message.find("Closed") != std::string::npos; }));
+}
+
+void exercise_close_capture_consumer() {
+    using namespace nstu::client;
+    nstu::exam::StateRequest context;
+    context.package_id = "cs-package"; context.candidate_id = "candidate-01";
+    fill_bytes(context.package_digest, 0x10); fill_bytes(context.client_id, 0x30);
+    fill_bytes(context.session_id, 0x50);
+    const std::string manifest = R"({"id":"cs-package","title":"CS","durationSeconds":60,"contentMode":"computer_science","programmingVersion":1,"sessionMode":"contest","languages":["cpp20","python3"],"questions":[{"id":"sum","type":"programming","revision":2,"prompt":"Sum","timeLimitMs":1000,"memoryLimitMiB":64,"samples":[{"id":"sample","input":"1","output":"1"}]}]})";
+    const auto origin = ExamHostCloseCaptureState::Clock::now();
+    ExamHostCloseCaptureState capture;
+    assert(capture.start(context, manifest, 7));
+    std::string posted;
+    const auto post = [&](std::string_view json) { posted = json; return true; };
+    assert(capture.prepare(post, origin));
+    assert(posted.starts_with("{\"type\":\"exam_close_capture_request\",\"context\":"));
+    const auto nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    assert(nonce.size() == 64);
+    assert(posted == "{\"type\":\"exam_close_capture_request\",\"context\":" +
+        nstu::exam::programming::context_json(context) + ",\"nonce\":\"" + nonce + "\"}");
+    assert(!capture.prepare(post, origin));
+    assert(!capture.start(context, manifest, 8));
+    const std::string document = R"({"problemId":"sum","problemRevision":2,"language":"cpp20","draftRevision":3,"sourceDigest":")" +
+        std::string(64, 'a') + R"(","requestId":"draft-01","status":"forwarded"})";
+    const auto reply = [&](std::string_view documents, bool complete = true) {
+        return "{\"type\":\"exam_close_capture_" + std::string(complete ? "complete" : "failed") +
+            "\",\"context\":" + nstu::exam::programming::context_json(context) +
+            ",\"nonce\":\"" + nonce + "\",\"localSaved\":true,\"documents\":[" + std::string(documents) + "]" +
+            (complete ? "}" : ",\"reason\":\"native_enqueue_unavailable\"}");
+    };
+    const auto valid = reply(document);
+    auto rejects = [&](std::string hostile) {
+        assert(!capture.accept(hostile, origin)); assert(!capture.report());
+    };
+    for (std::string_view extra : {",\"source\":\"private source\"", ",\"score\":1", ",\"operatorToken\":\"secret\"",
+                                  ",\"runnerReady\":true", ",\"noSourceProblemIds\":[\"sum\"]", ",\"localSaved\":true"}) {
+        auto hostile = valid; hostile.insert(hostile.size() - 1, extra); rejects(hostile);
+    }
+    const auto replace = [&](std::string from, std::string to) {
+        auto hostile = valid; const auto at = hostile.find(from); assert(at != std::string::npos);
+        hostile.replace(at, from.size(), to); rejects(hostile);
+    };
+    replace("candidate-01", "other-candidate"); replace(nonce, std::string(64, 'f'));
+    replace("\"context\":{", "\"context\":{\"synchronizedStart\":true,");
+    replace("\"problemRevision\":2", "\"problemRevision\":1");
+    replace("\"draftRevision\":3", "\"draftRevision\":0");
+    replace("\"draftRevision\":3", "\"draftRevision\":9007199254740992");
+    replace("\"draftRevision\":3", "\"draftRevision\":3.0");
+    replace("\"draftRevision\":3", "\"draftRevision\":\"3\"");
+    replace("\"problemRevision\":2", "\"problemRevision\":4294967296");
+    replace("\"language\":\"cpp20\"", "\"language\":\"shell\"");
+    replace("\"problemId\":\"sum\"", "\"problemId\":\"other\"");
+    replace("\"requestId\":\"draft-01\"", "\"requestId\":\"constructor\"");
+    replace("\"requestId\":\"draft-01\"", "\"requestId\":\"" + std::string(97, 'x') + "\"");
+    replace("\"status\":\"forwarded\"", "\"status\":\"queued\"");
+    replace("\"status\":\"forwarded\"", "\"status\":\"saved\"");
+    replace("\"localSaved\":true", "\"localSaved\":false");
+    replace("\"localSaved\":true", "\"localSaved\":\"true\"");
+    replace("\"documents\":[", "\"documents\":{\"invented\":[");
+    replace("\"sourceDigest\":", "\"source\":\"private bytes\",\"sourceDigest\":");
+    replace("\"sourceDigest\":", "\"privateCases\":[],\"sourceDigest\":");
+    replace("exam_close_capture_complete", "remote_input");
+    replace(std::string(64, 'a'), std::string(64, 'A'));
+    replace(std::string(64, 'a'), std::string(63, 'a'));
+    rejects(reply(document + "," + document));
+    rejects(valid + std::string(65536, ' '));
+    assert(capture.accept(valid, origin));
+    const auto completed = *capture.report();
+    assert(completed.complete && completed.local_saved && completed.generation == 7);
+    assert(completed.documents.size() == 1 && completed.documents[0].draft_revision == 3);
+    assert(completed.documents[0].source_digest == std::string(64, 'a'));
+    assert(capture.is_current_complete(completed));
+    assert(!capture.preserve([](const auto&) { return false; }));
+    assert(!capture.preserve([](const auto&) -> bool { throw 1; }));
+    assert(capture.preserve([&](const auto& report) {
+        assert(capture.is_current_complete(report));
+        return true;
+    }));
+    assert(capture.is_current_complete(completed));
+    assert(!capture.accept(valid, origin));
+    auto tampered = completed; tampered.nonce = std::string(64, 'f');
+    assert(!capture.is_current_complete(tampered));
+    tampered = completed; tampered.documents[0].draft_revision++;
+    assert(!capture.is_current_complete(tampered));
+    tampered = completed; tampered.documents[0].source_digest = std::string(64, 'b');
+    assert(!capture.is_current_complete(tampered));
+    tampered = completed; tampered.documents[0].request_id = "different-request";
+    assert(!capture.is_current_complete(tampered));
+    tampered = completed; tampered.context.candidate_id = "another-candidate";
+    assert(!capture.is_current_complete(tampered));
+    assert(!capture.accept("{\"type\":\"exam_ready\"}", origin));
+    assert(capture.is_current_complete(completed));
+    // Failed/revocation is installed before the owner can retry its predicate.
+    auto revoked = reply({}, false);
+    revoked.replace(revoked.find("\"localSaved\":true"), 17, "\"localSaved\":false");
+    assert(!capture.preserve([&](const auto& report) {
+        assert(capture.is_current_complete(report));
+        assert(capture.accept(revoked, origin));
+        return true;
+    }));
+    assert(!capture.is_current_complete(completed));
+    assert(capture.report() && !capture.report()->complete && capture.report()->documents.empty());
+    assert(!capture.accept(valid, origin));
+    assert(!capture.accept(revoked, origin));
+    bool cancelled_before_post = false;
+    assert(!capture.cancel([&](std::string_view json) {
+        cancelled_before_post = !capture.report() && !capture.is_current_complete(completed);
+        assert(!capture.cancel(post));
+        assert(!capture.accept(valid, origin));
+        assert(json == "{\"type\":\"exam_close_capture_cancel\",\"context\":" +
+            nstu::exam::programming::context_json(context) + ",\"nonce\":\"" + nonce + "\"}");
+        return false;
+    }));
+    assert(cancelled_before_post && !capture.prepare(post, origin));
+    assert(capture.cancel(post)); assert(!capture.cancel(post));
+    assert(capture.prepare(post, origin));
+    assert(!capture.accept(valid, origin));
+    assert(!capture.expired(origin + std::chrono::seconds(4)));
+    assert(capture.expired(origin + std::chrono::seconds(5)));
+    assert(capture.cancel(post));
+    assert(capture.start(context, manifest, 8));
+    assert(!capture.is_current_complete(completed));
+    assert(capture.prepare(post, origin));
+    const auto second_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    auto second_reply = valid; second_reply.replace(second_reply.find(nonce), 64, second_nonce);
+    assert(!capture.accept(second_reply, origin + std::chrono::seconds(5)));
+    assert(!capture.report()); assert(capture.cancel(post));
+    assert(capture.prepare(post, origin));
+    const auto third_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    auto third_reply = valid; third_reply.replace(third_reply.find(nonce), 64, third_nonce);
+    assert(capture.accept(third_reply, origin));
+    assert(!capture.preserve([&](const auto& report) {
+        assert(!capture.preserve([](const auto&) { return true; }));
+        assert(capture.is_current_complete(report));
+        assert(capture.cancel(post));
+        assert(capture.prepare(post, origin));
+        return true;
+    }));
+    assert(capture.cancel(post));
+    capture.stop(); assert(!capture.prepare(post, origin));
+    assert(capture.start(context, manifest, 9));
+    assert(!capture.prepare([](std::string_view) { return false; }, origin));
+    assert(!capture.prepare(post, origin));
+    assert(capture.cancel(post));
+    assert(!capture.prepare([](std::string_view) -> bool { throw 1; }, origin));
+    assert(capture.cancel(post));
+    // The page's 256 consumed-nonce bound cannot be reset by another request.
+    for (unsigned attempt = 2; attempt < 256; ++attempt) {
+        assert(capture.prepare(post, origin)); assert(capture.cancel(post));
+    }
+    assert(!capture.prepare(post, origin));
+    assert(!capture.start(context, manifest, 9));
+    capture.stop();
+    auto maximum_manifest = manifest;
+    const auto questions_begin = maximum_manifest.find("\"questions\":[") + 13;
+    const auto question = maximum_manifest.substr(questions_begin, maximum_manifest.size() - questions_begin - 2);
+    std::string questions, documents;
+    for (unsigned problem = 0; problem < 64; ++problem) {
+        auto item = question; item.replace(item.find("sum"), 3, "p" + std::to_string(problem));
+        if (problem) questions += ',';
+        questions += item;
+        for (const auto* language : {"cpp20", "python3"}) {
+            auto inventory = document;
+            inventory.replace(inventory.find("sum"), 3, "p" + std::to_string(problem));
+            inventory.replace(inventory.find("cpp20"), 5, language);
+            inventory.replace(inventory.find("draft-01"), 8, "draft-" + std::to_string(problem) + "-" + language);
+            if (!documents.empty()) documents += ',';
+            documents += inventory;
+        }
+    }
+    maximum_manifest.replace(questions_begin, maximum_manifest.size() - questions_begin - 2, questions);
+    assert(capture.start(context, maximum_manifest, 10));
+    assert(capture.prepare(post, origin));
+    const auto maximum_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    auto maximum_reply = reply(documents); maximum_reply.replace(maximum_reply.find(nonce), 64, maximum_nonce);
+    auto over_limit = maximum_reply;
+    over_limit.insert(over_limit.size() - 2, "," + document);
+    assert(!capture.accept(over_limit, origin));
+    assert(capture.accept(maximum_reply, origin));
+    assert(capture.report()->documents.size() == 128);
+    assert(capture.cancel(post));
+    assert(capture.prepare(post, origin));
+    const auto empty_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    auto empty = reply({}); empty.replace(empty.find(nonce), 64, empty_nonce);
+    assert(capture.accept(empty, origin));
+    assert(capture.report()->complete && capture.report()->documents.empty());
+    assert(capture.cancel(post));
+    capture.stop(); assert(capture.start(context, manifest, 11));
+    assert(capture.prepare(post, origin));
+    const auto failed_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    auto queued_document = document;
+    queued_document.replace(queued_document.find("forwarded"), 9, "queued");
+    auto failed = reply(queued_document, false);
+    failed.replace(failed.find(nonce), 64, failed_nonce);
+    auto bad_reason = failed;
+    bad_reason.replace(bad_reason.find("native_enqueue_unavailable"), 26, "pretend_received");
+    assert(!capture.accept(bad_reason, origin));
+    assert(capture.accept(failed, origin));
+    assert(capture.report() && !capture.report()->complete && capture.report()->local_saved);
+    assert(capture.report()->documents[0].status == "queued");
+    assert(!capture.preserve([](const auto&) { return true; }));
+    assert(capture.cancel(post));
+    assert(capture.prepare(post, origin));
+    const auto received_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+    auto received_document = document;
+    received_document.replace(received_document.find("forwarded"), 9, "received");
+    received_document.replace(received_document.find("\"draftRevision\":3"), 17, "\"draftRevision\":9007199254740991");
+    received_document.replace(received_document.find("draft-01"), 8, std::string(96, 'r'));
+    auto received = reply(received_document); received.replace(received.find(nonce), 64, received_nonce);
+    assert(capture.accept(received, origin));
+    assert(capture.report()->documents[0].status == "received");
+    assert(capture.report()->documents[0].draft_revision == nstu::exam::programming::kMaximumDraftRevision);
+    // Browser Received is still refused when the native owner's durable check fails.
+    assert(!capture.preserve([](const auto&) { return false; }));
+    assert(capture.cancel(post));
+    capture.stop();
+    // Every revocation allocation must fail closed, including failures before its identity is parsed.
+    std::size_t revocation_allocations = 0;
+    for (std::size_t failure = 0; failure <= revocation_allocations; ++failure) {
+        assert(capture.start(context, manifest, 12));
+        assert(capture.prepare(post, origin));
+        const auto current_nonce = posted.substr(posted.find("\"nonce\":\"") + 9, 64);
+        auto completion = valid;
+        completion.replace(completion.find(nonce), 64, current_nonce);
+        auto revocation = reply(document, false);
+        revocation.replace(revocation.find(nonce), 64, current_nonce);
+        assert(capture.accept(completion, origin));
+        const auto previous = *capture.report();
+        capture_allocation_test::count = 0;
+        capture_allocation_test::fail_at = failure;
+        capture_allocation_test::active = true;
+        bool accepted = false;
+        try { accepted = capture.accept(revocation, origin); } catch (const std::bad_alloc&) {}
+        capture_allocation_test::active = false;
+        if (failure == 0) {
+            revocation_allocations = capture_allocation_test::count;
+            assert(accepted && revocation_allocations > 0);
+        } else {
+            assert(!accepted);
+            assert(!capture.is_current_complete(previous));
+            assert(!capture.preserve([](const auto&) { return true; }));
+            assert(!capture.accept(completion, origin));
+            assert(!capture.prepare(post, origin));
+        }
+        assert(capture.cancel(post));
+        capture.stop();
+    }
+    std::puts("native close capture strict metadata, revocation and ordered cancellation: PASS");
 }
 
 void exercise_exam_package_inspection() {
@@ -1249,6 +1765,9 @@ int main() {
 
     exercise_exam_path_policy();
     exercise_exam_profile_isolation();
+    exercise_ordinary_host_policy();
+    exercise_close_capture_consumer();
+    exercise_contest_lifecycle_clock();
     exercise_exam_package_inspection();
     exercise_exam_manifest_asset_validation();
 

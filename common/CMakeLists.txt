@@ -2,6 +2,9 @@ add_library(nstu_common STATIC
     src/auth.cpp
     src/control_channel.cpp
     src/control_messages.cpp
+    src/contest_discovery.cpp
+    src/contest_package.cpp
+    src/contest_room_protocol.cpp
     src/deployment.cpp
     src/discovery.cpp
     src/exam_control.cpp

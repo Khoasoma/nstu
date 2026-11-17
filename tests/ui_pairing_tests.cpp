@@ -5,6 +5,7 @@
 #include "nstu/pairing.hpp"
 
 #include <windows.h>
+#include <objbase.h>
 
 #include <array>
 #include <cassert>
@@ -170,8 +171,14 @@ void test_pair_with_server_student_confirmation() {
         std::byte{9}, std::byte{8}, std::byte{7}, std::byte{6}};
     wchar_t temp_dir[MAX_PATH]{};
     assert(GetTempPathW(MAX_PATH, temp_dir) != 0);
+    GUID keyring_nonce{};
+    assert(SUCCEEDED(CoCreateGuid(&keyring_nonce)));
+    std::array<wchar_t, 39> keyring_nonce_text{};
+    assert(StringFromGUID2(keyring_nonce, keyring_nonce_text.data(),
+                          static_cast<int>(keyring_nonce_text.size())) > 0);
     const auto keyring_path = std::filesystem::path(temp_dir) /
-        (L"nstu-test-pairing-ui-" + std::to_wstring(GetCurrentProcessId()) + L".bin");
+        (L"nstu-test-pairing-ui-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+         keyring_nonce_text.data() + L".bin");
 
     nstu::security::KeyStore key_store;
     nstu::server::ClientRegistry registry;

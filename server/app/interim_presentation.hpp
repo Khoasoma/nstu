@@ -1,11 +1,17 @@
 #pragma once
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "ui_desktop_tokens.hpp"
 
 #include <array>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cmath>
+#include <filesystem>
+#include <string>
+#include <string_view>
 
 // Presentation adapter for the reviewed generated desktop tokens. This layer
 // accepts only ImGui style and appearance; it cannot change operational state.
@@ -118,6 +124,112 @@ inline constexpr float border_width = desktop_tokens::controls::k_border_width;
 inline constexpr float focus_ring = desktop_tokens::controls::k_focus_ring;
 } // namespace controls
 
+namespace reading {
+inline constexpr double comfortable = 1.3;
+inline constexpr std::array<float, 4> presets{1.0f, 1.25f, 1.5f, 2.0f};
+[[nodiscard]] constexpr float zoom(int preset) noexcept {
+    return preset >= 0 && preset < static_cast<int>(presets.size())
+        ? presets[static_cast<std::size_t>(preset)] : presets[0];
+}
+[[nodiscard]] constexpr float font_size(float token, float dpi, int preset) noexcept {
+    return static_cast<float>(token * comfortable * zoom(preset) * dpi);
+}
+[[nodiscard]] constexpr float sas_size(float dpi, int preset) noexcept {
+    return controls::command_height * zoom(preset) * dpi;
+}
+struct LoadedFont { ImFont* font; bool system_font; };
+[[nodiscard]] inline LoadedFont load_font(ImFontAtlas& atlas, std::string_view directory,
+                                        bool semibold, float size) {
+    const auto candidates = semibold
+        ? std::array{"seguisb.ttf", "segoeuib.ttf", "segoeui.ttf"}
+        : std::array{"segoeui.ttf", "seguisb.ttf", "segoeuib.ttf"};
+    for (const auto* name : candidates) {
+        const auto path = std::string(directory) + name;
+        std::error_code error;
+        if (!directory.empty() && std::filesystem::is_regular_file(path, error)) {
+            if (auto* font = atlas.AddFontFromFileTTF(path.c_str(), size, nullptr,
+                                                    atlas.GetGlyphRangesVietnamese())) return {font, true};
+        }
+    }
+    ImFontConfig fallback;
+    fallback.SizePixels = size;
+    return {atlas.AddFontDefault(&fallback), false};
+}
+} // namespace reading
+
+namespace layout {
+// Compact client limits from the existing desktop token contract.
+inline constexpr float minimum_client_width = 500.0f;
+inline constexpr float minimum_client_height = 400.0f;
+inline constexpr float minimum_content_height = 160.0f;
+[[nodiscard]] constexpr float minimum_scale(float render, float native) noexcept {
+    return render > native ? render : native;
+}
+[[nodiscard]] constexpr bool compact(float width, float height, float dpi) noexcept {
+    return width / dpi < geometry::shell_compact_breakpoint || height / dpi < 640.0f;
+}
+[[nodiscard]] inline float footer_height(float dpi, int preset) noexcept {
+    return std::max(geometry::statusbar * dpi,
+        std::round(reading::font_size(typography::caption, dpi, preset)) + spacing::sm * dpi);
+}
+[[nodiscard]] inline float navigation_height(float dpi, float frame) noexcept {
+    return frame + spacing::sm * 2.0f * dpi;
+}
+[[nodiscard]] inline float navigation_frame(float dpi, int preset, float frame, bool unprotected) noexcept {
+    return unprotected ? std::max(frame, std::round(reading::font_size(typography::body, dpi, preset)) +
+        std::round(reading::font_size(typography::caption, dpi, preset)) +
+        (spacing::xs + spacing::sm * 2.0f) * dpi) : frame;
+}
+[[nodiscard]] inline float content_height(float height, float dpi, int preset, float frame,
+                                        bool unprotected = false) noexcept {
+    frame = navigation_frame(dpi, preset, frame, unprotected);
+    return height - navigation_height(dpi, frame) - footer_height(dpi, preset) -
+        spacing::lg * 2.0f * dpi - std::round(reading::font_size(typography::body, dpi, preset)) - spacing::sm * dpi;
+}
+} // namespace layout
+
+inline bool begin_workspace_combo(const char* id, const char* title, bool unprotected,
+                                  const char* warning, const char* explanation, ImFont* caption,
+                                  float dpi, int preset) {
+    ImGui::SetNextItemWidth(-1);
+    if (!unprotected) return ImGui::BeginCombo(id, title);
+    auto* draw = ImGui::GetWindowDrawList();
+    auto* body = ImGui::GetFont();
+    const float body_size = ImGui::GetFontSize();
+    const auto position = ImGui::GetCursorScreenPos();
+    const float padding_x = ImGui::GetStyle().FramePadding.x;
+    const float frame = layout::navigation_frame(dpi, preset, ImGui::GetFrameHeight(), true);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, {padding_x, (frame - body_size) * 0.5f});
+    const bool open = ImGui::BeginCombo(id, nullptr, ImGuiComboFlags_CustomPreview);
+    const auto rectangle = ImGui::GetCurrentContext()->ComboPreviewData.PreviewRect;
+    ImGui::PopStyleVar();
+    if (rectangle.Min.x == position.x && rectangle.Min.y == position.y && rectangle.Max.x > rectangle.Min.x) {
+        draw->PushClipRect(rectangle.Min, rectangle.Max, true);
+        const ImVec2 title_position{rectangle.Min.x + padding_x, rectangle.Min.y + spacing::sm * dpi};
+        draw->AddText(body, body_size, title_position, ImGui::GetColorU32(ImGuiCol_Text), title);
+        draw->AddText(caption ? caption : body, caption ? caption->LegacySize : body_size,
+            {title_position.x, title_position.y + body_size + spacing::xs * dpi},
+            ImGui::GetColorU32(ImGuiCol_Text), warning);
+        draw->PopClipRect();
+    }
+    if (!open && (ImGui::IsItemHovered() || ImGui::IsItemFocused())) ImGui::SetTooltip("%s", explanation);
+    return open;
+}
+
+inline bool wrapped_checkbox(const char* id, const char* label, bool* value, bool enabled = true) {
+    ImGui::PushID(id);
+    ImGui::BeginGroup();
+    ImGui::BeginDisabled(!enabled);
+    bool changed = ImGui::Checkbox("##value", value);
+    ImGui::SameLine();
+    ImGui::TextWrapped("%s", label);
+    if (enabled && ImGui::IsItemClicked()) { *value = !*value; changed = true; }
+    ImGui::EndDisabled();
+    ImGui::EndGroup();
+    ImGui::PopID();
+    return changed;
+}
+
 inline void apply_interim_style(ImGuiStyle& style, bool dark, float scale) {
     // Rebuild all fields, including those a local widget may have customized.
     // This preserves the existing absolute-DPI behavior across theme swaps.
@@ -212,6 +324,14 @@ inline void apply_interim_style(ImGuiStyle& style, bool dark, float scale) {
 
     // Exactly one scale pass. Fonts are separately loaded at the current DPI.
     style.ScaleAllSizes(scale);
+}
+
+inline void apply_teacher_style(ImGuiStyle& style, bool dark, float dpi, int preset) {
+    apply_interim_style(style, dark, dpi);
+    const float body = std::round(reading::font_size(typography::body, dpi, preset));
+    const float height = reading::font_size(controls::default_height, dpi, preset);
+    style.FramePadding.y = std::max(style.FramePadding.y, (height - body) * 0.5f);
+    style.ScrollbarSize = std::max(style.ScrollbarSize, spacing::xl * dpi);
 }
 
 } // namespace nstu::ui

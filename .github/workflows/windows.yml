@@ -366,6 +366,23 @@ jobs:
           if ($sig.Status -ne 'Valid') {
             Write-Warning "WebView2Loader.dll signature is not valid: $($sig.Status)"
           }
+      - name: Stage standalone contest trial from MSVC Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $build = (Resolve-Path build-webview2).Path
+          $trial = Join-Path $build 'contest-trial'
+          $loader = Join-Path $env:NSTU_WEBVIEW2_SDK_DIR 'build/native/x64/WebView2Loader.dll'
+          ./packaging/stage-contest-trial.ps1 -BuildRoot $build -Configuration Release `
+            -Destination $trial -WebView2Loader $loader -PowerShellRoot $PSHOME
+          ./packaging/test-contest-trial.ps1 -TrialRoot $trial
+      - name: Upload uninstalled contest trial
+        uses: actions/upload-artifact@v4
+        with:
+          name: nstu-contest-trial-msvc-webview2
+          path: build-webview2/contest-trial/
+          if-no-files-found: error
+          include-hidden-files: true
 
   release:
     name: Development release

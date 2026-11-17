@@ -27,9 +27,10 @@ const required = [
   'exam/shared/programming.js', 'tests/programming_web_tests.mjs',
   'packaging/test-programming-package.ps1', 'packaging/cs-policy-functions.ps1',
   'packaging/prepare-cs-policy.ps1', 'packaging/verify-cs-policy.ps1', 'packaging/test-cs-policy.ps1',
-  'tools/cs-judge/broker.py', 'tools/cs-judge/worker.py', 'tools/cs-judge/isolate_runner.py',
+  'tools/cs-judge/broker.py', 'tools/cs-judge/contest_rooms.py',
+  'tools/cs-judge/worker.py', 'tools/cs-judge/isolate_runner.py',
   'tools/cs-judge/codeforces_import.py', 'tools/cs-judge/operator_client.py',
-  'tools/cs-judge/test_broker.py', 'tools/cs-judge/test_isolate_runner.py',
+  'tools/cs-judge/test_broker.py', 'tools/cs-judge/test_contest_rooms.py', 'tools/cs-judge/test_isolate_runner.py',
   'tools/cs-judge/test_codeforces_import.py', 'tools/cs-judge/test_operator.py'
 ];
 function failure(message) { throw new Error(message); }

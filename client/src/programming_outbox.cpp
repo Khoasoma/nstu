@@ -10,6 +10,7 @@
 #include <cstring>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -20,7 +21,11 @@ using exam::programming::Request;
 constexpr std::size_t kMaximumRecords = 256;
 constexpr std::size_t kMaximumBytes = 8u * 1024u * 1024u;
 constexpr char kEntropy[] = "NSTU-CS-OUTBOX-V1";
-const auto entropy = std::as_bytes(std::span(kEntropy, sizeof(kEntropy) - 1));
+constexpr char kUserEntropy[] = "NSTU-CS-USER-OUTBOX-V1";
+std::span<const std::byte> outbox_entropy(bool user_scope) {
+    return user_scope ? std::as_bytes(std::span(kUserEntropy, sizeof(kUserEntropy) - 1))
+                      : std::as_bytes(std::span(kEntropy, sizeof(kEntropy) - 1));
+}
 
 void error_text(std::string* error, const char* text) { if (error) *error = text; }
 bool durable(Operation operation) {
@@ -56,19 +61,58 @@ bool no_reparse(const std::filesystem::path& path) {
     }
     return true;
 }
+std::wstring current_owner_sid() {
+    HANDLE token = nullptr;
+    alignas(TOKEN_USER) std::array<std::byte, 1024> token_user{};
+    DWORD token_bytes = 0;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return {};
+    const bool read = GetTokenInformation(token, TokenUser, token_user.data(),
+        static_cast<DWORD>(token_user.size()), &token_bytes) != FALSE;
+    CloseHandle(token);
+    LPWSTR text = nullptr;
+    if (!read || !ConvertSidToStringSidW(
+            reinterpret_cast<const TOKEN_USER*>(token_user.data())->User.Sid, &text)) return {};
+    const std::unique_ptr<wchar_t, decltype(&LocalFree)> owner(text, LocalFree);
+    return text;
+}
+bool below_user_root(const std::filesystem::path& directory,
+                     const std::filesystem::path& allowed_root) {
+    if (!allowed_root.is_absolute() || !no_reparse(allowed_root) ||
+        !std::filesystem::is_directory(allowed_root)) return false;
+    const auto root = std::filesystem::canonical(allowed_root);
+    auto ancestor = std::filesystem::canonical(directory.parent_path());
+    for (;;) {
+        if (std::filesystem::equivalent(ancestor, root)) return true;
+        const auto parent = ancestor.parent_path();
+        if (parent == ancestor) return false;
+        ancestor = parent;
+    }
+}
 struct RestrictedAttributes {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
     SECURITY_ATTRIBUTES attributes{};
-    RestrictedAttributes() {
-        if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, nullptr)) {
-            attributes = {sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+    explicit RestrictedAttributes(bool user_scope = false) noexcept {
+        try {
+            std::wstring security_text = L"D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)";
+            if (user_scope) {
+                const auto owner = current_owner_sid();
+                if (owner.empty()) return;
+                security_text = L"O:" + owner + L"D:P(A;;FA;;;SY)(A;;FA;;;OW)";
+            }
+            if (ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                security_text.c_str(), SDDL_REVISION_1, &descriptor, nullptr)) {
+                attributes = {sizeof(SECURITY_ATTRIBUTES), descriptor, FALSE};
+            }
+        } catch (const std::exception&) {
+            if (descriptor) LocalFree(descriptor);
+            descriptor = nullptr;
+            attributes = {};
         }
     }
     ~RestrictedAttributes() { if (descriptor) LocalFree(descriptor); }
 };
-bool restricted_owner_and_acl(HANDLE handle) {
-    RestrictedAttributes expected;
+bool restricted_owner_and_acl(HANDLE handle, bool user_scope = false) {
+    RestrictedAttributes expected(user_scope);
     PSID owner = nullptr;
     PACL actual_acl = nullptr, expected_acl = nullptr;
     PSECURITY_DESCRIPTOR actual = nullptr;
@@ -93,27 +137,30 @@ bool restricted_owner_and_acl(HANDLE handle) {
     valid = valid && CreateWellKnownSid(WinLocalSystemSid, nullptr, system_sid.data(), &system_size) &&
         CreateWellKnownSid(WinBuiltinAdministratorsSid, nullptr, admin_sid.data(), &admin_size) && token_open &&
         GetTokenInformation(token, TokenUser, token_user.data(), static_cast<DWORD>(token_user.size()), &token_bytes) &&
-        (EqualSid(owner, system_sid.data()) || EqualSid(owner, admin_sid.data()) ||
-         EqualSid(owner, reinterpret_cast<const TOKEN_USER*>(token_user.data())->User.Sid));
+        (EqualSid(owner, reinterpret_cast<const TOKEN_USER*>(token_user.data())->User.Sid) ||
+         (!user_scope && (EqualSid(owner, system_sid.data()) || EqualSid(owner, admin_sid.data()))));
     if (token_open) CloseHandle(token);
     LocalFree(actual);
     return valid;
 }
-std::vector<std::byte> read_wire(const std::filesystem::path& path) {
+std::vector<std::byte> read_wire(const std::filesystem::path& path, bool user_scope) {
     if (!no_reparse(path) || !std::filesystem::is_regular_file(path) ||
         std::filesystem::file_size(path) > exam::kMaximumExamPayloadBytes + 4096u) return {};
     std::ifstream input(path, std::ios::binary);
     const std::string stored{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
     if (input.bad() || stored.empty()) return {};
-    return security::unprotect_machine_secret(std::as_bytes(std::span(stored.data(), stored.size())), entropy);
+    const auto bytes = std::as_bytes(std::span(stored.data(), stored.size()));
+    return user_scope ? security::unprotect_user_secret(bytes, outbox_entropy(true))
+                      : security::unprotect_machine_secret(bytes, outbox_entropy(false));
 }
-bool write_wire(const std::filesystem::path& path, std::span<const std::byte> wire, bool replace) {
-    const auto blob = security::protect_machine_secret(wire, entropy);
+bool write_wire(const std::filesystem::path& path, std::span<const std::byte> wire, bool replace, bool user_scope) {
+    const auto blob = user_scope ? security::protect_user_secret(wire, outbox_entropy(true))
+                                 : security::protect_machine_secret(wire, outbox_entropy(false));
     std::array<std::byte, 16> nonce{};
     if (blob.empty() || blob.size() > exam::kMaximumExamPayloadBytes + 4096u ||
         !security::generate_random(nonce) || !no_reparse(path)) return false;
     const auto temporary = path.parent_path() / (path.filename().string() + ".tmp-" + hex(nonce));
-    RestrictedAttributes security_attributes;
+    RestrictedAttributes security_attributes(user_scope);
     if (!security_attributes.descriptor) return false;
     const auto file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, &security_attributes.attributes,
         CREATE_NEW, FILE_FLAG_WRITE_THROUGH | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -136,22 +183,36 @@ bool hex_key(std::string_view name) {
 
 ProgrammingOutbox::~ProgrammingOutbox() { close(); }
 bool ProgrammingOutbox::open(const std::filesystem::path& directory, std::string* error) {
+    return open_with_policy(directory, {}, false, error);
+}
+bool ProgrammingOutbox::open_user(const std::filesystem::path& directory,
+                                  const std::filesystem::path& allowed_user_root,
+                                  std::string* error) {
+    return open_with_policy(directory, allowed_user_root, true, error);
+}
+bool ProgrammingOutbox::open_with_policy(const std::filesystem::path& directory,
+                                          const std::filesystem::path& allowed_user_root,
+                                          bool user_scope, std::string* error) {
     std::scoped_lock lock(mutex_);
     if (lock_handle_) { error_text(error, "programming outbox is already open"); return false; }
     try {
         if (!directory.is_absolute() || directory.filename() != L"programming-outbox" ||
-            !std::filesystem::is_directory(directory.parent_path()) || !no_reparse(directory)) {
+            !std::filesystem::is_directory(directory.parent_path()) || !no_reparse(directory) ||
+            (user_scope && !below_user_root(directory, allowed_user_root))) {
             error_text(error, "programming outbox path is not an approved directory"); return false;
         }
-        RestrictedAttributes attributes;
+        RestrictedAttributes attributes(user_scope);
         if (!attributes.descriptor || (!CreateDirectoryW(directory.c_str(), &attributes.attributes) &&
             GetLastError() != ERROR_ALREADY_EXISTS) || !no_reparse(directory)) {
             error_text(error, "programming outbox directory is unavailable"); return false;
         }
         root_ = std::filesystem::canonical(directory);
+        if (user_scope && !below_user_root(root_, allowed_user_root)) {
+            root_.clear(); error_text(error, "programming outbox escaped its user root"); return false;
+        }
         const auto directory_handle = CreateFileW(root_.c_str(), READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE,
             nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-        const bool restricted_directory = directory_handle != INVALID_HANDLE_VALUE && restricted_owner_and_acl(directory_handle);
+        const bool restricted_directory = directory_handle != INVALID_HANDLE_VALUE && restricted_owner_and_acl(directory_handle, user_scope);
         if (directory_handle != INVALID_HANDLE_VALUE) CloseHandle(directory_handle);
         if (!restricted_directory) {
             root_.clear(); error_text(error, "programming outbox directory ownership or ACL is not trusted"); return false;
@@ -160,11 +221,12 @@ bool ProgrammingOutbox::open(const std::filesystem::path& directory, std::string
         if (!no_reparse(lock_path)) { root_.clear(); return false; }
         const auto handle = CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE, 0,
             &attributes.attributes, OPEN_ALWAYS, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-        if (handle == INVALID_HANDLE_VALUE || !restricted_owner_and_acl(handle)) {
+        if (handle == INVALID_HANDLE_VALUE || !restricted_owner_and_acl(handle, user_scope)) {
             if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
             root_.clear(); error_text(error, "programming outbox ownership is unavailable"); return false;
         }
         lock_handle_ = handle;
+        user_scope_ = user_scope;
         std::uintmax_t disk_bytes = 0;
         std::size_t disk_records = 0;
         for (const auto& entry : std::filesystem::directory_iterator(root_)) {
@@ -176,7 +238,7 @@ bool ProgrammingOutbox::open(const std::filesystem::path& directory, std::string
             // Retain an interrupted encrypted write for recovery; never erase it.
             if (name.size() == 105 && name.substr(64, 9) == ".csb.tmp-" && hex_key(name.substr(0, 64))) continue;
             if (entry.path().extension() != L".csb" || !hex_key(entry.path().stem().string())) throw std::runtime_error("unknown record");
-            const auto wire = read_wire(entry.path());
+            const auto wire = read_wire(entry.path(), user_scope_);
             const auto request = exam::programming::decode_request(wire);
             if (!request || !durable(request->operation) || key_for(*request) != entry.path().stem().string()) throw std::runtime_error("invalid record");
             if (pending_.size() >= kMaximumRecords || bytes_ + wire.size() > kMaximumBytes) throw std::runtime_error("quota");
@@ -213,7 +275,7 @@ bool ProgrammingOutbox::enqueue(const Request& request, std::string* error) {
             bytes_ - previous_bytes + wire.size() > kMaximumBytes) { error_text(error, "programming outbox quota exceeded"); return false; }
         Request prepared = request;
         auto [position, inserted] = pending_.try_emplace(key, request);
-        if (!write_wire(root_ / (key + ".csb"), wire, !inserted)) {
+        if (!write_wire(root_ / (key + ".csb"), wire, !inserted, user_scope_)) {
             if (inserted) pending_.erase(position);
             error_text(error, "programming outbox write or flush failed"); return false;
         }
@@ -246,7 +308,7 @@ bool ProgrammingOutbox::acknowledge(const exam::programming::Response& response,
                 (entry->second.operation == Operation::finalize && checked->status == "finalized"))) return false;
             const auto path = root_ / (entry->first + ".csb");
             const auto wire = exam::programming::encode_request(entry->second);
-            if (read_wire(path) != wire || !no_reparse(path) || !DeleteFileW(path.c_str())) {
+            if (read_wire(path, user_scope_) != wire || !no_reparse(path) || !DeleteFileW(path.c_str())) {
                 error_text(error, "programming outbox acknowledgement could not remove its exact record"); return false;
             }
             bytes_ -= wire.size(); pending_.erase(entry); return true;
@@ -258,7 +320,7 @@ void ProgrammingOutbox::close() noexcept {
     try {
         std::scoped_lock lock(mutex_);
         if (lock_handle_) CloseHandle(lock_handle_);
-        lock_handle_ = nullptr; pending_.clear(); root_.clear(); bytes_ = 0;
+        lock_handle_ = nullptr; pending_.clear(); root_.clear(); bytes_ = 0; user_scope_ = false;
     } catch (...) {}
 }
 } // namespace nstu::client

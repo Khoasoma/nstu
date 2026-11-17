@@ -7,3 +7,5 @@
 # Preserve the reviewed policy bytes pinned by the native SYSTEM probe.
 /packaging/cs-policy-functions.ps1 -text
 /packaging/verify-cs-policy.ps1 -text
+# Preserve reviewed public extractor bytes pinned by standalone sessions.
+/packaging/stage-contest-package.ps1 -text

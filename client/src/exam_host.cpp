@@ -1032,9 +1032,21 @@ struct ContextIdentity {
 };
 
 bool parse_context(std::string_view json, std::string_view manifest_package_id,
-                   ContextIdentity& output, std::string* error) {
+                   ContextIdentity& output, std::string* error,
+                   bool ordinary_user = false) {
     JsonValue root;
     if (!parse_json_object(json, root, error)) return false;
+    if (ordinary_user) {
+        const auto* synchronized = member(root, "synchronizedStart");
+        if (!public_fields(root, {"packageId", "packageDigestHex", "clientIdHex",
+                "sessionIdHex", "candidateId", "synchronizedStart"}) ||
+            !programming_text(root, "candidateId", 128) ||
+            synchronized == nullptr || synchronized->kind != JsonValue::Kind::boolean ||
+            !synchronized->boolean) {
+            set_error(error, "ordinary exam context must contain only its bound synchronized identity");
+            return false;
+        }
+    }
     std::string package_id;
     std::string digest;
     std::string client;
@@ -1059,6 +1071,11 @@ bool parse_context(std::string_view json, std::string_view manifest_package_id,
         set_error(error, "exam context package id does not match the manifest");
         return false;
     }
+    if (ordinary_user && (digest != hex_string(output.package_digest) ||
+        client != hex_string(output.client_id) || session != hex_string(output.session_id))) {
+        set_error(error, "ordinary exam context requires canonical lowercase identity hex");
+        return false;
+    }
     output.package_id = std::move(package_id);
     return true;
 }
@@ -1067,13 +1084,36 @@ bool parse_manifest_and_context(const ExamHostOptions& options,
                                 ExamPackageReport& report,
                                 ContextIdentity& context,
                                 std::string* error) {
-    if (!options.allowed_data_root.empty() &&
+    if (!exam_host_window_policy(options.policy)) {
+        set_error(error, "exam host policy is invalid");
+        return false;
+    }
+    const bool ordinary = options.policy == ExamHostPolicy::ordinary_user;
+    if (ordinary) {
+        if (!options.allowed_data_root.empty() || !options.require_digest ||
+            options.expected_digest_hex.empty()) {
+            set_error(error, "ordinary exam host requires an explicit user policy and package pin");
+            return false;
+        }
+        if (!validate_exam_user_data_path(options.allowed_package_root,
+                options.package_root, error) ||
+            !validate_exam_user_data_path(options.allowed_user_data_root,
+                options.user_data_root, error)) return false;
+        std::error_code path_error;
+        const auto packages = std::filesystem::weakly_canonical(options.allowed_package_root, path_error);
+        if (path_error) { set_error(error, "ordinary package policy is unavailable"); return false; }
+        const auto profiles = std::filesystem::weakly_canonical(options.allowed_user_data_root, path_error);
+        if (path_error || path_is_within(packages, profiles) || path_is_within(profiles, packages)) {
+            set_error(error, "ordinary package and profile policies must be separate");
+            return false;
+        }
+    } else if (!options.allowed_data_root.empty() &&
         !validate_exam_path_policy(options.allowed_data_root,
                                    options.package_root, options.web_root, {},
                                    error)) {
         return false;
     }
-    if (!options.allowed_user_data_root.empty() &&
+    if (!ordinary && !options.allowed_user_data_root.empty() &&
         !validate_exam_user_data_path(options.allowed_user_data_root,
                                       options.user_data_root, error)) {
         return false;
@@ -1088,12 +1128,20 @@ bool parse_manifest_and_context(const ExamHostOptions& options,
         !validate_manifest_shape(manifest, error)) {
         return false;
     }
+    if (ordinary) {
+        std::string mode;
+        if (!validate_programming_manifest(report.manifest_json, error) ||
+            !string_member(manifest, "sessionMode", mode) || mode != "contest") {
+            set_error(error, "ordinary exam host requires a public programming contest package");
+            return false;
+        }
+    }
     std::string package_id;
     if (!string_member(manifest, "id", package_id)) {
         set_error(error, "exam manifest id is missing");
         return false;
     }
-    if (!parse_context(options.context_json, package_id, context, error)) {
+    if (!parse_context(options.context_json, package_id, context, error, ordinary)) {
         return false;
     }
     security::Sha256Digest package_digest{};
@@ -1704,6 +1752,224 @@ std::optional<exam::programming::Request> parse_browser_programming_request(
     return request;
 }
 
+namespace {
+bool same_capture_context(const exam::StateRequest& a, const exam::StateRequest& b) noexcept {
+    return a.package_id == b.package_id && a.package_digest == b.package_digest &&
+        a.client_id == b.client_id && a.session_id == b.session_id && a.candidate_id == b.candidate_id;
+}
+
+bool capture_hex(std::string_view value, std::size_t size) noexcept {
+    return value.size() == size && std::all_of(value.begin(), value.end(), [](char byte) {
+        return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    });
+}
+
+bool capture_id(std::string_view value) {
+    // Match the shared JS safeId exclusion of inherited Object.prototype names.
+    static const std::set<std::string> reserved{"__proto__", "constructor",
+        "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+        "hasOwnProperty", "isPrototypeOf", "propertyIsEnumerable", "toLocaleString", "toString", "valueOf"};
+    return programming_id(value) && !reserved.contains(std::string(value));
+}
+
+std::string capture_message(std::string_view type, const exam::StateRequest& context, std::string_view nonce) {
+    return "{\"type\":\"" + std::string(type) + "\",\"context\":" +
+        exam::programming::context_json(context) + ",\"nonce\":\"" + std::string(nonce) + "\"}";
+}
+} // namespace
+
+bool ExamHostCloseCaptureState::start(exam::StateRequest context, std::string_view manifest_json,
+                                      std::uint64_t generation) {
+    if (!nonce_.empty() || !cancellation_nonce_.empty() || generation == 0 ||
+        (generation_ != 0 && generation <= generation_) || exam::encode_state_request(context).empty()) return false;
+    JsonValue manifest;
+    std::string package, mode;
+    if (!validate_programming_manifest(manifest_json) || !parse_json_object(manifest_json, manifest, nullptr) ||
+        !string_member(manifest, "id", package) || package != context.package_id ||
+        !string_member(manifest, "sessionMode", mode) || mode != "contest") return false;
+    std::map<std::string, std::uint32_t> problems;
+    for (const auto& question : member(manifest, "questions")->array) {
+        std::string id; std::uint64_t revision = 0;
+        if (!string_member(question, "id", id) || !capture_id(id) ||
+            !uint64_member(question, "revision", revision)) return false;
+        problems.emplace(std::move(id), static_cast<std::uint32_t>(revision));
+    }
+    context_ = std::move(context); problems_ = std::move(problems); generation_ = generation;
+    report_.reset(); issued_nonces_.clear();
+    return true;
+}
+
+void ExamHostCloseCaptureState::stop() noexcept {
+    nonce_.clear(); cancellation_nonce_.clear(); report_.reset(); problems_.clear();
+    generation_ = 0; context_ = {}; issued_nonces_.clear();
+}
+
+bool ExamHostCloseCaptureState::prepare(const std::function<bool(std::string_view)>& post, Clock::time_point now) {
+    if (generation_ == 0 || !nonce_.empty() || !cancellation_nonce_.empty() || issued_nonces_.size() >= 256 || !post) return false;
+    security::Sha256Digest random{};
+    if (!security::generate_random(random)) return false;
+    const auto nonce = hex_string(random);
+    if (!issued_nonces_.insert(nonce).second) return false;
+    nonce_ = nonce; report_.reset(); deadline_ = now + std::chrono::seconds(5);
+    const auto json = capture_message("exam_close_capture_request", context_, nonce_);
+    // A throwing/failed post may have delivered. Keep the nonce for explicit cancellation.
+    try { return post(json); } catch (...) { return false; }
+}
+
+bool ExamHostCloseCaptureState::cancel(const std::function<bool(std::string_view)>& post) {
+    if (cancelling_) return false;
+    invalidate();
+    if (cancellation_nonce_.empty() || !post) return false;
+    const auto nonce = cancellation_nonce_;
+    const auto json = capture_message("exam_close_capture_cancel", context_, nonce);
+    cancelling_ = true;
+    bool posted = false;
+    try { posted = post(json); } catch (...) {}
+    cancelling_ = false;
+    if (posted && cancellation_nonce_ == nonce) cancellation_nonce_.clear();
+    return posted;
+}
+
+void ExamHostCloseCaptureState::invalidate() noexcept {
+    if (!nonce_.empty()) {
+        cancellation_nonce_.swap(nonce_);
+        nonce_.clear();
+    }
+    report_.reset();
+}
+
+bool ExamHostCloseCaptureState::expired(Clock::time_point now) const noexcept {
+    return !nonce_.empty() && !report_ && now >= deadline_;
+}
+
+bool ExamHostCloseCaptureState::accept(std::string_view json, Clock::time_point now) try {
+    if (nonce_.empty() || expired(now) || json.size() > 64u * 1024u ||
+        (report_ && !report_->complete)) return false;
+    JsonValue root;
+    if (!parse_json_object(json, root, nullptr)) return false;
+    std::string type, nonce;
+    if (!string_member(root, "type", type) ||
+        (type != "exam_close_capture_complete" && type != "exam_close_capture_failed") ||
+        !string_member(root, "nonce", nonce) || !capture_hex(nonce, 64) || nonce != nonce_) return false;
+    const bool complete = type == "exam_close_capture_complete";
+    if (complete && report_) return false;
+    auto fields = std::set<std::string>{"type", "context", "nonce", "localSaved", "documents"};
+    if (!complete) fields.insert("reason");
+    const auto* identity = member(root, "context");
+    std::string package, candidate, digest, client, session;
+    if (!public_fields(root, fields) || root.object.size() != fields.size() || !identity ||
+        !public_fields(*identity, {"packageId", "packageDigestHex", "clientIdHex", "sessionIdHex", "candidateId"}) ||
+        identity->object.size() != 5 || !string_member(*identity, "packageId", package) || package != context_.package_id ||
+        !string_member(*identity, "candidateId", candidate) || candidate != context_.candidate_id ||
+        !string_member(*identity, "packageDigestHex", digest) || digest != hex_string(context_.package_digest) ||
+        !string_member(*identity, "clientIdHex", client) || client != hex_string(context_.client_id) ||
+        !string_member(*identity, "sessionIdHex", session) || session != hex_string(context_.session_id)) return false;
+    const auto* saved = member(root, "localSaved");
+    const auto* documents = member(root, "documents");
+    if (!saved || saved->kind != JsonValue::Kind::boolean || (complete && !saved->boolean) ||
+        !documents || documents->kind != JsonValue::Kind::array || documents->array.size() > 128) return false;
+    ExamCloseCaptureReport report{context_, generation_, nonce_, complete, saved->boolean, {}, {}};
+    if (!complete && (!string_member(root, "reason", report.reason) ||
+        (report.reason != "composition_pending" && report.reason != "local_storage_unavailable" &&
+         report.reason != "document_unavailable" && report.reason != "native_enqueue_unavailable"))) return false;
+    std::set<std::pair<std::string, std::string>> identities;
+    std::set<std::string> requests;
+    for (const auto& entry : documents->array) {
+        ExamCloseCaptureDocument document;
+        std::uint64_t revision = 0;
+        if (!public_fields(entry, {"problemId", "problemRevision", "language", "draftRevision", "sourceDigest", "requestId", "status"}) ||
+            entry.object.size() != 7 || !string_member(entry, "problemId", document.problem_id) || !capture_id(document.problem_id) ||
+            !uint64_member(entry, "problemRevision", revision) || revision == 0 || revision > UINT32_MAX ||
+            !problems_.contains(document.problem_id) || problems_.at(document.problem_id) != revision ||
+            !string_member(entry, "language", document.language) || (document.language != "cpp20" && document.language != "python3") ||
+            !uint64_member(entry, "draftRevision", document.draft_revision) || document.draft_revision == 0 ||
+            document.draft_revision > exam::programming::kMaximumDraftRevision ||
+            !string_member(entry, "sourceDigest", document.source_digest) || !capture_hex(document.source_digest, 64) ||
+            !string_member(entry, "requestId", document.request_id) || !capture_id(document.request_id) ||
+            !string_member(entry, "status", document.status) ||
+            (document.status != "forwarded" && document.status != "received" && document.status != "queued") ||
+            (complete && document.status == "queued") || !identities.emplace(document.problem_id, document.language).second ||
+            !requests.insert(document.request_id).second) return false;
+        document.problem_revision = static_cast<std::uint32_t>(revision);
+        report.documents.push_back(std::move(document));
+    }
+    report_ = std::move(report);
+    return true;
+} catch (...) {
+    invalidate();
+    return false;
+}
+
+bool ExamHostCloseCaptureState::is_current_complete(const ExamCloseCaptureReport& report) const noexcept {
+    return report_ && report_->complete && report.complete && report.local_saved && report.reason.empty() &&
+        !nonce_.empty() && report.nonce == nonce_ && report.generation == generation_ &&
+        same_capture_context(report.context, context_) && report.documents == report_->documents;
+}
+
+bool ExamHostCloseCaptureState::preserve(const std::function<bool(const ExamCloseCaptureReport&)>& predicate) {
+    if (preserving_ || !report_ || !is_current_complete(*report_) || !predicate) return false;
+    const auto captured = *report_;
+    preserving_ = true;
+    bool preserved = false;
+    try { preserved = predicate(captured); } catch (...) {}
+    preserving_ = false;
+    return preserved && is_current_complete(captured);
+}
+
+bool ExamHostContestLifecycleState::accept(const ExamHostContestLifecycle& value) {
+    constexpr std::uint64_t maximum = 9007199254740991ULL;
+    const bool active_clock = value.server_start != 0 || value.deadline != 0;
+    if (value.revision == 0 || value.revision > maximum || value.server_time == 0 || value.server_time > maximum ||
+        value.server_start > maximum || value.deadline > maximum ||
+        value.phase < ExamHostContestPhase::draft || value.phase > ExamHostContestPhase::closed ||
+        (active_clock && (value.server_start == 0 || value.deadline <= value.server_start ||
+            value.server_time < value.server_start || value.deadline - value.server_start < 60000 ||
+            value.deadline - value.server_start > 86400000)) ||
+        (value.phase == ExamHostContestPhase::running && !active_clock) ||
+        (value.phase < ExamHostContestPhase::running && active_clock)) return false;
+    exam::ExamReadyReport identity{value.context.package_id, value.context.candidate_id, value.context.package_digest,
+                                  value.context.client_id, value.context.session_id};
+    if (!exam::validate_exam_ready_report(identity)) return false;
+    if (current_) {
+        const auto& previous = *current_;
+        if (!same_capture_context(previous.context, value.context) || value.revision < previous.revision ||
+            value.server_time < previous.server_time ||
+            (value.revision == previous.revision && value.phase != previous.phase) ||
+            (previous.phase == ExamHostContestPhase::closed && value.phase != ExamHostContestPhase::closed) ||
+            (previous.phase == ExamHostContestPhase::running && value.phase < ExamHostContestPhase::running) ||
+            ((previous.server_start != 0 || previous.phase == ExamHostContestPhase::closed) &&
+                (value.server_start != previous.server_start || value.deadline != previous.deadline))) return false;
+    }
+    std::optional<ExamHostContestLifecycle> next{value};
+    current_.swap(next);
+    ++publication_;
+    return true;
+}
+
+std::string ExamHostContestLifecycleState::json() const {
+    if (!current_) return {};
+    const auto& value = *current_;
+    const char* phase = "Draft";
+    switch (value.phase) {
+    case ExamHostContestPhase::draft: break;
+    case ExamHostContestPhase::joining: phase = "Joining"; break;
+    case ExamHostContestPhase::prepared: phase = "Prepared"; break;
+    case ExamHostContestPhase::running: phase = "Running"; break;
+    case ExamHostContestPhase::closed: phase = "Closed"; break;
+    }
+    return "{\"type\":\"exam_contest_lifecycle\",\"context\":" + exam::programming::context_json(value.context) +
+        ",\"phase\":\"" + phase + "\",\"revision\":" + std::to_string(value.revision) +
+        ",\"serverStart\":" + std::to_string(value.server_start) + ",\"deadline\":" + std::to_string(value.deadline) +
+        ",\"serverTime\":" + std::to_string(value.server_time) + "}";
+}
+
+bool ExamHostContestLifecycleState::publish(const std::function<bool(std::string_view)>& post) const {
+    if (!current_ || !post) return false;
+    const auto publication = publication_;
+    const auto message = json();
+    return post(message) && publication_ == publication;
+}
+
 bool validate_exam_user_data_path(
     const std::filesystem::path& allowed_user_data_root,
     const std::filesystem::path& user_data_root,
@@ -2035,19 +2301,28 @@ struct ExamHost::Impl {
     HWND owner = nullptr;
     HWND window = nullptr;
     ExamHostOptions options;
+    ExamHostWindowPolicy window_policy;
     ExamPackageReport package;
     ContextIdentity context;
     ExamHostCallbacks callbacks;
     ExamHostState state = ExamHostState::idle;
     HHOOK keyboard_hook = nullptr;
     bool stopping = false;
+    bool close_pending = false;
+    bool editable_document_created = false;
+    std::uint64_t document_generation = 0;
+    ExamHostCloseCaptureState close_capture;
+    ExamHostContestLifecycleState contest_lifecycle;
+    bool contest_lifecycle_pending = false;
     bool preserve_bridge_enable = false;
     std::uint64_t command_publication = 0;
     std::set<std::string> allowed_package_assets;
     std::set<std::string> valid_question_ids;
     bool ready_reported = false;
     bool programming_package = false;
+    std::uint32_t contest_duration_seconds = 0;
     std::map<std::string, exam::programming::Request> programming_pending;
+    std::uint64_t programming_pending_revision = 0;
     // Incremented whenever an exam host operation is stopped/restarted.  The
     // WebView2 API completes asynchronously, so callbacks from an older
     // operation must never mutate a newly-started host.
@@ -2110,6 +2385,13 @@ void notify_status(ExamHost::Impl& host, std::string message) {
     }
 }
 
+void notify_capture(ExamHost::Impl& host) noexcept {
+    try {
+        const auto callback = host.callbacks.capture_updated;
+        if (callback) callback(host.close_capture.report());
+    } catch (...) { notify_status(host, "Close capture notification failed; the editor remains open."); }
+}
+
 void cancel_initialization_watchdog(ExamHost::Impl& host) noexcept {
 #if NSTU_HAS_WEBVIEW2
     if (host.window != nullptr && host.initialization_timer_id != 0) {
@@ -2156,6 +2438,7 @@ void set_host_state(ExamHost::Impl& host, ExamHostState state,
     host.state = state;
     if (state == ExamHostState::failed) {
         host.telemetry.stop();
+        if (!host.window_policy.managed_lockdown && host.api) (void)host.api->cancel_capture();
 #if NSTU_HAS_WEBVIEW2
         host.webview_ready = false;
 #endif
@@ -2205,6 +2488,17 @@ LRESULT CALLBACK exam_keyboard_proc(int code, WPARAM wparam, LPARAM lparam) {
 
 void resize_exam_window(ExamHost::Impl& host) {
     if (host.window == nullptr) return;
+    if (!host.window_policy.managed_lockdown) {
+#if NSTU_HAS_WEBVIEW2
+        if (host.controller != nullptr) {
+            RECT bounds{};
+            GetClientRect(host.window, &bounds);
+            (void)host.controller->put_Bounds(bounds);
+            (void)host.controller->NotifyParentWindowPositionChanged();
+        }
+#endif
+        return;
+    }
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int width = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
@@ -2255,9 +2549,10 @@ LRESULT CALLBACK exam_window_proc(HWND window, UINT message, WPARAM wparam,
             return 0;
         }
         if (wparam == kExamAliveTimerId) {
-            if (host->state == ExamHostState::preparing ||
+            if (host->window_policy.managed_lockdown &&
+                (host->state == ExamHostState::preparing ||
                 host->state == ExamHostState::initializing ||
-                host->state == ExamHostState::running) {
+                host->state == ExamHostState::running)) {
                 if (host->callbacks.send_to_service) {
                     host->callbacks.send_to_service(
                         {AgentMessageType::exam_alive, {}});
@@ -2280,11 +2575,26 @@ LRESULT CALLBACK exam_window_proc(HWND window, UINT message, WPARAM wparam,
 #endif
         break;
     case WM_DISPLAYCHANGE:
-    case WM_DPICHANGED:
+        if (!host->window_policy.managed_lockdown) break;
         resize_exam_window(*host);
         return 0;
+    case WM_DPICHANGED:
+        if (!host->window_policy.managed_lockdown) {
+            const auto* suggested = reinterpret_cast<const RECT*>(lparam);
+            if (suggested != nullptr) {
+                SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                    suggested->right - suggested->left, suggested->bottom - suggested->top,
+                    SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+        resize_exam_window(*host);
+        return 0;
+    case WM_SIZE:
+        if (!host->window_policy.managed_lockdown) resize_exam_window(*host);
+        break;
     case WM_ACTIVATE:
     case WM_KILLFOCUS:
+        if (!host->window_policy.managed_lockdown) break;
         if (!host->stopping && host->state == ExamHostState::running) {
             SetWindowPos(window, HWND_TOPMOST, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -2292,6 +2602,7 @@ LRESULT CALLBACK exam_window_proc(HWND window, UINT message, WPARAM wparam,
         }
         return 0;
     case WM_SYSCOMMAND:
+        if (!host->window_policy.managed_lockdown) break;
         if ((wparam & 0xfff0u) == SC_CLOSE ||
             (wparam & 0xfff0u) == SC_MINIMIZE ||
             (wparam & 0xfff0u) == SC_MAXIMIZE) {
@@ -2299,6 +2610,9 @@ LRESULT CALLBACK exam_window_proc(HWND window, UINT message, WPARAM wparam,
         }
         break;
     case WM_CLOSE:
+        if (!host->window_policy.managed_lockdown && host->api != nullptr) {
+            (void)host->api->request_close();
+        }
         // Only the authenticated host/service path calls ExamHost::stop().
         return 0;
     case kHostMessageExamStop:
@@ -2307,7 +2621,8 @@ LRESULT CALLBACK exam_window_proc(HWND window, UINT message, WPARAM wparam,
         // ignored if a new operation has already replaced the failed one.
         if (wparam == 0 || host->state == ExamHostState::failed) {
             if (host->api != nullptr) {
-                host->api->stop(wparam == 0 ? 0 : host->command_publication);
+                if (host->window_policy.managed_lockdown) host->api->stop(wparam == 0 ? 0 : host->command_publication);
+                else (void)host->api->request_close();
             }
         }
         return 0;
@@ -2543,7 +2858,7 @@ bool post_webview_json(ExamHost::Impl& host, std::string_view json) {
 }
 
 void post_telemetry_enable(ExamHost::Impl& host, bool maintenance = false) noexcept {
-    if (!host.webview_ready || host.webview == nullptr) return;
+    if (!host.window_policy.managed_lockdown || !host.webview_ready || host.webview == nullptr) return;
     try {
         const auto post = [&host](std::string_view json) { return post_webview_json(host, json); };
         if (maintenance) (void)host.telemetry.maintain_browser_startup(post);
@@ -2568,30 +2883,49 @@ HRESULT on_navigation_starting(ExamHost::Impl& host,
         notify_status(host, "Exam navigation was blocked by the local policy.");
         return S_OK;
     }
+    if (!host.window_policy.managed_lockdown) {
+        // Reload/replacement could discard live drafts, including a frozen capture.
+        // The owner must preserve and close this host before opening another page.
+        if (host.editable_document_created) {
+            (void)args->put_Cancel(TRUE);
+            notify_status(host, "Preserve current drafts before reopening the editor.");
+            return S_OK;
+        }
+        host.close_capture.stop();
+        const exam::StateRequest context{host.context.package_id, host.context.package_digest,
+            host.context.client_id, host.context.session_id, host.context.candidate_id};
+        if (!host.close_capture.start(context, host.package.manifest_json, ++host.document_generation)) {
+            (void)args->put_Cancel(TRUE);
+            set_host_state(host, ExamHostState::failed, "Close capture context is unavailable.");
+            return S_OK;
+        }
+    }
     // Navigation starts a new generation before any document can send data.
     host.webview_ready = false;
-    host.telemetry.advance_collector();
+    if (host.window_policy.managed_lockdown) host.telemetry.advance_collector();
     return S_OK;
 }
 
 HRESULT on_web_message(ExamHost::Impl& host,
                        ICoreWebView2WebMessageReceivedEventArgs* args) {
     if (args == nullptr) {
+        if (!host.window_policy.managed_lockdown) host.close_capture.invalidate();
         notify_status(host, "WebView2 supplied an invalid message event.");
         return E_INVALIDARG;
     }
     LPWSTR raw_source = nullptr;
     LPWSTR raw_json = nullptr;
-    if (FAILED(args->get_Source(&raw_source)) ||
-        FAILED(args->get_WebMessageAsJson(&raw_json))) {
-        if (raw_source != nullptr) CoTaskMemFree(raw_source);
-        if (raw_json != nullptr) CoTaskMemFree(raw_json);
+    const auto source_result = args->get_Source(&raw_source);
+    const auto json_result = args->get_WebMessageAsJson(&raw_json);
+    const auto release = [](wchar_t* value) noexcept { CoTaskMemFree(value); };
+    const std::unique_ptr<wchar_t, decltype(release)> owned_source(raw_source, release);
+    const std::unique_ptr<wchar_t, decltype(release)> owned_json(raw_json, release);
+    if (FAILED(source_result) || FAILED(json_result)) {
+        if (!host.window_policy.managed_lockdown) host.close_capture.invalidate();
         return S_OK;
     }
     const std::wstring source = raw_source != nullptr ? raw_source : L"";
     const std::wstring json_wide = raw_json != nullptr ? raw_json : L"";
-    if (raw_source != nullptr) CoTaskMemFree(raw_source);
-    if (raw_json != nullptr) CoTaskMemFree(raw_json);
     if (!allowed_exam_web_uri(host, source)) {
         notify_status(host, "Exam message from an untrusted source was ignored.");
         return S_OK;
@@ -2606,19 +2940,36 @@ HRESULT on_web_message(ExamHost::Impl& host,
     }
     std::string type;
     if (!string_member(root, "type", type)) return S_OK;
+    if (type == "exam_close_capture_complete" || type == "exam_close_capture_failed") {
+        if (!host.window_policy.managed_lockdown && host.programming_package && host.webview_ready &&
+            host.close_capture.accept(json)) notify_capture(host);
+        return S_OK;
+    }
     if (type == "exam_programming_request" && host.programming_package) {
         exam::StateRequest trusted{host.context.package_id, host.context.package_digest, host.context.client_id,
                                   host.context.session_id, host.context.candidate_id};
         const auto request = parse_browser_programming_request(json, host.package.manifest_json, trusted, &parse_error);
-        if (!request || !host.callbacks.send_to_service) {
+        if (!request || (host.window_policy.managed_lockdown
+                ? !host.callbacks.send_to_service : !host.callbacks.enqueue_programming_request)) {
             notify_status(host, "Programming request rejected by the native host.");
             return S_OK;
         }
+        if (!host.window_policy.managed_lockdown) host.editable_document_created = true;
         if (!track_browser_programming_request(host.programming_pending, *request)) {
             (void)post_webview_json(host, exam::programming::unavailable_response_json(*request, "native_queue_unavailable"));
             return S_OK;
         }
-        host.callbacks.send_to_service({AgentMessageType::exam_programming_request, exam::programming::encode_request(*request)});
+        ++host.programming_pending_revision;
+        if (host.window_policy.managed_lockdown) {
+            host.callbacks.send_to_service({AgentMessageType::exam_programming_request, exam::programming::encode_request(*request)});
+        } else {
+            bool accepted = false;
+            try { accepted = host.callbacks.enqueue_programming_request(*request); }
+            catch (...) { notify_status(host, "Programming request queue failed; source remains pending."); }
+            if (!accepted) {
+                (void)post_webview_json(host, exam::programming::unavailable_response_json(*request, "native_queue_unavailable"));
+            }
+        }
     } else if (type == "exam_answer_event" && !host.programming_package) {
         exam::AnswerEvent event;
         if (!parse_answer_event(root, host.context, event, &parse_error)) {
@@ -2647,10 +2998,12 @@ HRESULT on_web_message(ExamHost::Impl& host,
                 {AgentMessageType::exam_state_request, payload});
         }
     } else if (type == "exam_ready") {
+        if (!host.window_policy.managed_lockdown) host.editable_document_created = true;
         // The page signals that its DOM/assets are usable, but the identity in
         // the browser message is not trusted. Build ERDY exclusively from the
         // immutable, native-validated context and emit it at most once.
-        if (!host.ready_reported && host.callbacks.send_to_service) {
+        if (!host.ready_reported && (host.window_policy.managed_lockdown
+                ? static_cast<bool>(host.callbacks.send_to_service) : static_cast<bool>(host.callbacks.report_ready))) {
             exam::ExamReadyReport report;
             report.package_id = host.context.package_id;
             report.candidate_id = host.context.candidate_id;
@@ -2659,16 +3012,20 @@ HRESULT on_web_message(ExamHost::Impl& host,
             report.session_id = host.context.session_id;
             const auto payload = exam::encode_exam_ready_report(report);
             if (!payload.empty()) {
-                host.callbacks.send_to_service(
-                    {AgentMessageType::exam_ready, payload});
-                host.ready_reported = true;
-                post_webview_json(host, "{\"type\":\"exam_host_ready\"}");
+                if (host.window_policy.managed_lockdown) {
+                    host.callbacks.send_to_service({AgentMessageType::exam_ready, payload});
+                    host.ready_reported = true;
+                } else {
+                    try { host.ready_reported = host.callbacks.report_ready(report); }
+                    catch (...) { notify_status(host, "Contest readiness queue failed."); }
+                }
+                if (host.ready_reported) post_webview_json(host, "{\"type\":\"exam_host_ready\"}");
             } else {
                 notify_status(host, "Exam readiness could not be encoded.");
             }
         }
     } else if (type == "exam_telemetry_samples") {
-        if (!host.telemetry.enabled() || !host.webview_ready) {
+        if (!host.window_policy.managed_lockdown || !host.telemetry.enabled() || !host.webview_ready) {
             // Collection remains off without a matching enable.
             return S_OK;
         }
@@ -2709,7 +3066,8 @@ HRESULT on_process_failed(ExamHost::Impl& host,
     // shutdown through its status-message path.
     host.webview_ready = false;
     set_host_state(host, ExamHostState::failed,
-                   "WebView2 process failure detected; exam host stopped.");
+                   host.window_policy.managed_lockdown ? "WebView2 process failure detected; exam host stopped." :
+                   "WebView2 process failed; drafts require recovery before closing.");
     return S_OK;
 }
 
@@ -2833,7 +3191,11 @@ void on_environment_created(ExamHost::Impl& host, std::uint64_t generation,
                                     ICoreWebView2WebMessageReceivedEventArgs* args)
                     -> HRESULT {
                     if (!callback_is_current(host, generation)) return S_OK;
-                    return on_web_message(host, args);
+                    try { return on_web_message(host, args); }
+                    catch (...) {
+                        if (!host.window_policy.managed_lockdown) host.close_capture.invalidate();
+                        return E_FAIL;
+                    }
                 });
             host.web_resource_handler = make_webview_callback<
                 ICoreWebView2WebResourceRequestedEventHandler,
@@ -2865,6 +3227,7 @@ void on_environment_created(ExamHost::Impl& host, std::uint64_t generation,
                         return S_OK;
                     }
                     host.webview_ready = true;
+                    if (!host.window_policy.managed_lockdown) host.editable_document_created = true;
                     set_host_state(host, ExamHostState::running,
                                    "Exam host is ready.");
                     post_webview_json(host, "{\"type\":\"exam_host_ready\"}");
@@ -2934,6 +3297,8 @@ void on_environment_created(ExamHost::Impl& host, std::uint64_t generation,
                 L"Object.defineProperty(window,\"NSTU_EXAM_MANIFEST\",{value:manifest,writable:false,configurable:false,enumerable:false});"
                 L"Object.defineProperty(window,\"NSTU_EXAM_CONTEXT\",{value:context,writable:false,configurable:false,enumerable:false});"
                 L"Object.defineProperty(window,\"NSTU_EXAM_ASSET_BASE\",{value:assetBase,writable:false,configurable:false,enumerable:false});"
+                + (host.window_policy.managed_lockdown ? std::wstring{} :
+                   L"Object.defineProperty(window,\"NSTU_EXAM_HOST_POLICY\",{value:\"ordinary_user\",writable:false,configurable:false,enumerable:false});") +
                 L"})();";
             auto script_callback = make_webview_callback<
                 ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler,
@@ -3086,9 +3451,28 @@ ExamHost::ExamHost() : impl_(std::make_unique<Impl>()) {
 
 ExamHost::~ExamHost() { stop(); }
 
+std::optional<ExamHostWindowPolicy> exam_host_window_policy(ExamHostPolicy policy) noexcept {
+    switch (policy) {
+    case ExamHostPolicy::managed: return ExamHostWindowPolicy{};
+    case ExamHostPolicy::ordinary_user: return ExamHostWindowPolicy{WS_OVERLAPPEDWINDOW, 0, false};
+    }
+    return std::nullopt;
+}
+
+bool validate_exam_host_options(const ExamHostOptions& options,
+                               ExamPackageReport& report, std::string* error) {
+    ContextIdentity context;
+    return parse_manifest_and_context(options, report, context, error);
+}
+
 bool ExamHost::start(HWND owner, const ExamHostOptions& options,
                      ExamHostCallbacks callbacks, std::string* error,
                      std::uint64_t command_publication) {
+    if (impl_ != nullptr && impl_->options.policy == ExamHostPolicy::ordinary_user &&
+        impl_->state != ExamHostState::idle && impl_->callbacks.before_close && !request_close()) {
+        set_error(error, "previous ordinary exam host has unfinished close preparation");
+        return false;
+    }
     if (impl_ != nullptr) impl_->preserve_bridge_enable = true;
     stop(command_publication);
     if (impl_ == nullptr) impl_ = std::make_unique<Impl>();
@@ -3101,11 +3485,28 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
     impl_->options = options;
     impl_->callbacks = std::move(callbacks);
     impl_->ready_reported = false;
+    impl_->editable_document_created = false;
+    impl_->programming_pending.clear();
+    ++impl_->programming_pending_revision;
 #if NSTU_HAS_WEBVIEW2
     impl_->webview_ready = false;
     impl_->last_blocked_resource_notice_ms = 0;
 #endif
     set_host_state(*impl_, ExamHostState::preparing);
+    const auto window_policy = exam_host_window_policy(options.policy);
+    if (!window_policy) {
+        set_error(error, "exam host policy is invalid");
+        set_host_state(*impl_, ExamHostState::failed, "Exam host policy is invalid.");
+        return false;
+    }
+    impl_->window_policy = *window_policy;
+    if (!impl_->window_policy.managed_lockdown &&
+        (impl_->callbacks.send_to_service || !impl_->callbacks.enqueue_programming_request ||
+         !impl_->callbacks.report_ready || !impl_->callbacks.before_close)) {
+        set_error(error, "ordinary exam host requires typed room callbacks and a preservation gate");
+        set_host_state(*impl_, ExamHostState::failed, "Ordinary exam host callbacks are invalid.");
+        return false;
+    }
     if (!parse_manifest_and_context(options, impl_->package, impl_->context,
                                     error)) {
         set_host_state(*impl_, ExamHostState::failed,
@@ -3122,7 +3523,15 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
     }
     impl_->valid_question_ids.clear();
     impl_->programming_package = validate_programming_manifest(impl_->package.manifest_json);
-    impl_->programming_pending.clear();
+    impl_->contest_duration_seconds = 0;
+    if (!impl_->window_policy.managed_lockdown && impl_->programming_package) {
+        ExamLockdownPolicy policy;
+        if (!extract_exam_lockdown_policy(impl_->package.manifest_json, policy, error)) {
+            set_host_state(*impl_, ExamHostState::failed, "Contest duration is unavailable.");
+            return false;
+        }
+        impl_->contest_duration_seconds = policy.duration_seconds;
+    }
     collect_manifest_question_ids(impl_->package.manifest_json, impl_->valid_question_ids);
     exam::StateRequest telemetry_context;
     telemetry_context.package_id = impl_->context.package_id;
@@ -3130,7 +3539,7 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
     telemetry_context.client_id = impl_->context.client_id;
     telemetry_context.session_id = impl_->context.session_id;
     telemetry_context.candidate_id = impl_->context.candidate_id;
-    if (!impl_->telemetry.start(std::move(telemetry_context))) {
+    if (impl_->window_policy.managed_lockdown && !impl_->telemetry.start(std::move(telemetry_context))) {
         set_error(error, "exam telemetry context is invalid");
         stop(command_publication);
         return false;
@@ -3144,13 +3553,14 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
         set_error(error, "exam host window class registration failed");
         return false;
     }
-    const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    const int width = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN));
-    const int height = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    const bool managed = impl_->window_policy.managed_lockdown;
+    const int x = managed ? GetSystemMetrics(SM_XVIRTUALSCREEN) : CW_USEDEFAULT;
+    const int y = managed ? GetSystemMetrics(SM_YVIRTUALSCREEN) : CW_USEDEFAULT;
+    const int width = managed ? std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN)) : CW_USEDEFAULT;
+    const int height = managed ? std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN)) : CW_USEDEFAULT;
     impl_->window = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW, kExamWindowClass, kExamWindowTitle,
-        WS_POPUP, x, y, width, height, owner, nullptr, instance, impl_.get());
+        impl_->window_policy.extended_style, kExamWindowClass, kExamWindowTitle,
+        impl_->window_policy.style, x, y, width, height, owner, nullptr, instance, impl_.get());
     if (impl_->window == nullptr) {
         set_host_state(*impl_, ExamHostState::failed,
                        "Exam host window creation failed.");
@@ -3164,8 +3574,9 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
         stop(command_publication);
         return false;
     }
-    (void)SetTimer(impl_->window, kExamAliveTimerId, kExamAliveTimerPeriodMs,
-                   nullptr);
+    if (managed) {
+        (void)SetTimer(impl_->window, kExamAliveTimerId, kExamAliveTimerPeriodMs, nullptr);
+    }
 #if NSTU_HAS_WEBVIEW2
     if (!begin_initialization_watchdog(*impl_, generation)) {
         set_host_state(*impl_, ExamHostState::failed,
@@ -3186,20 +3597,23 @@ bool ExamHost::start(HWND owner, const ExamHostOptions& options,
         stop(command_publication);
         return false;
     }
-    impl_->keyboard_hook = SetWindowsHookExW(
-        WH_KEYBOARD_LL, exam_keyboard_proc, instance, 0);
-    if (impl_->keyboard_hook == nullptr) {
-        set_host_state(*impl_, ExamHostState::failed,
-                       "Exam keyboard hook could not be installed.");
-        set_error(error, "exam keyboard hook could not be installed");
-        stop(command_publication);
-        return false;
+    if (managed) {
+        impl_->keyboard_hook = SetWindowsHookExW(WH_KEYBOARD_LL, exam_keyboard_proc, instance, 0);
+        if (impl_->keyboard_hook == nullptr) {
+            set_host_state(*impl_, ExamHostState::failed,
+                           "Exam keyboard hook could not be installed.");
+            set_error(error, "exam keyboard hook could not be installed");
+            stop(command_publication);
+            return false;
+        }
+        g_keyboard_host = impl_.get();
     }
-    g_keyboard_host = impl_.get();
     resize_exam_window(*impl_);
     ShowWindow(impl_->window, SW_SHOW);
-    SetForegroundWindow(impl_->window);
-    SetFocus(impl_->window);
+    if (managed) {
+        SetForegroundWindow(impl_->window);
+        SetFocus(impl_->window);
+    }
 #if NSTU_HAS_WEBVIEW2
     begin_webview(*impl_, generation);
     if (impl_->state == ExamHostState::failed) {
@@ -3226,6 +3640,9 @@ void ExamHost::stop(std::uint64_t command_publication) noexcept {
     g_test_blocked_shortcuts.reset();
     ++impl_->operation_generation;
     impl_->stopping = true;
+    impl_->close_capture.stop();
+    impl_->contest_lifecycle.reset();
+    impl_->contest_lifecycle_pending = false;
 #if NSTU_HAS_WEBVIEW2
     impl_->webview_ready = false;
     impl_->last_blocked_resource_notice_ms = 0;
@@ -3303,10 +3720,87 @@ void ExamHost::stop(std::uint64_t command_publication) noexcept {
     impl_->stopping = false;
 }
 
+bool ExamHost::request_close() noexcept {
+    if (impl_ == nullptr || impl_->stopping || impl_->close_pending ||
+        impl_->options.policy != ExamHostPolicy::ordinary_user || !impl_->callbacks.before_close) return false;
+    impl_->close_pending = true;
+    // A host that never created an editable document may close an empty failed
+    // window through its owner's predicate, without inventing a browser capture.
+    std::optional<ExamCloseCaptureReport> captured;
+    try {
+        captured = impl_->close_capture.report();
+        if (impl_->editable_document_created && (!captured || !impl_->close_capture.is_current_complete(*captured))) {
+            (void)prepare_capture();
+            impl_->close_pending = false;
+            return false;
+        }
+    } catch (...) { impl_->close_pending = false; return false; }
+    const auto generation = impl_->operation_generation;
+    const auto document_generation = impl_->document_generation;
+    const auto pending_revision = impl_->programming_pending_revision;
+    bool preserved = false;
+    try {
+        const auto before_close = impl_->callbacks.before_close;
+        // Owner callbacks can enqueue/cancel/replace reentrantly. Keep their input
+        // stable and recheck the live capture after the callback before teardown.
+        const auto pending = impl_->programming_pending;
+        if (impl_->editable_document_created) {
+            preserved = impl_->close_capture.preserve([&](const ExamCloseCaptureReport&) { return before_close(pending); });
+        } else preserved = before_close(pending);
+    } catch (...) {
+        notify_status(*impl_, "Close preparation failed; the editor remains open.");
+    }
+    impl_->close_pending = false;
+    if (!preserved || generation != impl_->operation_generation || document_generation != impl_->document_generation ||
+        pending_revision != impl_->programming_pending_revision ||
+        (impl_->editable_document_created && (!captured || !impl_->close_capture.is_current_complete(*captured)))) return false;
+    stop(impl_->command_publication);
+    return true;
+}
+
+bool ExamHost::prepare_capture() noexcept {
+#if NSTU_HAS_WEBVIEW2
+    if (impl_ == nullptr || impl_->stopping || impl_->window_policy.managed_lockdown || !impl_->programming_package ||
+        !impl_->editable_document_created || !impl_->webview_ready || !impl_->webview) return false;
+    try {
+        return impl_->close_capture.prepare([&](std::string_view json) { return post_webview_json(*impl_, json); });
+    } catch (...) { return false; }
+#else
+    return false;
+#endif
+}
+
+bool ExamHost::cancel_capture() noexcept {
+    if (impl_ == nullptr || impl_->stopping || impl_->window_policy.managed_lockdown) return false;
+    try {
+        return impl_->close_capture.cancel([&](std::string_view json) {
+            notify_capture(*impl_); // Native evidence is already consumed before JS can release editing.
+#if NSTU_HAS_WEBVIEW2
+            return impl_->webview && post_webview_json(*impl_, json);
+#else
+            (void)json;
+            return false;
+#endif
+        });
+    } catch (...) { return false; }
+}
+
+std::optional<ExamCloseCaptureReport> ExamHost::capture_report() const {
+    return impl_ == nullptr ? std::nullopt : impl_->close_capture.report();
+}
+
 void ExamHost::drain_bridge() {
     if (impl_ == nullptr) return;
+    if (impl_->close_capture.expired()) (void)cancel_capture();
 #if NSTU_HAS_WEBVIEW2
     if (!impl_->webview_ready || impl_->webview == nullptr) return;
+    if (impl_->contest_lifecycle_pending && !impl_->window_policy.managed_lockdown) {
+        try {
+            if (impl_->contest_lifecycle.publish([&](std::string_view message) {
+                return post_webview_json(*impl_, message);
+            })) impl_->contest_lifecycle_pending = false;
+        } catch (...) { impl_->close_capture.invalidate(); }
+    }
     if (const auto enable_msg = exam_bridge().try_pop_telemetry_enable(
             impl_->command_publication)) {
         const auto enable = exam::decode_telemetry_enable(enable_msg->payload);
@@ -3315,6 +3809,9 @@ void ExamHost::drain_bridge() {
         }
     }
     while (const auto message = exam_bridge().try_pop()) {
+        if (!impl_->window_policy.managed_lockdown &&
+            message->type != AgentMessageType::exam_programming_response &&
+            message->type != AgentMessageType::exam_begin) continue;
         if (message->type == AgentMessageType::exam_answer_ack) {
             const auto ack = exam::decode_answer_ack(message->payload);
             if (ack.has_value() && ack->session_id == impl_->context.session_id) {
@@ -3337,7 +3834,10 @@ void ExamHost::drain_bridge() {
             const auto pending = impl_->programming_pending.find(response->request_id);
             if (pending == impl_->programming_pending.end()) continue;
             const auto validated = exam::programming::parse_response_json(json, &pending->second);
-            if (validated && post_webview_json(*impl_, validated->json)) impl_->programming_pending.erase(pending);
+            if (validated && post_webview_json(*impl_, validated->json)) {
+                impl_->programming_pending.erase(pending);
+                ++impl_->programming_pending_revision;
+            }
         } else if (message->type == AgentMessageType::exam_begin) {
             const auto begin = exam::decode_exam_begin_command(message->payload);
             if (begin.has_value() && same_context(*begin, impl_->context)) {
@@ -3352,7 +3852,7 @@ void ExamHost::drain_bridge() {
     // Answer/control bridge work above keeps priority over calibration retries.
     post_telemetry_enable(*impl_, true);
 #endif
-    if (impl_->telemetry.enabled() && impl_->callbacks.send_to_service) {
+    if (impl_->window_policy.managed_lockdown && impl_->telemetry.enabled() && impl_->callbacks.send_to_service) {
         const auto now_mono = impl_->telemetry.native_elapsed();
         if (!now_mono) return;
         const auto now_wall = static_cast<std::uint64_t>(
@@ -3370,9 +3870,23 @@ void ExamHost::drain_bridge() {
     }
 }
 
+bool ExamHost::apply_contest_lifecycle(const ExamHostContestLifecycle& lifecycle) noexcept {
+    if (!impl_ || impl_->stopping ||
+        (impl_->state != ExamHostState::initializing && impl_->state != ExamHostState::running && impl_->state != ExamHostState::degraded) ||
+        impl_->window_policy.managed_lockdown ||
+        !impl_->programming_package || !same_context(lifecycle.context, impl_->context) ||
+        (lifecycle.server_start != 0 && lifecycle.deadline - lifecycle.server_start !=
+            static_cast<std::uint64_t>(impl_->contest_duration_seconds) * 1000)) return false;
+    try {
+        if (!impl_->contest_lifecycle.accept(lifecycle)) return false;
+        impl_->contest_lifecycle_pending = true;
+        return true;
+    } catch (...) { impl_->close_capture.invalidate(); return false; }
+}
+
 void ExamHost::enforce_foreground() noexcept {
     if (impl_ == nullptr || impl_->window == nullptr || impl_->stopping ||
-        impl_->state != ExamHostState::running) return;
+        impl_->state != ExamHostState::running || !impl_->window_policy.managed_lockdown) return;
     SetWindowPos(impl_->window, HWND_TOPMOST, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     if (GetForegroundWindow() != impl_->window) SetForegroundWindow(impl_->window);
@@ -3415,7 +3929,8 @@ bool ExamHost::handle_window_message(UINT message, WPARAM wparam,
 
 bool ExamHost::apply_telemetry_enable(
     const nstu::exam::TelemetryEnable& enable) noexcept {
-    if (impl_ == nullptr || impl_->stopping || impl_->state == ExamHostState::failed) {
+    if (impl_ == nullptr || impl_->stopping || impl_->state == ExamHostState::failed ||
+        !impl_->window_policy.managed_lockdown) {
         return false;
     }
     if (!impl_->telemetry.apply_enable(enable)) {

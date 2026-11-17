@@ -354,4 +354,76 @@ view.refresh(); assert.equal(descendants(root).filter(node => node.className ===
 editors[0].emit('keydown', { key: 'z', ctrlKey: true });
 assert.equal(editors[0].value, '', 'composition undo restores the preceding source as one edit');
 assert.equal(all.find(node => node.textContent === 'Run sample').disabled, true, 'preview never invents execution readiness');
+const closeToken = { current: () => true, cancelers: new Set() };
+editors[0].emit('compositionstart');
+assert.equal(view.capture_for_close(closeToken), null, 'synchronous snapshot refuses a composing buffer');
+const compositionBarrier = view.wait_for_close(closeToken);
+editors[0].value = 'latest barrier source\r\n'; editors[0].emit('compositionend');
+assert.equal(await compositionBarrier, true);
+const synchronizedCapture = view.capture_for_close(closeToken);
+assert.ok(Array.isArray(synchronizedCapture), 'capture returns current snapshots synchronously after the separate composition barrier');
+assert.equal(synchronizedCapture[0].source, 'latest barrier source\r\n');
+assert.equal(view.matches_close_capture(synchronizedCapture), true);
+editors[0].value = 'newer unreported source';
+assert.equal(view.matches_close_capture(synchronizedCapture), false, 'post-snapshot source changes invalidate the capture');
+
+const closeEmpty = harness(); closeEmpty.session.document('a', 'cpp20'); closeEmpty.session.document('a', 'python3');
+closeEmpty.session.recover();
+assert.deepEqual(clone(closeEmpty.session.flush_for_close().documents), [], 'unrecovered empty editor buffers never overwrite remote documents');
+const closeDrafts = harness();
+closeDrafts.session.update('a', 'cpp20', '\t// xin chào\r\n\n');
+closeDrafts.session.update('a', 'python3', 'print("ế")\r\n');
+const closeRevision = closeDrafts.session.document('a', 'cpp20').revision;
+const closeInventory = closeDrafts.session.flush_for_close();
+assert.equal(closeInventory.type, 'exam_programming_close_inventory');
+assert.equal(closeInventory.complete, true); assert.equal(closeInventory.localSaved, true);
+assert.equal(closeInventory.documents.length, 2);
+assert.equal(closeDrafts.session.document('a', 'cpp20').revision, closeRevision);
+for (const item of closeInventory.documents) {
+  const intent = closeDrafts.messages.find(message => message.requestId === item.requestId);
+  assert.equal(intent.operation, 'draft'); assert.equal(item.status, 'forwarded');
+  assert.equal(item.sourceDigest, hash(intent.source)); assert.ok(item.requestId.length <= 96);
+}
+assert.equal(JSON.stringify(closeInventory).includes('xin chào'), false, 'capture inventory contains no source');
+assert.equal(closeDrafts.messages.some(message => ['submit', 'finalize', 'run', 'ready'].includes(message.operation)), false);
+assert.deepEqual(clone(closeDrafts.session.flush_for_close().documents), clone(closeInventory.documents), 'capture retry reuses immutable source IDs');
+assert.equal(harness(null, true).session.flush_for_close().complete, false);
+const queuedClose = harness(null, false, false); queuedClose.session.update('a', 'cpp20', 'kept offline');
+const queuedInventory = queuedClose.session.flush_for_close();
+assert.equal(queuedInventory.complete, false); assert.equal(queuedInventory.localSaved, true);
+assert.equal(queuedInventory.documents[0].status, 'queued'); assert.equal(queuedClose.session.frozen(), false);
+assert.equal(conflictRecovery.session.flush_for_close().complete, true);
+assert.equal(editableConflictReload.session.flush_for_close().complete, true);
+assert.equal(harness(editableConflictSnapshot).session.flush_for_close().complete, false, 'unresolved conflicting source retains the editor');
+const olderRemoteClose = harness(); olderRemoteClose.session.update('a', 'cpp20', 'newest local'); olderRemoteClose.session.update('a', 'cpp20', 'newer local');
+assert.equal(olderRemoteClose.session.receive(recoveredMessage(olderRemoteClose.session.request('recover', 'a', 'cpp20'), 'older remote', 2)), true);
+const latestClose = olderRemoteClose.session.flush_for_close();
+assert.equal(olderRemoteClose.messages.find(message => message.requestId === latestClose.documents[0].requestId).source, 'newer local');
+const deliberateEmptyClose = harness(); deliberateEmptyClose.session.update('a', 'cpp20', 'erase me'); deliberateEmptyClose.session.update('a', 'cpp20', '');
+assert.equal(deliberateEmptyClose.session.flush_for_close().documents.length, 1, 'deliberately erased known source is captured');
+const restoredEmptyClose = harness(deliberateEmptyClose.values.get('session'));
+assert.equal(restoredEmptyClose.session.flush_for_close().documents.length, 1, 'known deliberately empty drafts survive restart');
+const completeRecoveryClose = harness(); completeRecoveryClose.session.recover();
+const emptyRemote = completeRecoveryClose.messages.find(message => message.operation === 'recover');
+assert.equal(completeRecoveryClose.session.receive(recoveredMessage(emptyRemote, '', 0)), true);
+assert.equal(completeRecoveryClose.session.flush_for_close().documents.length, 1, 'a successfully recovered empty remote document is known');
+const fullManifest = manifest(); fullManifest.questions = Array.from({ length: 64 }, (_, index) => ({ ...fullManifest.questions[0], id: `problem-${index}` }));
+const fullMessages = [], fullValues = new Map();
+const fullClose = api.createSession(fullManifest, { context, key: 'full-close', storage: { getItem: key => fullValues.get(key), setItem: (key, value) => fullValues.set(key, value) }, hash,
+  send: message => { fullMessages.push(clone(message)); return true; } });
+for (const problem of fullManifest.questions) for (const language of api.LANGUAGES) fullClose.update(problem.id, language, `${problem.id}\t${language}\r\n`);
+assert.equal(fullClose.flush_for_close().documents.length, 128, 'maximum public package produces bounded inventory for both languages');
+assert.equal(fullMessages.length, 128);
+const returnedSource = harness(); returnedSource.session.update('a', 'cpp20', 'same source');
+const previousSource = returnedSource.session.request('submit', 'a', 'cpp20');
+assert.equal(returnedSource.session.receive({ ...receipt, requestId: previousSource.requestId, draftRevision: previousSource.draftRevision, sourceDigest: hash(previousSource.source) }), true);
+assert.equal(returnedSource.session.flush_for_close().documents[0].status, 'received');
+returnedSource.session.update('a', 'cpp20', 'different source'); returnedSource.session.update('a', 'cpp20', 'same source');
+const returnedInventory = returnedSource.session.flush_for_close();
+assert.equal(returnedInventory.documents[0].status, 'forwarded', 'same bytes at a newer revision need an exact current source intent');
+assert.notEqual(returnedInventory.documents[0].requestId, previousSource.requestId);
+for (const knownDocuments of [null, ['foreign:cpp20'], Array(129).fill('a:cpp20'), ['a:cpp20', 'a:cpp20']]) {
+  const stored = JSON.parse(deliberateEmptyClose.values.get('session')); stored.knownDocuments = knownDocuments;
+  assert.equal(harness(JSON.stringify(stored)).session.flush_for_close().complete, false, 'invalid known-document recovery markers fail closed');
+}
 console.log('Programming public projection, byte limits, language drafts, snapshots, receipts and finalization: PASS');

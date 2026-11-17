@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <memory>
 
 namespace nstu::security {
 namespace {
@@ -58,11 +59,10 @@ std::wstring temporary_secret_path(const std::wstring& final_path) {
            L"-" + std::to_wstring(suffix);
 }
 
-} // namespace
-
-std::vector<std::byte> protect_machine_secret(
+std::vector<std::byte> protect_secret(
     std::span<const std::byte> plaintext,
-    std::span<const std::byte> optional_entropy, std::string* error) {
+    std::span<const std::byte> optional_entropy, std::string* error,
+    DWORD flags, const wchar_t* description) {
     if (plaintext.empty() || plaintext.size() > std::numeric_limits<DWORD>::max() ||
         optional_entropy.size() > std::numeric_limits<DWORD>::max()) {
         set_error(error, "invalid secret size");
@@ -71,23 +71,25 @@ std::vector<std::byte> protect_machine_secret(
     auto input = blob_from(plaintext);
     auto entropy = blob_from(optional_entropy);
     DATA_BLOB output{};
-    if (!CryptProtectData(&input, L"NSTU machine secret",
+    if (!CryptProtectData(&input, description,
                           optional_entropy.empty() ? nullptr : &entropy, nullptr,
-                          nullptr, CRYPTPROTECT_LOCAL_MACHINE |
-                                       CRYPTPROTECT_UI_FORBIDDEN,
+                          nullptr, flags | CRYPTPROTECT_UI_FORBIDDEN,
                           &output)) {
         set_error(error, "CryptProtectData failed");
         return {};
     }
+    const auto release = [size = output.cbData](BYTE* data) {
+        SecureZeroMemory(data, size);
+        LocalFree(data);
+    };
+    const std::unique_ptr<BYTE, decltype(release)> owner(output.pbData, release);
     std::vector<std::byte> protected_blob(output.cbData);
     std::copy_n(reinterpret_cast<const std::byte*>(output.pbData), output.cbData,
                 protected_blob.begin());
-    SecureZeroMemory(output.pbData, output.cbData);
-    LocalFree(output.pbData);
     return protected_blob;
 }
 
-std::vector<std::byte> unprotect_machine_secret(
+std::vector<std::byte> unprotect_secret(
     std::span<const std::byte> protected_blob,
     std::span<const std::byte> optional_entropy, std::string* error) {
     if (protected_blob.empty() ||
@@ -110,12 +112,42 @@ std::vector<std::byte> unprotect_machine_secret(
     if (description != nullptr) {
         LocalFree(description);
     }
+    const auto release = [size = output.cbData](BYTE* data) {
+        SecureZeroMemory(data, size);
+        LocalFree(data);
+    };
+    const std::unique_ptr<BYTE, decltype(release)> owner(output.pbData, release);
     std::vector<std::byte> plaintext(output.cbData);
     std::copy_n(reinterpret_cast<const std::byte*>(output.pbData), output.cbData,
                 plaintext.begin());
-    SecureZeroMemory(output.pbData, output.cbData);
-    LocalFree(output.pbData);
     return plaintext;
+}
+
+} // namespace
+
+std::vector<std::byte> protect_machine_secret(
+    std::span<const std::byte> plaintext,
+    std::span<const std::byte> optional_entropy, std::string* error) {
+    return protect_secret(plaintext, optional_entropy, error,
+                          CRYPTPROTECT_LOCAL_MACHINE, L"NSTU machine secret");
+}
+
+std::vector<std::byte> protect_user_secret(
+    std::span<const std::byte> plaintext,
+    std::span<const std::byte> optional_entropy, std::string* error) {
+    return protect_secret(plaintext, optional_entropy, error, 0, L"NSTU user secret");
+}
+
+std::vector<std::byte> unprotect_machine_secret(
+    std::span<const std::byte> protected_blob,
+    std::span<const std::byte> optional_entropy, std::string* error) {
+    return unprotect_secret(protected_blob, optional_entropy, error);
+}
+
+std::vector<std::byte> unprotect_user_secret(
+    std::span<const std::byte> protected_blob,
+    std::span<const std::byte> optional_entropy, std::string* error) {
+    return unprotect_secret(protected_blob, optional_entropy, error);
 }
 
 bool save_machine_secret(std::wstring_view path,
